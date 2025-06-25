@@ -3,7 +3,7 @@
 client_id = "be8e8039e18f100d31437e7c4dcfe1b0"
 name = "RSL Services"
 handle = "rsl-services-1"
-application_url = "https://calculate-gateway-gallery-cork.trycloudflare.com"
+application_url = "https://gauge-rats-airport-warcraft.trycloudflare.com"
 embedded = true
 
 [build]
@@ -23,13 +23,13 @@ api_version = "2025-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products"
+scopes = "read_inventory,read_locales,read_locations,write_inventory,write_locales,write_locations,write_products"
 
 [auth]
 redirect_urls = [
-  "https://calculate-gateway-gallery-cork.trycloudflare.com/auth/callback",
-  "https://calculate-gateway-gallery-cork.trycloudflare.com/auth/shopify/callback",
-  "https://calculate-gateway-gallery-cork.trycloudflare.com/api/auth/callback"
+  "https://gauge-rats-airport-warcraft.trycloudflare.com/auth/callback",
+  "https://gauge-rats-airport-warcraft.trycloudflare.com/auth/shopify/callback",
+  "https://gauge-rats-airport-warcraft.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]
