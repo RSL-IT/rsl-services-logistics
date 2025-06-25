@@ -11,6 +11,7 @@ import {
   Frame,
   Toast,
   Select,
+  Modal,
 } from "@shopify/polaris";
 import { useEffect, useState } from "react";
 import { authenticate } from "../shopify.server";
@@ -117,7 +118,6 @@ export const loader = async ({ request }) => {
               value: v.id,
             });
           }
-
         }
       }
 
@@ -227,6 +227,9 @@ export const action = async ({ request }) => {
 };
 
 export default function InventoryPage() {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [pendingSelection, setPendingSelection] = useState(null); // { item, variantId, condition }
+
   const fetcher = useFetcher();
   const { items, locationId, error } = useLoaderData();
   const actionData = useActionData();
@@ -255,12 +258,10 @@ export default function InventoryPage() {
   const headings = [
     { title: "Product" },
     { title: "Variant" },
-    { title: "SKU" },
-    { title: "Tracked" },
-    ...quantityTypes.map((name) => ({
-      title: name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-    })),
+    { title: "SKU", alignment: "center" },
+    { title: "Awaiting Evaluation", alignment: "center" },
   ];
+
 
   const handleMoveToSafetyStock = () => {
     fetcher.submit(
@@ -292,6 +293,55 @@ export default function InventoryPage() {
 
   return (
     <Frame>
+      <Modal
+      open={modalOpen}
+      onClose={() => setModalOpen(false)}
+      title="Confirm Open-Box Evaluation"
+      primaryAction={{
+        content: "Confirm",
+        onAction: () => {
+          const { item, variantId } = pendingSelection;
+          fetcher.submit(
+            {
+              actionType: "updateVariant",
+              variantId,
+              itemId: item.id,
+            },
+            { method: "post" }
+          );
+
+          fetcher.load("/app/returns");
+          setModalOpen(false);
+          setPendingSelection(null);
+        },
+      }}
+      secondaryActions={[
+        {
+          content: "Cancel",
+          onAction: () => setModalOpen(false),
+        },
+      ]}
+    >
+        <Modal.Section>
+          <Text as="p">
+            Confirm that this{" "}
+            <u>
+              {pendingSelection?.option1} {pendingSelection?.item.productTitle}
+            </u>{" "}
+            (<strong>{pendingSelection?.item.sku}</strong>) has been evaluated as condition{" "}
+
+            <u>{pendingSelection?.condition}</u>{" "}(<strong>
+              {
+                pendingSelection?.item.sku?.slice(0, -1) +
+                (pendingSelection?.condition?.charAt(0) || "")
+              }
+            </strong>){" "}
+            and should be added to the open-box inventory.
+          </Text>
+        </Modal.Section>
+
+      </Modal>
+
       <Page title="US Quarantine Inventory">
         {errorMarkup}
         {error && (
@@ -310,40 +360,48 @@ export default function InventoryPage() {
               >
                 {items.map((item, index) => (
                   <IndexTable.Row id={item.id} key={item.id} position={index}>
-                    <IndexTable.Cell flush>{item.productTitle}</IndexTable.Cell>
-                    <IndexTable.Cell flush>
+                    <IndexTable.Cell>{item.productTitle}</IndexTable.Cell>
+
+                    <IndexTable.Cell>
                       <fetcher.Form method="post">
                         <input type="hidden" name="actionType" value="updateVariant" />
                         <input type="hidden" name="itemId" value={item.id} />
-                        <Select
-                          labelHidden
-                          name="variantId"
-                          options={[
-                            { label: "Set Evaluated Condition", value: "", disabled: true },
-                            ...item.variantOptions,
-                          ]}
-                          value="" // Always default to the placeholder
-                          onChange={(value) => {
-                            fetcher.submit(
-                              {
-                                actionType: "updateVariant",
-                                variantId: value,
-                                itemId: item.id,
-                              },
-                              { method: "post" }
-                            );
-                          }}
-                        />
-                      </fetcher.Form>
+                        <div style={{ marginRight: "1rem" }}>
+                          <Select
+                            labelHidden
+                            name="variantId"
+                            options={[
+                              { label: "Set Condition", value: "", disabled: true },
+                              ...item.variantOptions,
+                            ]}
+                            value=""
+                            onChange={(value) => {
+                              const selected = item.variantOptions.find((opt) => opt.value === value);
+                              const condition = selected?.label ?? "unknown condition";
+                              const option1 = item.variantTitle.split(" / ")[0]; // assuming title like "Large / A. Mint"
 
+                              setPendingSelection({
+                                item,
+                                variantId: value,
+                                condition,
+                                option1,
+                              });
+
+                              setModalOpen(true);
+                            }}
+
+                          />
+                        </div>
+                      </fetcher.Form>
                     </IndexTable.Cell>
-                    <IndexTable.Cell flush>{item.sku}</IndexTable.Cell>
-                    <IndexTable.Cell flush>{item.tracked ? "Yes" : "No"}</IndexTable.Cell>
-                    {quantityTypes.map((type) => (
-                      <IndexTable.Cell flush key={type}>
-                        {item.quantityMap[type] ?? "—"}
-                      </IndexTable.Cell>
-                    ))}
+
+                    <IndexTable.Cell style={{ textAlign: "center" }}>
+                      {item.sku}
+                    </IndexTable.Cell>
+
+                    <IndexTable.Cell style={{ textAlign: "center" }}>
+                      {item.quantityMap["quality_control"] ?? "—"}
+                    </IndexTable.Cell>
                   </IndexTable.Row>
                 ))}
               </IndexTable>
