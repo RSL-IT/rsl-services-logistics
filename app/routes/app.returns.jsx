@@ -56,6 +56,10 @@ export const loader = async ({ request }) => {
                 variant {
                   id
                   title
+                  selectedOptions {
+                    name
+                    value
+                  }
                   product {
                     id
                     title
@@ -64,6 +68,10 @@ export const loader = async ({ request }) => {
                         node {
                           id
                           title
+                          selectedOptions {
+                            name
+                            value
+                          }
                         }
                       }
                     }
@@ -90,6 +98,29 @@ export const loader = async ({ request }) => {
       const variant = item.variant;
       const product = variant?.product;
 
+      const currentFirstOption = variant?.selectedOptions?.[0]?.value;
+      const variantOptions = [];
+
+      if (product?.variants?.edges?.length) {
+        for (const vEdge of product.variants.edges) {
+          const v = vEdge.node;
+          const option1 = v.selectedOptions?.[0]?.value;
+          const option2 = v.selectedOptions?.[1];
+
+          if (
+            option1 === currentFirstOption &&
+            option2 &&
+            /^[ABC]\./.test(option2.value)
+          ) {
+            variantOptions.push({
+              label: option2.value,
+              value: v.id,
+            });
+          }
+
+        }
+      }
+
       return {
         id: `${index}`,
         inventoryItemId: item.id,
@@ -98,13 +129,13 @@ export const loader = async ({ request }) => {
         productTitle: product?.title || "Unknown Product",
         variantTitle: variant?.title || "Untitled Variant",
         variantId: variant?.id,
-        variantOptions: product?.variants?.edges?.map((v) => ({
-          label: v.node.title,
-          value: v.node.id,
-        })) || [],
-        quantityMap: Object.fromEntries((edge.node.quantities || []).map((q) => [q.name, q.quantity])),
+        variantOptions,
+        quantityMap: Object.fromEntries(
+          (edge.node.quantities || []).map((q) => [q.name, q.quantity])
+        ),
       };
     }).filter(Boolean) || [];
+
 
   return json({ items, locationId });
 };
@@ -287,8 +318,11 @@ export default function InventoryPage() {
                         <Select
                           labelHidden
                           name="variantId"
-                          options={item.variantOptions}
-                          value={item.variantId}
+                          options={[
+                            { label: "Set Evaluated Condition", value: "", disabled: true },
+                            ...item.variantOptions,
+                          ]}
+                          value="" // Always default to the placeholder
                           onChange={(value) => {
                             fetcher.submit(
                               {
@@ -301,6 +335,7 @@ export default function InventoryPage() {
                           }}
                         />
                       </fetcher.Form>
+
                     </IndexTable.Cell>
                     <IndexTable.Cell flush>{item.sku}</IndexTable.Cell>
                     <IndexTable.Cell flush>{item.tracked ? "Yes" : "No"}</IndexTable.Cell>
