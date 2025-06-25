@@ -93,8 +93,8 @@ export const loader = async ({ request }) => {
   const inventoryResponse = await admin.graphql(inventoryQuery);
   const inventoryJson = await inventoryResponse.json();
 
-  const items =
-    inventoryJson?.data?.location?.inventoryLevels?.edges?.map((edge, index) => {
+  const items = inventoryJson?.data?.location?.inventoryLevels?.edges
+    ?.map((edge, index) => {
       const item = edge.node.item;
       const variant = item.variant;
       const product = variant?.product;
@@ -121,6 +121,10 @@ export const loader = async ({ request }) => {
         }
       }
 
+      const quantityMap = Object.fromEntries(
+        (edge.node.quantities || []).map((q) => [q.name, q.quantity])
+      );
+
       return {
         id: `${index}`,
         inventoryItemId: item.id,
@@ -130,11 +134,13 @@ export const loader = async ({ request }) => {
         variantTitle: variant?.title || "Untitled Variant",
         variantId: variant?.id,
         variantOptions,
-        quantityMap: Object.fromEntries(
-          (edge.node.quantities || []).map((q) => [q.name, q.quantity])
-        ),
+        quantityMap,
       };
-    }).filter(Boolean) || [];
+    })
+    .filter(
+      (item) => item.quantityMap["quality_control"] && item.quantityMap["quality_control"] >= 1
+    ) || [];
+
 
 
   return json({ items, locationId });
@@ -299,21 +305,57 @@ export default function InventoryPage() {
       title="Confirm Open-Box Evaluation"
       primaryAction={{
         content: "Confirm",
-        onAction: () => {
-          const { item, variantId } = pendingSelection;
-          fetcher.submit(
-            {
-              actionType: "updateVariant",
-              variantId,
-              itemId: item.id,
-            },
-            { method: "post" }
-          );
+        onAction: async () => {
+          const { item } = pendingSelection;
 
-          fetcher.load("/app/returns");
-          setModalOpen(false);
-          setPendingSelection(null);
-        },
+          const mutation = `
+            mutation ($input: InventoryAdjustQuantitiesInput!) {
+              inventoryAdjustQuantities(input: $input) {
+                inventoryAdjustmentGroup {
+                  id
+                  reason
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `;
+
+          const variables = {
+            input: {
+              name: "quality_control",
+              reason: "received",
+              changes: [
+                {
+                  delta: -1,
+                  inventoryItemId: item.inventoryItemId,
+                  locationId: locationId, // make sure this is in scope
+                  ledgerDocumentUri: "https://docs.google.com/spreadsheets/d/1ET80aQp44Jk5cFTCeHiOXjrR5s7ncbZmfahRrgUBp9s/edit?usp=sharing"
+                },
+              ],
+            },
+            quantityName: "quality_control", // optional; mutation doesn't need this explicitly
+          };
+
+          const response = await fetch("/app/inventory-adjust", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mutation, variables }),
+          });
+
+          const result = await response.json();
+
+          if (result.success) {
+            fetcher.load("/app/returns"); // refresh UI
+            setModalOpen(false);
+            setPendingSelection(null);
+          } else {
+            console.error("Inventory adjustment failed:", result.errors);
+          }
+        }
+        ,
       }}
       secondaryActions={[
         {

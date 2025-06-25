@@ -23,7 +23,7 @@ export default function App() {
           Home
         </Link>
         <Link to="/app/returns">Return Handling</Link>
-        <Link to="/app/additional">Additional page</Link>
+        <Link to="/app/inprocess">In-Process</Link>
       </NavMenu>
       <Outlet />
     </AppProvider>
