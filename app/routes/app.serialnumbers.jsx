@@ -13,7 +13,7 @@ import { TitleBar } from "@shopify/app-bridge-react";
 export default function AdditionalPage() {
   return (
     <Page>
-      <TitleBar title="Serial Number Lookup" />
+      <TitleBar title="Additional page" />
       <Layout>
         <Layout.Section>
           <Card>
