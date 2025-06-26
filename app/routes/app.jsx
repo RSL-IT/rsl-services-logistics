@@ -24,6 +24,7 @@ export default function App() {
         </Link>
         <Link to="/app/returns">Return Handling</Link>
         <Link to="/app/inprocess">In-Process</Link>
+        <Link to="/app/serialnumbers">Serial Number Services</Link>
       </NavMenu>
       <Outlet />
     </AppProvider>
