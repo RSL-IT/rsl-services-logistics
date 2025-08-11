@@ -1,5 +1,5 @@
 import { json, redirect } from "@remix-run/node";
-import { useLoaderData, useFetcher, useNavigation, useActionData } from "@remix-run/react";
+import { useLoaderData, useFetcher, useNavigation, useActionData, useRevalidator } from "@remix-run/react";
 import {
   IndexTable,
   Page,
@@ -15,6 +15,7 @@ import {
 } from "@shopify/polaris";
 import { useEffect, useState } from "react";
 import { authenticate } from "../shopify.server";
+import {TitleBar} from "@shopify/app-bridge-react";
 
 export const meta = () => [{ title: "US Quarantine Inventory" }];
 
@@ -141,8 +142,6 @@ export const loader = async ({ request }) => {
       (item) => item.quantityMap["quality_control"] && item.quantityMap["quality_control"] >= 1
     ) || [];
 
-
-
   return json({ items, locationId });
 };
 
@@ -240,6 +239,8 @@ export default function InventoryPage() {
   const { items, locationId, error } = useLoaderData();
   const actionData = useActionData();
   const navigation = useNavigation();
+  const { revalidate } = useRevalidator();
+
 
   const [toastActive, setToastActive] = useState(false);
 
@@ -348,7 +349,7 @@ export default function InventoryPage() {
           const result = await response.json();
 
           if (result.success) {
-            fetcher.load("/app/returns"); // refresh UI
+            revalidate(); // refresh UI
             setModalOpen(false);
             setPendingSelection(null);
           } else {
@@ -384,7 +385,8 @@ export default function InventoryPage() {
 
       </Modal>
 
-      <Page title="US Quarantine Inventory">
+      <Page>
+        <TitleBar title="Return Handling" />
         {errorMarkup}
         {error && (
           <Card sectioned>
@@ -455,5 +457,4 @@ export default function InventoryPage() {
       </Page>
     </Frame>
   );
-
 }

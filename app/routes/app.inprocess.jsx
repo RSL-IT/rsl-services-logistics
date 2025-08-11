@@ -8,8 +8,13 @@ import {
   Layout,
   Frame,
   Link,
+  Tooltip,
+  Popover,
+  Box,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
+import {TitleBar} from "@shopify/app-bridge-react";
+import { useState } from "react";
 
 export const meta = () => [{ title: "Returns In Progress" }];
 
@@ -30,6 +35,7 @@ export const loader = async ({ request }) => {
               email
             }
             returnStatus
+            shippingAddress { address1 city province zip country }
             lineItems(first: 5) {
               edges {
                 node {
@@ -56,6 +62,11 @@ export const loader = async ({ request }) => {
         id: `${index}-${itemIndex}`,
         orderId: order.id,
         orderName: order.name,
+        orderAddress: order.shippingAddress?.address1,
+        orderProvince: order.shippingAddress?.province,
+        orderCity: order.shippingAddress?.city,
+        orderZip: order.shippingAddress?.zip,
+        orderCountry: order.shippingAddress?.country,
         customerName: order.customer?.displayName || "Unknown",
         email: order.customer?.email,
         returnStatus: order.returnStatus,
@@ -70,6 +81,8 @@ export const loader = async ({ request }) => {
 
 export default function ReturnOrdersPage() {
   const { items, shop } = useLoaderData();
+  const [openId, setOpenId] = useState(null);
+
 
   const headings = [
     { title: "Order" },
@@ -82,7 +95,8 @@ export default function ReturnOrdersPage() {
 
   return (
     <Frame>
-      <Page title="Return Orders">
+      <Page>
+        <TitleBar title="Returns" />
         <Layout>
           <Layout.Section>
             <Card>
@@ -103,7 +117,44 @@ export default function ReturnOrdersPage() {
                         {item.orderName}
                       </a>
                     </IndexTable.Cell>
-                    <IndexTable.Cell>{item.customerName}</IndexTable.Cell>
+
+                    <IndexTable.Cell>
+                      {/* Wrap activator + popover so hover over either keeps it open */}
+                      <span
+                        onMouseEnter={() => setOpenId(item.id)}
+                        onMouseLeave={() => setOpenId(null)}
+                        style={{ display: "inline-block" }}
+                      >
+                      <Popover
+                        active={openId === item.id}
+                        onClose={() => setOpenId(null)}
+                        preferredPosition="below"
+                        autofocusTarget="none"
+                        activator={
+                          // IMPORTANT: title="" suppresses the native tooltip Polaris applies on truncation
+                          <span title="" style={{ cursor: "help" }}>
+                            <Text as="span" variant="bodyMd">{item.customerName}</Text>
+                          </span>
+                        }
+                      >
+                        <Box padding="300" maxWidth="280px">
+                          <Text as="p" variant="bodySm" fontWeight="semibold">
+                            {item.customerName}
+                          </Text>
+                          {item.orderAddress && (
+                            <Text as="p" variant="bodySm">{item.orderAddress}</Text>
+                          )}
+                          <Text as="p" variant="bodySm">
+                            {[item.orderCity, item.orderProvince].filter(Boolean).join(", ")}{" "}
+                            {item.orderZip || ""}
+                          </Text>
+                          <Text as="p" variant="bodySm">{item.orderCountry}</Text>
+                        </Box>
+                      </Popover>
+                    </span>
+                    </IndexTable.Cell>
+
+
                     <IndexTable.Cell>{item.email}</IndexTable.Cell>
                     <IndexTable.Cell>{item.returnStatus}</IndexTable.Cell>
                     <IndexTable.Cell>{item.title}</IndexTable.Cell>
