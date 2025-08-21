@@ -9,8 +9,8 @@ generator client {
 // enough when changing adapters.
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -29,4 +29,130 @@ model Session {
   locale        String?
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
+}
+
+model tblkp_RepairEntryDateReceived {
+  id                                                 Int      @id @default(autoincrement())
+  return_warranty_claim_processing_repair_department DateTime @db.Timestamptz
+
+  @@map("repair_entry_date_received")
+}
+
+model tblkp_RepairEntryConditionReceived {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("repair_entry_condition_received")
+}
+
+model tblkp_RepairEntryDateInspected {
+  id    Int      @id @default(autoincrement())
+  value DateTime @db.Timestamptz
+
+  @@map("repair_entry_date_inspected")
+}
+
+model tblkp_RepairEntryPhotos {
+  id    Int     @id @default(autoincrement())
+  value Boolean @db.Boolean
+
+  @@map("repair_entry_photos")
+}
+
+model tblkp_RepairEntryDiagnosis {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("repair_entry_diagnosis")
+}
+
+model tblkp_RepairEntryDisposition {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("repair_entry_disposition")
+}
+
+model tblkp_RepairEntryReplacedItems {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("repair_entry_replaced_items")
+}
+
+model tblkp_RepairEntryFeedbackToCsd {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("repair_entry_feedback_to_csd")
+}
+
+model tblkp_RepairEntryReturnsRepairStatus {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("repair_entry_returns_repair_status")
+}
+
+model tblkp_RepairEntryReplacementItemDeliveryDate {
+  id    Int      @id @default(autoincrement())
+  value DateTime @db.Timestamptz
+
+  @@map("repair_entry_replacement_item_delivery_date")
+}
+
+model tblkp_CsdPrimaryCustomerReportedReasonForReturnWarranty {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("csd_primary_customer_reported_reason_for_return_warranty")
+}
+
+model tblkp_CsdItem {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("csd_item")
+}
+
+model tblkp_CsdReturnType {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("csd_return_type")
+}
+
+model tblkp_CsdTroubleshootingNotes {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("csd_troubleshooting_notes")
+}
+
+model tblkp_CsdCustomerServiceStatus {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("csd_customer_service_status")
+}
+
+model tblkp_CsdRslCsd {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("csd_rsl_csd")
+}
+
+model tblkp_CsdReturnItemRequired {
+  id    Int     @id @default(autoincrement())
+  value Boolean @db.Boolean
+
+  @@map("csd_return_item_required")
+}
+
+model tblkp_CsdRefundEligible {
+  id    Int    @id @default(autoincrement())
+  value String @db.Text
+
+  @@map("csd_refund_eligible")
 }
