@@ -156,3 +156,50 @@ model tblkp_CsdRefundEligible {
 
   @@map("csd_refund_eligible")
 }
+
+model CsdEntry {
+  id Int @id @default(autoincrement())
+
+  serviceNumber                                  DateTime  @map("service_number") @db.Timestamptz
+  dateOfReturnRequest                            DateTime? @map("date_of_return_request") @db.Timestamptz
+  originalOrder                                  String?   @map("original_order") @db.Text
+  customerName                                   String?   @map("customer_name") @db.Text
+  primaryCustomerReportedReasonForReturnWarranty String?   @map("primary_customer_reported_reason_for_return_warranty") @db.Text
+  colUnnamed                                     String?   @map("col_unnamed") @db.Text
+  item                                           String?   @map("item") @db.Text
+  replacementOrder                               String?   @map("replacement_order") @db.Text
+  returnType                                     String?   @map("return_type") @db.Text
+  troubleshootingNotes                           String?   @map("troubleshooting_notes") @db.Text
+  customerServiceStatus                          String?   @map("customer_service_status") @db.Text
+  rslCsd                                         String?   @map("rsl_csd") @db.Text
+  returnItemRequired                             Boolean?  @map("return_item_required") @db.Boolean
+  repairDeptDesignation                          String?   @map("repair_dept_designation") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  @@map("csd_entry")
+}
+
+model RepairEntry {
+  id Int @id @default(autoincrement())
+
+  serviceNumber         DateTime? @map("service_number") @db.Timestamptz
+  dateOfRepairRequest   DateTime? @map("date_of_repair_request") @db.Timestamptz
+  originalOrder         String?   @map("original_order") @db.Text
+  customerName          String?   @map("customer_name") @db.Text
+  item                  String?   @map("item") @db.Text
+  replacementOrder      String?   @map("replacement_order") @db.Text
+  repairType            String?   @map("repair_type") @db.Text
+  repairNotes           String?   @map("repair_notes") @db.Text
+  customerServiceStatus String?   @map("customer_service_status") @db.Text
+  rslRepairDept         String?   @map("rsl_repair_dept") @db.Text
+  repairCompleted       Boolean?  @map("repair_completed") @db.Boolean
+  repairDeptDesignation String?   @map("repair_dept_designation") @db.Text
+
+  // Shopify-style timestamps
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  @@map("repair_entry")
+}
