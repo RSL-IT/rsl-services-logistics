@@ -1,0 +1,38 @@
+# fly.toml app configuration file generated for rsl-services-app-summer-field-1763 on 2025-08-11T17:06:49-05:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'rsl-services-app'
+primary_region = 'ord'
+
+[build]
+
+[env]
+  PORT = '3000'
+  SCOPES = 'read_customers,read_inventory,read_locales,read_locations,read_orders,read_returns,write_customers,write_inventory,write_locales,write_locations,write_orders,write_products,write_returns'
+  SHOPIFY_API_KEY = 'be8e8039e18f100d31437e7c4dcfe1b0'
+  SHOPIFY_APP_URL = 'https://rsl-services-app.fly.dev'
+
+[processes]
+  app = 'node ./dbsetup.js npm run docker-start'
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = '1GB'
+  auto_extend_size_limit = '10GB'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
