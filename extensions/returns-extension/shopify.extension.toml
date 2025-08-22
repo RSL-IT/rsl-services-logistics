@@ -2,16 +2,18 @@
 api_version = "2025-04"
 [[extensions]]
 # Change the merchant-facing name of the extension in locales/en.default.json
-name = "t:name"
+name = "RSL Customer Service Return Data"
 handle = "returns-extension"
 type = "ui_extension"
 
+[capabilities]
+api_access = true          # allows Admin GraphQL if you choose
+network_access = true      # allows fetch() to your app backend
 
 # Only 1 target can be specified for each Admin block extension
 [[extensions.targeting]]
 module = "./src/BlockExtension.jsx"
 target = "admin.order-details.block.render"
-
 
 # Valid extension targets:
 

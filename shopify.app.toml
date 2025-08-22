@@ -3,7 +3,7 @@
 client_id = "be8e8039e18f100d31437e7c4dcfe1b0"
 name = "RSL Services"
 handle = "rsl-services-app"
-application_url = "https://cv-scout-startup-watched.trycloudflare.com"
+application_url = "https://n-sectors-section-databases.trycloudflare.com"
 embedded = true
 
 [build]
@@ -27,9 +27,9 @@ scopes = "read_inventory,read_locales,read_locations,write_inventory,write_local
 
 [auth]
 redirect_urls = [
-  "https://cv-scout-startup-watched.trycloudflare.com/auth/callback",
-  "https://cv-scout-startup-watched.trycloudflare.com/auth/shopify/callback",
-  "https://cv-scout-startup-watched.trycloudflare.com/api/auth/callback"
+  "https://n-sectors-section-databases.trycloudflare.com/auth/callback",
+  "https://n-sectors-section-databases.trycloudflare.com/auth/shopify/callback",
+  "https://n-sectors-section-databases.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]
