@@ -3,7 +3,7 @@
 client_id = "be8e8039e18f100d31437e7c4dcfe1b0"
 name = "RSL Services"
 handle = "rsl-services-app"
-application_url = "https://rsl-services-app.fly.dev"
+application_url = "https://forming-nat-trauma-legislative.trycloudflare.com"
 embedded = true
 
 [build]
@@ -27,9 +27,9 @@ scopes = "read_inventory,read_locales,read_locations,write_inventory,write_local
 
 [auth]
 redirect_urls = [
-  "https://rsl-services-app.fly.dev/auth/callback",
-  "https://rsl-services-app.fly.dev/auth/shopify/callback",
-  "https://rsl-services-app.fly.dev/api/auth/callback"
+  "https://forming-nat-trauma-legislative.trycloudflare.com/auth/callback",
+  "https://forming-nat-trauma-legislative.trycloudflare.com/auth/shopify/callback",
+  "https://forming-nat-trauma-legislative.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]
