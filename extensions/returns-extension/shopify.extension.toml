@@ -10,7 +10,7 @@ type = "ui_extension"
 # Only 1 target can be specified for each Admin block extension
 [[extensions.targeting]]
 module = "./src/BlockExtension.jsx"
-target = "admin.product-details.block.render"
+target = "admin.order-details.block.render"
 
 
 # Valid extension targets:
