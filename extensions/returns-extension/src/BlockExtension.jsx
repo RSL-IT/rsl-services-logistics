@@ -7,7 +7,7 @@ import {
 } from '@shopify/ui-extensions-react/admin';
 
 // The target used here must match the target used in the extension's toml file (./shopify.extension.toml)
-const TARGET = 'admin.product-details.block.render';
+const TARGET = 'admin.order-details.block.render';
 
 export default reactExtension(TARGET, () => <App />);
 
@@ -18,7 +18,7 @@ function App() {
 
   return (
     // The AdminBlock component provides an API for setting the title of the Block extension wrapper.
-    <AdminBlock title="My Block Extension">
+    <AdminBlock title="Special RSL Data Entry">
       <BlockStack>
         <Text fontWeight="bold">{i18n.translate('welcome', {target: TARGET})}</Text>
       </BlockStack>
