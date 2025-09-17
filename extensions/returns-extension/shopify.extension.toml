@@ -2,8 +2,9 @@
 api_version = "2025-04"
 [[extensions]]
 # Change the merchant-facing name of the extension in locales/en.default.json
-name = "RSL Customer Service Return Data"
+name = "RSL Services"
 handle = "returns-extension"
+uid = "1fb5bc74-94cc-81fb-1695-ffa8213f668f640c4691"
 type = "ui_extension"
 
 [capabilities]

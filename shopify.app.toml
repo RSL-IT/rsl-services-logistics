@@ -3,11 +3,10 @@
 client_id = "be8e8039e18f100d31437e7c4dcfe1b0"
 name = "RSL Services"
 handle = "rsl-services-app"
-application_url = "https://n-sectors-section-databases.trycloudflare.com"
+application_url = "https://talent-twice-important-fell.trycloudflare.com"
 embedded = true
 
 [build]
-include_config_on_deploy = true
 automatically_update_urls_on_dev = true
 
 [webhooks]
@@ -27,9 +26,9 @@ scopes = "read_inventory,read_locales,read_locations,write_inventory,write_local
 
 [auth]
 redirect_urls = [
-  "https://n-sectors-section-databases.trycloudflare.com/auth/callback",
-  "https://n-sectors-section-databases.trycloudflare.com/auth/shopify/callback",
-  "https://n-sectors-section-databases.trycloudflare.com/api/auth/callback"
+  "https://talent-twice-important-fell.trycloudflare.com/auth/callback",
+  "https://talent-twice-important-fell.trycloudflare.com/auth/shopify/callback",
+  "https://talent-twice-important-fell.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]
