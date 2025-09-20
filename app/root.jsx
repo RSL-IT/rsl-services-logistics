@@ -9,11 +9,7 @@ import {
   ScrollRestoration,
   LiveReload,
 } from "@remix-run/react";
-
-// If you use Shopify auth helpers elsewhere:
 import { authenticate } from "./shopify.server";
-
-// Polaris CSS (works with Remix + Vite)
 import polarisStylesHref from "@shopify/polaris/build/esm/styles.css?url";
 
 export const links = () => [
@@ -25,30 +21,21 @@ export const meta = () => ([
   { name: "viewport", content: "width=device-width,initial-scale=1" },
 ]);
 
-// Any resource paths that must NOT trigger global auth:
+// Only bypass global auth for resource endpoints that must not reauth.
 const API_BYPASS = [
-  /^\/apps\/returns\/lookups(?:$|\/|\?)/,   // lookups endpoint (UI extension)
-  /^\/apps\/csd-entry\/save(?:$|\/|\?)/,    // (optional) data save endpoint
-  /^\/apps\/csd-entry\/load(?:$|\/|\?)/,    // (optional) data load endpoint
-  // add more resource routes here if needed
+  /^\/apps\/returns\/lookups(?:$|\/|\?)/, // let the child route handle its own CORS/auth
 ];
 
 export async function loader({ request }) {
   const { pathname } = new URL(request.url);
 
-  // ✅ If this is one of our API/resource endpoints, DO NOT run global auth.
-  //    This prevents 302/410 reauths (e.g., to /auth/login) from short-circuiting
-  //    the child route like /apps/returns/lookups.
+  // ✅ Skip global auth for allowed API routes
   if (API_BYPASS.some((re) => re.test(pathname))) {
     return json(null);
   }
 
-  // ⬇️ For normal app pages, keep your existing auth flow.
-  // If your app previously authenticated here, keep calling it:
-  // (This will redirect/throw as needed for Admin access)
+  // ⬇️ Normal app pages still require Admin auth
   await authenticate.admin(request);
-
-  // You can return any root-level data your app needs:
   return json({});
 }
 
@@ -69,7 +56,6 @@ export default function App() {
   );
 }
 
-// Optional (nice to have): error boundary to surface route errors nicely.
 export function ErrorBoundary({ error }) {
   return (
     <html lang="en">
