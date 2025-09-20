@@ -8,16 +8,15 @@ import {
   Select,
   DateField,
   Button,
-  Divider,
   BlockStack,
   InlineStack,
-  Heading,
+  Box,
   useApi,
 } from "@shopify/ui-extensions-react/admin";
 import { useEffect, useMemo, useState } from "react";
 
-// Keep debug off for production; flip to true while developing.
 const DEBUG = false;
+const TARGET = "admin.order-details.block.render";
 
 // Prefer CLI tunnel via __APP_URL__, then Vite var, then Fly
 const BASE_URL =
@@ -37,6 +36,14 @@ async function getSessionTokenWithRetry(shopify, attempts = 5) {
   return null;
 }
 
+function todayISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 const PLACEHOLDERS = {
   returnType: { value: "", label: "Pick a return type" },
   troubleshootingCategory: { value: "", label: "Pick a troubleshooting category" },
@@ -44,10 +51,13 @@ const PLACEHOLDERS = {
 };
 
 const DEFAULT_STATE = {
-  orderId: "",
+  orderId: "",           // hidden but stored (human-readable)
+  orderGid: "",          // hidden but stored (GID)
+  customerGid: "",       // hidden
+  userGid: "",           // hidden (current Shopify staff user)
   returnType: PLACEHOLDERS.returnType.value,
   primaryReason: PLACEHOLDERS.primaryReason.value,
-  troubleOccurredOn: "",
+  troubleOccurredOn: todayISO(),
   associatedSerialNumber: "",
   hasTroubleshooting: false,
   troubleshootingCategory: PLACEHOLDERS.troubleshootingCategory.value,
@@ -70,32 +80,100 @@ async function fetchLookups({ shopify, signal }) {
   return res.json();
 }
 
-export default reactExtension("admin.order-details.block.render", () => <BlockExtension />);
+export default reactExtension(TARGET, () => <BlockExtension />);
 
 function BlockExtension() {
-  const shopify = useApi();
+  const shopify = useApi(TARGET); // { data, query, sessionToken, toast, ... }
 
+  // state
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [lookups, setLookups] = useState({
+    returnTypes: [],
+    troubleshootingCategories: [],
+    primaryReasons: [],
+  });
+  const [form, setForm] = useState(DEFAULT_STATE);
+
+  // Auto-fill hidden order/customer/user identifiers using Admin context
+  useEffect(() => {
+    const orderGid = shopify?.data?.selected?.[0]?.id;
+    if (!orderGid) return;
+
+    setForm((p) => (p.orderGid ? p : { ...p, orderGid }));
+
+    if (typeof shopify?.query === "function") {
+      (async () => {
+        try {
+          const { data } = await shopify.query(
+            `#graphql
+            query OrderInfo($id: ID!) {
+              order(id: $id) {
+                id
+                name
+                legacyResourceId
+                customer { id }
+              }
+            }
+          `,
+            { variables: { id: orderGid } }
+          );
+          const o = data?.order;
+          const display = o?.name || (o?.legacyResourceId ? String(o.legacyResourceId) : orderGid);
+          setForm((p) => ({
+            ...p,
+            orderId: p.orderId || display,
+            customerGid: p.customerGid || o?.customer?.id || "",
+          }));
+        } catch {
+          setForm((p) => ({ ...p, orderId: p.orderId || orderGid }));
+        }
+
+        // Best-effort: capture current staff user id if available
+        try {
+          const { data: me } = await shopify.query(
+            `#graphql
+            query CurrentUser { currentUser { id } }
+          `
+          );
+          const uid = me?.currentUser?.id;
+          if (uid) setForm((p) => ({ ...p, userGid: p.userGid || uid }));
+        } catch {
+          // ignore if not supported on this API version/shop
+        }
+      })();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shopify?.data]);
+
+  // debug helper (optional)
   useEffect(() => {
     if (!DEBUG) return;
     (async () => {
       const t = await getSessionTokenWithRetry(shopify);
       if (t) {
+        // eslint-disable-next-line no-console
         console.info("SESSION_TOKEN:", t);
         try { (globalThis || window).__ADMIN_TOKEN = t; } catch {}
       }
     })();
   }, [shopify]);
 
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-  const [lookups, setLookups] = useState({ returnTypes: [], troubleshootingCategories: [], primaryReasons: [] });
-  const [form, setForm] = useState(DEFAULT_STATE);
+  const returnTypeOptions = useMemo(
+    () => normalizeOptions(lookups.returnTypes, PLACEHOLDERS.returnType),
+    [lookups.returnTypes]
+  );
+  const troubleshootingCategoryOptions = useMemo(
+    () => normalizeOptions(lookups.troubleshootingCategories, PLACEHOLDERS.troubleshootingCategory),
+    [lookups.troubleshootingCategories]
+  );
+  const primaryReasonOptions = useMemo(
+    () => normalizeOptions(lookups.primaryReasons, PLACEHOLDERS.primaryReason),
+    [lookups.primaryReasons]
+  );
 
-  const returnTypeOptions = useMemo(() => normalizeOptions(lookups.returnTypes, PLACEHOLDERS.returnType), [lookups.returnTypes]);
-  const troubleshootingCategoryOptions = useMemo(() => normalizeOptions(lookups.troubleshootingCategories, PLACEHOLDERS.troubleshootingCategory), [lookups.troubleshootingCategories]);
-  const primaryReasonOptions = useMemo(() => normalizeOptions(lookups.primaryReasons, PLACEHOLDERS.primaryReason), [lookups.primaryReasons]);
-
+  // load lookups
   useEffect(() => {
     let aborted = false; const ctrl = new AbortController();
     (async () => {
@@ -135,42 +213,98 @@ function BlockExtension() {
   }
 
   return (
-    <BlockStack gap>
-      <Heading>Returns Extension — Customer Support Data Entry</Heading>
-      {DEBUG && (
-        <InlineStack gap="small">
-          <Button onPress={async () => {
-            const t = await getSessionTokenWithRetry(shopify);
-            if (t) { await navigator.clipboard.writeText(t); shopify?.toast?.show?.("Session token copied"); console.info("SESSION_TOKEN:", t); }
-            else { shopify?.toast?.show?.("No token in this context"); }
-          }}>Copy Admin token</Button>
-        </InlineStack>
-      )}
-
-      {error && (
-        <InlineStack gap="small"><Text emphasis>Problem</Text><Text>{String(error)}</Text></InlineStack>
-      )}
-
-      {loading ? (
-        <InlineStack gap="small"><Text>Loading lookups…</Text></InlineStack>
-      ) : (
-        <BlockStack gap>
-          <TextField label="Order ID" value={form.orderId} onChange={onChange("orderId")} />
-          <Select label="Return Type" value={form.returnType} onChange={onChange("returnType")} options={returnTypeOptions} />
-          <Select label="Troubleshooting Category" value={form.troubleshootingCategory} onChange={onChange("troubleshootingCategory")} options={troubleshootingCategoryOptions} />
-          <Select label="Customer Reported Reason Category" value={form.primaryReason} onChange={onChange("primaryReason")} options={primaryReasonOptions} />
-          <DateField label="Trouble Occurred On" value={form.troubleOccurredOn} onChange={onChange("troubleOccurredOn")} />
-          <TextField label="Associated Serial #" value={form.associatedSerialNumber} onChange={onChange("associatedSerialNumber")} />
-          <Checkbox label="Troubleshooting Performed" checked={form.hasTroubleshooting} onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))} />
-          <TextArea label="Customer Reported Info" value={form.customerReportedInfo} onChange={onChange("customerReportedInfo")} maxLength={2000} />
-          <InlineStack gap>
-            <Button kind="primary" onPress={handleSave} disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
+    <Box padding="none" maxBlockSize={460}>
+      <BlockStack gap="small">
+        {error && (
+          <InlineStack gap="small">
+            <Text emphasis>Problem</Text>
+            <Text>{String(error)}</Text>
           </InlineStack>
-        </BlockStack>
-      )}
+        )}
 
-      <Divider />
-      <Text size="small" emphasis="subdued">In Preview, tokens may be unavailable; open this block in Admin to save.</Text>
-    </BlockStack>
+        {loading ? (
+          <InlineStack gap="small"><Text>Loading lookups…</Text></InlineStack>
+        ) : (
+          <BlockStack gap="small">
+            {/* Row 1: Request Date | Return Type | Reason Category */}
+            <InlineStack gap="small">
+              <DateField
+                label="Request Date"
+                value={form.troubleOccurredOn}
+                onChange={onChange("troubleOccurredOn")}
+              />
+              <Select
+                label="Return Type"
+                value={form.returnType}
+                onChange={onChange("returnType")}
+                options={returnTypeOptions}
+              />
+              <Select
+                label="Reason Category"
+                value={form.primaryReason}
+                onChange={onChange("primaryReason")}
+                options={primaryReasonOptions}
+              />
+            </InlineStack>
+
+            {/* Row 2: Troubleshooting Performed (checkbox only; label must not wrap) */}
+            <InlineStack gap="small" blockAlignment="center">
+              <Box minInlineSize="40ch" maxInlineSize="100%">
+                <Checkbox
+                  label="Troubleshooting performed"
+                  checked={form.hasTroubleshooting}
+                  onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
+                />
+              </Box>
+            </InlineStack>
+
+            {/* Row 3: Troubleshooting Category | Serial # (only when checked; each half width) */}
+            {form.hasTroubleshooting && (
+              <InlineStack gap="small">
+                <Box minInlineSize="50%" maxInlineSize="50%">
+                  <Select
+                    label="Troubleshooting Category"
+                    value={form.troubleshootingCategory}
+                    onChange={onChange("troubleshootingCategory")}
+                    options={troubleshootingCategoryOptions}
+                  />
+                </Box>
+                <Box minInlineSize="50%" maxInlineSize="50%">
+                  <TextField
+                    label="Serial #"
+                    value={form.associatedSerialNumber}
+                    onChange={onChange("associatedSerialNumber")}
+                  />
+                </Box>
+              </InlineStack>
+            )}
+
+            {/* Notes always visible */}
+            <TextArea
+              label="Customer Reported Info"
+              value={form.customerReportedInfo}
+              onChange={onChange("customerReportedInfo")}
+              maxLength={2000}
+            />
+
+            <InlineStack gap="small">
+              <Button kind="primary" onPress={handleSave} disabled={saving}>
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </InlineStack>
+
+            {DEBUG && (
+              <InlineStack gap="small">
+                <Button onPress={async () => {
+                  const t = await getSessionTokenWithRetry(shopify);
+                  if (t) { await navigator.clipboard.writeText(t); shopify?.toast?.show?.("Session token copied"); console.info("SESSION_TOKEN:", t); }
+                  else { shopify?.toast?.show?.("No token in this context"); }
+                }}>Copy Admin token</Button>
+              </InlineStack>
+            )}
+          </BlockStack>
+        )}
+      </BlockStack>
+    </Box>
   );
 }
