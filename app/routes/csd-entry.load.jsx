@@ -1,5 +1,5 @@
 import { json as remixJson } from '@remix-run/node';
-import { authenticate as shopifyAuthenticate } from '~/shopify.server';
+import { authenticate as shopifyAuthenticate } from '../shopify.server';
 
 export async function action({ request }) {
   const { admin } = await shopifyAuthenticate.admin(request);

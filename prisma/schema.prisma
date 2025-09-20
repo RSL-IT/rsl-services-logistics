@@ -1,16 +1,11 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled (PgBouncer)
+  directUrl = env("DIRECT_URL") // direct compute, used for migrate/introspect
 }
 
 model Session {
@@ -31,175 +26,156 @@ model Session {
   emailVerified Boolean?  @default(false)
 }
 
-model tblkp_RepairEntryDateReceived {
-  id                                                 Int      @id @default(autoincrement())
-  return_warranty_claim_processing_repair_department DateTime @db.Timestamptz
-
-  @@map("repair_entry_date_received")
-}
-
 model tblkp_RepairEntryConditionReceived {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("repair_entry_condition_received")
 }
 
-model tblkp_RepairEntryDateInspected {
-  id    Int      @id @default(autoincrement())
-  value DateTime @db.Timestamptz
-
-  @@map("repair_entry_date_inspected")
-}
-
 model tblkp_RepairEntryPhotos {
   id    Int     @id @default(autoincrement())
-  value Boolean @db.Boolean
+  value Boolean
 
   @@map("repair_entry_photos")
 }
 
 model tblkp_RepairEntryDiagnosis {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("repair_entry_diagnosis")
 }
 
 model tblkp_RepairEntryDisposition {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("repair_entry_disposition")
 }
 
 model tblkp_RepairEntryReplacedItems {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("repair_entry_replaced_items")
 }
 
 model tblkp_RepairEntryFeedbackToCsd {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("repair_entry_feedback_to_csd")
 }
 
 model tblkp_RepairEntryReturnsRepairStatus {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("repair_entry_returns_repair_status")
 }
 
 model tblkp_RepairEntryReplacementItemDeliveryDate {
   id    Int      @id @default(autoincrement())
-  value DateTime @db.Timestamptz
+  value DateTime @db.Timestamptz(6)
 
   @@map("repair_entry_replacement_item_delivery_date")
 }
 
 model tblkp_CsdPrimaryCustomerReportedReasonForReturnWarranty {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("csd_primary_customer_reported_reason_for_return_warranty")
 }
 
 model tblkp_CsdItem {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("csd_item")
 }
 
 model tblkp_CsdReturnType {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("csd_return_type")
 }
 
 model tblkp_CsdTroubleshootingNotes {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("csd_troubleshooting_notes")
 }
 
 model tblkp_CsdCustomerServiceStatus {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("csd_customer_service_status")
 }
 
 model tblkp_CsdRslCsd {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("csd_rsl_csd")
 }
 
 model tblkp_CsdReturnItemRequired {
   id    Int     @id @default(autoincrement())
-  value Boolean @db.Boolean
+  value Boolean
 
   @@map("csd_return_item_required")
 }
 
 model tblkp_CsdRefundEligible {
   id    Int    @id @default(autoincrement())
-  value String @db.Text
+  value String
 
   @@map("csd_refund_eligible")
 }
 
 model CsdEntry {
-  id Int @id @default(autoincrement())
-
-  serviceNumber                                  DateTime  @map("service_number") @db.Timestamptz
-  dateOfReturnRequest                            DateTime? @map("date_of_return_request") @db.Timestamptz
-  originalOrder                                  String?   @map("original_order") @db.Text
-  customerName                                   String?   @map("customer_name") @db.Text
-  primaryCustomerReportedReasonForReturnWarranty String?   @map("primary_customer_reported_reason_for_return_warranty") @db.Text
-  colUnnamed                                     String?   @map("col_unnamed") @db.Text
-  item                                           String?   @map("item") @db.Text
-  replacementOrder                               String?   @map("replacement_order") @db.Text
-  returnType                                     String?   @map("return_type") @db.Text
-  troubleshootingNotes                           String?   @map("troubleshooting_notes") @db.Text
-  customerServiceStatus                          String?   @map("customer_service_status") @db.Text
-  rslCsd                                         String?   @map("rsl_csd") @db.Text
-  returnItemRequired                             Boolean?  @map("return_item_required") @db.Boolean
-  repairDeptDesignation                          String?   @map("repair_dept_designation") @db.Text
-
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  id                                             Int       @id @default(autoincrement())
+  serviceNumber                                  DateTime  @map("service_number") @db.Timestamptz(6)
+  dateOfReturnRequest                            DateTime? @map("date_of_return_request") @db.Timestamptz(6)
+  originalOrder                                  String?   @map("original_order")
+  customerName                                   String?   @map("customer_name")
+  primaryCustomerReportedReasonForReturnWarranty String?   @map("primary_customer_reported_reason_for_return_warranty")
+  colUnnamed                                     String?   @map("col_unnamed")
+  item                                           String?   @map("item")
+  replacementOrder                               String?   @map("replacement_order")
+  returnType                                     String?   @map("return_type")
+  troubleshootingNotes                           String?   @map("troubleshooting_notes")
+  customerServiceStatus                          String?   @map("customer_service_status")
+  rslCsd                                         String?   @map("rsl_csd")
+  returnItemRequired                             Boolean?  @map("return_item_required")
+  repairDeptDesignation                          String?   @map("repair_dept_designation")
+  createdAt                                      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                                      DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
 
   @@map("csd_entry")
 }
 
 model RepairEntry {
-  id Int @id @default(autoincrement())
-
-  serviceNumber         DateTime? @map("service_number") @db.Timestamptz
-  dateOfRepairRequest   DateTime? @map("date_of_repair_request") @db.Timestamptz
-  originalOrder         String?   @map("original_order") @db.Text
-  customerName          String?   @map("customer_name") @db.Text
-  item                  String?   @map("item") @db.Text
-  replacementOrder      String?   @map("replacement_order") @db.Text
-  repairType            String?   @map("repair_type") @db.Text
-  repairNotes           String?   @map("repair_notes") @db.Text
-  customerServiceStatus String?   @map("customer_service_status") @db.Text
-  rslRepairDept         String?   @map("rsl_repair_dept") @db.Text
-  repairCompleted       Boolean?  @map("repair_completed") @db.Boolean
-  repairDeptDesignation String?   @map("repair_dept_designation") @db.Text
-
-  // Shopify-style timestamps
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+  id                    Int       @id @default(autoincrement())
+  serviceNumber         DateTime? @map("service_number") @db.Timestamptz(6)
+  dateOfRepairRequest   DateTime? @map("date_of_repair_request") @db.Timestamptz(6)
+  originalOrder         String?   @map("original_order")
+  customerName          String?   @map("customer_name")
+  item                  String?   @map("item")
+  replacementOrder      String?   @map("replacement_order")
+  repairType            String?   @map("repair_type")
+  repairNotes           String?   @map("repair_notes")
+  customerServiceStatus String?   @map("customer_service_status")
+  rslRepairDept         String?   @map("rsl_repair_dept")
+  repairCompleted       Boolean?  @map("repair_completed")
+  repairDeptDesignation String?   @map("repair_dept_designation")
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
 
   @@map("repair_entry")
 }

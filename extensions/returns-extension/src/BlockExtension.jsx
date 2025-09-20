@@ -1,9 +1,6 @@
-// /extensions/csd-entry-block/src/BlockExtension.jsx
+// /extensions/returns-extension/src/blockExtension.jsx
 import {
   reactExtension,
-  AdminBlock,
-  BlockStack,
-  InlineStack,
   Text,
   TextField,
   TextArea,
@@ -11,344 +8,277 @@ import {
   Select,
   DateField,
   Button,
-  Banner,
   Divider,
-  Box,
+  BlockStack,
+  InlineStack,
+  Heading,
   useApi,
-} from '@shopify/ui-extensions-react/admin';
-import { useState, useEffect } from 'react';
+} from "@shopify/ui-extensions-react/admin";
+import { useEffect, useMemo, useState } from "react";
 
-const TARGET = 'admin.order-details.block.render';
-const DEBUG = false; // set true to log useApi payload
+// Enable dev helpers (token copy + auto log)
+const DEBUG = true;
 
-// Main/cross-axis alignment for rows
-const ROW_MAIN_ALIGN = 'space-between';    // distribute fields across the row evenly
-const ROW_CROSS_ALIGN = 'center';          // keep fields vertically centered per row
+// Resolve backend base URL automatically (CLI tunnel via __APP_URL__, then Vite var, then Fly)
+const BASE_URL =
+  (typeof __APP_URL__ !== "undefined" && __APP_URL__) ||
+  (typeof import.meta !== "undefined" && import.meta.env?.VITE_APP_URL) ||
+  "https://rsl-services-app.fly.dev"; // prod fallback
 
-// Control the space between fields in a row (InlineStack spacing tokens)
-// Allowed: 'none' | 'extraTight' | 'tight' | 'base' | 'loose'
-const TOP_ROW_GAP = 'loose';
-const CORE_ROW_GAP = 'base';
-const OPTIONAL_ROW_GAP = 'tight';
+const PLACEHOLDERS = {
+  returnType: { value: "", label: "Pick a return type" },
+  troubleshootingCategory: { value: "", label: "Pick a troubleshooting category" },
+  primaryReason: { value: "", label: "Pick a customer reason category" },
+};
 
-// span: 12 = full, 6 = half, 4 = third (use any values that sum to <= 12 per row)
-// maxLength: optional character limit for text inputs/areas
-// widthPx / minWidthPx / maxWidthPx: optional pixel-based sizing for the rendered field (wrapped in a Box)
-// hidden: when true, the field is included in state/payload but not rendered
-const FIELD_DEFS = [
-  { label: 'Service ID', name: 'serviceID', type: 'text', span: 6, maxLength: 50, hidden: true },
-  { label: 'Return Request Date', name: 'dateOfReturnRequest', type: 'date', span: 4, labelHidden: true, widthPx: 160, hidden: true },
-  { label: 'Order #', name: 'originalOrderNumber', type: 'text', span: 4, maxLength: 40, labelHidden: true, widthPx: 80, hidden: true },
-  { label: 'Customer', name: 'customerName', type: 'text', span: 4, maxLength: 100, labelHidden: true, widthPx: 300, hidden: true},
-  { label: 'Customer Reported Reason Category', name: 'primaryReason', type: 'select', span: 2, maxLength: 2000 },
-  { label: 'Item', name: 'item', type: 'text', span: 6, maxLength: 120, widthPx: 200, hidden: true },
-  { label: 'Replacement #', name: 'replacementOrderNumber', type: 'text', span: 6, maxLength: 40, widthPx: 100 },
-  { label: 'Return Type', name: 'returnType', type: 'select', span: 6, maxLength: 120, widthPx: 200 },
-  { label: 'Troubleshooting Category', name: 'troubleshootingCategory', type: 'select', span: 2, maxLength: 30 },
-  { label: 'Troubleshooting Notes', name: 'troubleshootingNotes', type: 'text', span: 12, maxLength: 3000 },
-  { label: 'Customer Service Status', name: 'customerServiceStatus', type: 'text', span: 2, maxLength: 80, widthPx: 200, hidden: true},
-  { label: 'Customer Service Rep', name: 'rslCsd', type: 'text', span: 4, maxLength: 80, widthPx: 200, hidden: true },
-  { label: 'Return Item Required', name: 'returnItemRequired', type: 'checkbox', span: 1, widthPx: 100 },
-  { label: 'Repair Department Designation', name: 'repairDeptDesignation', type: 'text', span: 6, maxLength: 120, hidden: true },
-];
+const DEFAULT_STATE = {
+  orderId: "",
+  returnType: PLACEHOLDERS.returnType.value,
+  primaryReason: PLACEHOLDERS.primaryReason.value,
+  troubleOccurredOn: "",
+  associatedSerialNumber: "",
+  hasTroubleshooting: false,
+  troubleshootingCategory: PLACEHOLDERS.troubleshootingCategory.value,
+  customerReportedInfo: "",
+};
 
-// First line
-const TOP_FIELD_NAMES = ['dateOfReturnRequest', 'returnType', 'replacementOrderNumber','returnItemRequired'];
-// Keep the block short: show only these "core" fields in compact mode
-const CORE_FIELD_NAMES = [
-  'primaryReason','troubleshootingCategory', 'troubleshootingNotes',
-];
+function normalizeOptions(rows, placeholder) {
+  const opts = Array.isArray(rows)
+    ? rows.map(({ id, label }) => ({ value: String(id), label: String(label ?? id) }))
+    : [];
+  return [placeholder, ...opts];
+}
 
-const HIDDEN_FIELD_NAMES = ['serviceID', 'primaryReason', 'customerServiceStatus', 'rslCsd', 'dateOfReturnRequest', 'originalOrderNumber', 'customerName'];
-
-export default reactExtension(TARGET, () => <CsdEntryBlock />);
-
-function firstDefined() {
-  for (let i = 0; i < arguments.length; i++) {
-    if (arguments[i] !== undefined && arguments[i] !== null) return arguments[i];
+async function fetchLookups({ shopify, signal }) {
+  // Admin UI extensions expose `sessionToken.get()`
+  let token = null;
+  try {
+    token = shopify?.sessionToken?.get ? await shopify.sessionToken.get() : null;
+  } catch (e) {
+    if (DEBUG) console.warn("No session token (preview likely). Proceeding without it.");
   }
-  return null;
+
+  const url = `${BASE_URL}/apps/returns/lookups?sets=returnTypes,troubleshootingCategories,primaryReasons`;
+  if (DEBUG) console.info("Lookups URL:", url);
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const res = await fetch(url, { headers, signal });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Lookups fetch failed ${res.status}: ${text}`);
+  }
+  return res.json();
 }
 
-function groupIntoRows(fields) {
-  const rows = [];
-  let current = [];
-  let sum = 0;
-  fields.forEach((f) => {
-    const span = f.span || 12;
-    if (sum + span > 12 && current.length) {
-      rows.push(current);
-      current = [f];
-      sum = span;
-    } else {
-      current.push(f);
-      sum += span;
-    }
-  });
-  if (current.length) rows.push(current);
-  return rows;
-}
+// Register the extension
+export default reactExtension("admin.order-details.block.render", () => <BlockExtension />);
 
-function CsdEntryBlock() {
-  const api = useApi();
-  const data = api && api.data;
+function BlockExtension() {
+  const shopify = useApi();
 
-  const currentUserName = firstDefined(
-    api && api.currentUser && (api.currentUser.displayName || api.currentUser.name),
-    data && data.currentUser && (data.currentUser.displayName || data.currentUser.name),
-    data && data.user && data.user.name
-  );
-
-  const orderIdFromData = firstDefined(
-    data && data.order && data.order.id,
-    data && data.selected && Array.isArray(data.selected) && data.selected[0] && data.selected[0].id,
-    data && data.selected && data.selected.id,
-    data && data.id
-  );
-  const orderNameFromData = firstDefined(
-    data && data.order && data.order.name,
-    data && data.selected && Array.isArray(data.selected) && data.selected[0] && data.selected[0].name,
-    data && data.selected && data.selected.name,
-    data && data.name
-  );
-
-  const initial = {};
-  for (const f of FIELD_DEFS) initial[f.name] = f.type === 'checkbox' ? false : '';
-  initial.orderGid = orderIdFromData || '';
-  initial.orderName = orderNameFromData || '';
-  if (currentUserName) initial.rslCsd = currentUserName;
-
-  const [values, setValues] = useState(initial);
-  const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState(null);
-  const [error, setError] = useState(null);
-  const [expanded, setExpanded] = useState(false); // compact by default
-
-  const onChange = (name, value) => setValues((prev) => ({ ...prev, [name]: value }));
-
-  // Prefill from local context
+  // DEV: auto-log a fresh Admin session token on mount so you don't need to scroll.
   useEffect(() => {
-    setValues((prev) => {
-      let next = prev;
-      if (!prev.originalOrderNumber && orderNameFromData) next = { ...next, originalOrderNumber: orderNameFromData };
-      if (!prev.customerName) {
-        const customerName = firstDefined(
-          data && data.order && data.order.customer && (data.order.customer.displayName || data.order.customer.name),
-          data && data.customer && (data.customer.displayName || data.customer.name)
-        );
-        if (customerName) next = { ...next, customerName };
-      }
-      if (!prev.rslCsd && currentUserName) next = { ...next, rslCsd: currentUserName };
-      if (!prev.orderGid && orderIdFromData) next = { ...next, orderGid: orderIdFromData };
-      if (!prev.orderName && orderNameFromData) next = { ...next, orderName: orderNameFromData };
-      return next;
-    });
-  }, [data, orderIdFromData, orderNameFromData, currentUserName]);
-
-  // Authoritative fill via backend
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      const orderGid = values.orderGid;
-      const orderName = values.orderName;
-      if (!orderGid && !orderName) return;
+    if (!DEBUG) return;
+    (async () => {
       try {
-        const token = await shopify.session.getToken();
-        const res = await fetch('/apps/csd-entry/load', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ orderGid, orderName }),
-        });
-        if (!res.ok) throw new Error(`Load failed (${res.status})`);
-        const payload = await res.json();
-        if (cancelled) return;
-        setValues((prev) => {
-          const next = { ...prev };
-          if (!prev.orderGid && payload.orderGid) next.orderGid = payload.orderGid;
-          if (!prev.originalOrderNumber && payload.orderNumber) next.originalOrderNumber = payload.orderNumber;
-          if (!prev.customerName && payload.customerName) next.customerName = payload.customerName;
-          return next;
+        const t = shopify?.sessionToken?.get ? await shopify.sessionToken.get() : null;
+        if (t) {
+          console.info("SESSION_TOKEN:", t);
+          try { (globalThis || window).__ADMIN_TOKEN = t; } catch (_) {}
+        }
+      } catch (e) {
+        console.warn("Token fetch failed (likely preview context)", e);
+      }
+    })();
+  }, [shopify]);
+
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [lookups, setLookups] = useState({
+    returnTypes: [],
+    troubleshootingCategories: [],
+    primaryReasons: [],
+  });
+
+  const [form, setForm] = useState(DEFAULT_STATE);
+
+  const returnTypeOptions = useMemo(
+    () => normalizeOptions(lookups.returnTypes, PLACEHOLDERS.returnType),
+    [lookups.returnTypes]
+  );
+  const troubleshootingCategoryOptions = useMemo(
+    () => normalizeOptions(lookups.troubleshootingCategories, PLACEHOLDERS.troubleshootingCategory),
+    [lookups.troubleshootingCategories]
+  );
+  const primaryReasonOptions = useMemo(
+    () => normalizeOptions(lookups.primaryReasons, PLACEHOLDERS.primaryReason),
+    [lookups.primaryReasons]
+  );
+
+  // Load the lookup lists from backend on mount
+  useEffect(() => {
+    let aborted = false;
+    const ctrl = new AbortController();
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await fetchLookups({ shopify, signal: ctrl.signal });
+        if (aborted) return;
+        setLookups({
+          returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
+          troubleshootingCategories: Array.isArray(data.troubleshootingCategories)
+            ? data.troubleshootingCategories
+            : [],
+          primaryReasons: Array.isArray(data.primaryReasons) ? data.primaryReasons : [],
         });
       } catch (e) {
-        if (DEBUG) console.warn('CSD Entry load error:', e);
+        if (DEBUG) console.error("Lookup load error:", e);
+        setError(e.message);
+      } finally {
+        if (!aborted) setLoading(false);
       }
     }
+
     load();
-    return () => { cancelled = true; };
-  }, [values.orderGid, values.orderName]);
+    return () => {
+      aborted = true;
+      ctrl.abort();
+    };
+  }, [shopify]);
 
-  if (DEBUG) console.info('[CSD Entry] useApi payload', api);
+  const onChange = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value }));
 
-  const isVisible = (f) => !f.hidden;
-
-  const topFields = TOP_FIELD_NAMES
-    .map((n) => FIELD_DEFS.find((f) => f.name === n))
-    .filter(Boolean)
-    .filter(isVisible);
-
-  const coreFields = CORE_FIELD_NAMES
-    .map((n) => FIELD_DEFS.find((f) => f.name === n))
-    .filter(Boolean)
-    .filter(isVisible);
-
-  const optionalFields = FIELD_DEFS
-    .filter((f) => TOP_FIELD_NAMES.indexOf(f.name) === -1 && CORE_FIELD_NAMES.indexOf(f.name) === -1)
-    .filter(isVisible);
-
-  const topRows = groupIntoRows(topFields);
-  const coreRows = groupIntoRows(coreFields);
-  const optionalRows = groupIntoRows(optionalFields);
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      const token = shopify?.sessionToken?.get ? await shopify.sessionToken.get() : null;
+      const url = `${BASE_URL}/apps/csd-entry/save`;
+      if (DEBUG) console.info("Save URL:", url);
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) throw new Error(`Save failed ${res.status}`);
+      await shopify?.toast?.show?.("Saved.");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
-    <AdminBlock>
-      <BlockStack spacing="tight">
+    <BlockStack gap>
+      <Heading>Returns Extension — Customer Support Data Entry</Heading>
 
-        {/* First line — force full width & single row */}
-        {topRows.map((row, i) =>
-          i === 0 ? (
-            <Box key={`top-${i}-full`} inlineSize="100%">
-              <InlineStack
-                spacing={TOP_ROW_GAP}
-                wrap={false}
-                alignment={ROW_MAIN_ALIGN}
-                blockAlignment={ROW_CROSS_ALIGN}
-              >
-                {row.map((f) => (
-                  <Field key={f.name} def={f} value={values[f.name]} onChange={onChange} />
-                ))}
-              </InlineStack>
-            </Box>
-          ) : (
-            <InlineStack
-              key={`top-${i}`}
-              spacing={TOP_ROW_GAP}
-              wrap
-              alignment={ROW_MAIN_ALIGN}
-              blockAlignment={ROW_CROSS_ALIGN}
-            >
-              {row.map((f) => (
-                <Field key={f.name} def={f} value={values[f.name]} onChange={onChange} />
-              ))}
-            </InlineStack>
-          )
-        )}
-
-        <Divider />
-
-        {/* Core fields (always visible) */}
-        {coreRows.map((row, i) => (
-          <InlineStack
-            key={`core-${i}`}
-            spacing={CORE_ROW_GAP}
-            wrap
-            alignment={ROW_MAIN_ALIGN}
-            blockAlignment={ROW_CROSS_ALIGN}
+      {DEBUG && (
+        <InlineStack gap="small">
+          <Button
+            onPress={async () => {
+              try {
+                const t = shopify?.sessionToken?.get ? await shopify.sessionToken.get() : null;
+                if (t) {
+                  await navigator.clipboard.writeText(t);
+                  await shopify?.toast?.show?.("Session token copied");
+                  console.info("SESSION_TOKEN:", t);
+                } else {
+                  await shopify?.toast?.show?.("No token available in this context");
+                  console.info("No token available in this context");
+                }
+              } catch (e) {
+                console.error("Token fetch failed", e);
+              }
+            }}
           >
-            {row.map((f) => (
-              <Field key={f.name} def={f} value={values[f.name]} onChange={onChange} />
-            ))}
-          </InlineStack>
-        ))}
-
-        {/* Toggle for optional fields to keep block short */}
-        {!expanded && optionalFields.length > 0 ? (
-          <InlineStack alignment="end">
-            <Button kind="secondary" onPress={() => setExpanded(true)}>
-              Show more details
-            </Button>
-          </InlineStack>
-        ) : null}
-
-        {expanded ? (
-          <BlockStack spacing="tight">
-            {optionalRows.map((row, i) => (
-              <InlineStack
-                key={`opt-${i}`}
-                spacing={OPTIONAL_ROW_GAP}
-                wrap
-                alignment={ROW_MAIN_ALIGN}
-                blockAlignment={ROW_CROSS_ALIGN}
-              >
-                {row.map((f) => (
-                  <Field key={f.name} def={f} value={values[f.name]} onChange={onChange} />
-                ))}
-              </InlineStack>
-            ))}
-            <InlineStack alignment="end">
-              <Button kind="secondary" onPress={() => setExpanded(false)}>
-                Hide details
-              </Button>
-            </InlineStack>
-          </BlockStack>
-        ) : null}
-
-        {/* Notices at the end to avoid extra height above */}
-        {notice ? <Banner status="success" onDismiss={() => setNotice(null)}>{notice}</Banner> : null}
-        {error ? <Banner status="critical" onDismiss={() => setError(null)}>{error}</Banner> : null}
-
-        <InlineStack alignment="end">
-          <Button kind="primary" loading={saving} onPress={() => handleSave(values, setSaving, setNotice, setError)}>
-            Save Entry
+            Copy Admin token
           </Button>
         </InlineStack>
-      </BlockStack>
-    </AdminBlock>
+      )}
+
+      {error && (
+        <InlineStack gap="small">
+          <Text emphasis>Problem</Text>
+          <Text>{String(error)}</Text>
+        </InlineStack>
+      )}
+
+      {loading ? (
+        <InlineStack gap="small">
+          <Text>Loading lookups…</Text>
+        </InlineStack>
+      ) : (
+        <BlockStack gap>
+          <TextField
+            label="Order ID"
+            value={form.orderId}
+            onChange={onChange("orderId")}
+          />
+
+          <Select
+            label="Return Type"
+            value={form.returnType}
+            onChange={onChange("returnType")}
+            options={returnTypeOptions}
+          />
+
+          <Select
+            label="Troubleshooting Category"
+            value={form.troubleshootingCategory}
+            onChange={onChange("troubleshootingCategory")}
+            options={troubleshootingCategoryOptions}
+          />
+
+          <Select
+            label="Customer Reported Reason Category"
+            value={form.primaryReason}
+            onChange={onChange("primaryReason")}
+            options={primaryReasonOptions}
+          />
+
+          <DateField
+            label="Trouble Occurred On"
+            value={form.troubleOccurredOn}
+            onChange={onChange("troubleOccurredOn")}
+          />
+
+          <TextField
+            label="Associated Serial #"
+            value={form.associatedSerialNumber}
+            onChange={onChange("associatedSerialNumber")}
+          />
+
+          <Checkbox
+            label="Troubleshooting Performed"
+            checked={form.hasTroubleshooting}
+            onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
+          />
+
+          <TextArea
+            label="Customer Reported Info"
+            value={form.customerReportedInfo}
+            onChange={onChange("customerReportedInfo")}
+            maxLength={2000}
+          />
+
+          <InlineStack gap>
+            <Button kind="primary" onPress={handleSave} disabled={saving}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </InlineStack>
+        </BlockStack>
+      )}
+
+      <Divider />
+      <Text size="small" emphasis="subdued">
+        Tip: In preview, tokens may be unavailable; the dropdowns may stay empty until loaded in Admin.
+      </Text>
+    </BlockStack>
   );
-}
-
-function Field(props) {
-  const def = props.def;
-  const value = props.value;
-  const onChange = props.onChange;
-  if (def.hidden) return null; // respect hidden flag
-
-  const label = def.label;
-  const name = def.name;
-  const type = def.type;
-  const maxLength = def.maxLength;
-
-  const content = (() => {
-    if (type === 'text') return <TextField label={label} labelHidden={def.labelHidden} placeholder={def.placeholder} value={value} onChange={(v) => onChange(name, v)} maxLength={maxLength} />;
-    if (type === 'textarea') return <TextArea label={label} labelHidden={def.labelHidden} placeholder={def.placeholder} value={value} onChange={(v) => onChange(name, v)} maxLength={maxLength} />;
-    if (type === 'checkbox') return <Checkbox label={label} checked={!!value} onChange={(v) => onChange(name, v)} />;
-    if (type === 'select') return <Select label={label} labelHidden={def.labelHidden} placeholder={def.placeholder} options={def.options || []} value={value} onChange={(v) => onChange(name, v)} />;
-    if (type === 'date') return <DateField label={label} labelHidden={def.labelHidden} value={value} onChange={(v) => onChange(name, v)} />;
-    return <TextField label={label} labelHidden={def.labelHidden} value={value} onChange={(v) => onChange(name, v)} maxLength={maxLength} />;
-  })();
-
-  // Pixel-based sizing wrapper using Box. If width constraints are provided, apply them.
-  const hasWidth = def.widthPx || def.minWidthPx || def.maxWidthPx;
-  if (hasWidth) {
-    const minInlineSize = def.minWidthPx ? `${def.minWidthPx}px` : undefined;
-    const maxInlineSize = def.maxWidthPx ? `${def.maxWidthPx}px` : undefined;
-    const inlineSize = def.widthPx ? `${def.widthPx}px` : undefined;
-    return (
-      <Box minInlineSize={minInlineSize} maxInlineSize={maxInlineSize} inlineSize={inlineSize}>
-        {content}
-      </Box>
-    );
-  }
-
-  return content;
-}
-
-async function handleSave(values, setSaving, setNotice, setError) {
-  setSaving(true);
-  setNotice(null);
-  setError(null);
-  try {
-    const token = await shopify.session.getToken();
-    const res = await fetch('/apps/csd-entry/save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(values),
-    });
-    if (!res.ok) throw new Error('Save failed');
-    const data = await res.json();
-    setNotice((data && data.message) || 'CSD entry saved');
-  } catch (e) {
-    setError((e && e.message) || 'Something went wrong');
-  } finally {
-    setSaving(false);
-  }
 }
