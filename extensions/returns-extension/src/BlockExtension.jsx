@@ -95,9 +95,11 @@ function BlockExtension() {
     primaryReasons: [],
   });
   const [form, setForm] = useState(DEFAULT_STATE);
+  const [isOpen, setIsOpen] = useState(false); // collapsed by default
 
   // Auto-fill hidden order/customer/user identifiers using Admin context
   useEffect(() => {
+    if (!isOpen) return; // only hydrate identifiers when opening the form
     const orderGid = shopify?.data?.selected?.[0]?.id;
     if (!orderGid) return;
 
@@ -144,8 +146,7 @@ function BlockExtension() {
         }
       })();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shopify?.data]);
+  }, [shopify?.data, isOpen]);
 
   // debug helper (optional)
   useEffect(() => {
@@ -173,8 +174,9 @@ function BlockExtension() {
     [lookups.primaryReasons]
   );
 
-  // load lookups
+  // load lookups only when the form is open
   useEffect(() => {
+    if (!isOpen) return;
     let aborted = false; const ctrl = new AbortController();
     (async () => {
       setLoading(true); setError(null);
@@ -192,9 +194,24 @@ function BlockExtension() {
       } finally { if (!aborted) setLoading(false); }
     })();
     return () => { aborted = true; ctrl.abort(); };
-  }, [shopify]);
+  }, [shopify, isOpen]);
 
   const onChange = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  function resetForm() {
+    setForm(DEFAULT_STATE);
+  }
+
+  function toggleOpen() {
+    if (isOpen) {
+      // cancel: clear fields and collapse
+      resetForm();
+      setIsOpen(false);
+    } else {
+      // open: expand, identifiers + lookups will hydrate via effects
+      setIsOpen(true);
+    }
+  }
 
   async function handleSave() {
     setSaving(true); setError(null);
@@ -213,94 +230,106 @@ function BlockExtension() {
   }
 
   return (
-    <Box padding="none" maxBlockSize={460}>
+    <Box padding="none" maxBlockSize={isOpen ? 520 : 80}>
       <BlockStack gap="small">
-        {error && (
-          <InlineStack gap="small">
-            <Text emphasis>Problem</Text>
-            <Text>{String(error)}</Text>
-          </InlineStack>
-        )}
+        {/* Toggle button always visible */}
+        <InlineStack gap="small">
+          <Button kind={isOpen ? "secondary" : "primary"} onPress={toggleOpen}>
+            {isOpen ? "Cancel RSL Return Data Entry" : "Enter RSL Return Data"}
+          </Button>
+        </InlineStack>
 
-        {loading ? (
-          <InlineStack gap="small"><Text>Loading lookups…</Text></InlineStack>
-        ) : (
+        {/* Hidden until opened */}
+        {isOpen && (
           <BlockStack gap="small">
-            {/* Row 1: Request Date | Return Type | Reason Category */}
-            <InlineStack gap="small">
-              <DateField
-                label="Request Date"
-                value={form.troubleOccurredOn}
-                onChange={onChange("troubleOccurredOn")}
-              />
-              <Select
-                label="Return Type"
-                value={form.returnType}
-                onChange={onChange("returnType")}
-                options={returnTypeOptions}
-              />
-              <Select
-                label="Reason Category"
-                value={form.primaryReason}
-                onChange={onChange("primaryReason")}
-                options={primaryReasonOptions}
-              />
-            </InlineStack>
-
-            {/* Row 2: Troubleshooting Performed (checkbox only; label must not wrap) */}
-            <InlineStack gap="small" blockAlignment="center">
-              <Box minInlineSize="40ch" maxInlineSize="100%">
-                <Checkbox
-                  label="Troubleshooting performed"
-                  checked={form.hasTroubleshooting}
-                  onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
-                />
-              </Box>
-            </InlineStack>
-
-            {/* Row 3: Troubleshooting Category | Serial # (only when checked; each half width) */}
-            {form.hasTroubleshooting && (
+            {error && (
               <InlineStack gap="small">
-                <Box minInlineSize="50%" maxInlineSize="50%">
-                  <Select
-                    label="Troubleshooting Category"
-                    value={form.troubleshootingCategory}
-                    onChange={onChange("troubleshootingCategory")}
-                    options={troubleshootingCategoryOptions}
-                  />
-                </Box>
-                <Box minInlineSize="50%" maxInlineSize="50%">
-                  <TextField
-                    label="Serial #"
-                    value={form.associatedSerialNumber}
-                    onChange={onChange("associatedSerialNumber")}
-                  />
-                </Box>
+                <Text emphasis>Problem</Text>
+                <Text>{String(error)}</Text>
               </InlineStack>
             )}
 
-            {/* Notes always visible */}
-            <TextArea
-              label="Customer Reported Info"
-              value={form.customerReportedInfo}
-              onChange={onChange("customerReportedInfo")}
-              maxLength={2000}
-            />
+            {loading ? (
+              <InlineStack gap="small"><Text>Loading lookups…</Text></InlineStack>
+            ) : (
+              <BlockStack gap="small">
+                {/* Row 1: Request Date | Return Type | Reason Category */}
+                <InlineStack gap="small">
+                  <DateField
+                    label="Request Date"
+                    value={form.troubleOccurredOn}
+                    onChange={onChange("troubleOccurredOn")}
+                  />
+                  <Select
+                    label="Return Type"
+                    value={form.returnType}
+                    onChange={onChange("returnType")}
+                    options={returnTypeOptions}
+                  />
+                  <Select
+                    label="Reason Category"
+                    value={form.primaryReason}
+                    onChange={onChange("primaryReason")}
+                    options={primaryReasonOptions}
+                  />
+                </InlineStack>
 
-            <InlineStack gap="small">
-              <Button kind="primary" onPress={handleSave} disabled={saving}>
-                {saving ? "Saving…" : "Save"}
-              </Button>
-            </InlineStack>
+                {/* Row 2: Troubleshooting performed (checkbox only; label must not wrap) */}
+                <InlineStack gap="small" blockAlignment="center">
+                  <Box minInlineSize="40ch" maxInlineSize="100%">
+                    <Checkbox
+                      label="Troubleshooting performed"
+                      checked={form.hasTroubleshooting}
+                      onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
+                    />
+                  </Box>
+                </InlineStack>
 
-            {DEBUG && (
-              <InlineStack gap="small">
-                <Button onPress={async () => {
-                  const t = await getSessionTokenWithRetry(shopify);
-                  if (t) { await navigator.clipboard.writeText(t); shopify?.toast?.show?.("Session token copied"); console.info("SESSION_TOKEN:", t); }
-                  else { shopify?.toast?.show?.("No token in this context"); }
-                }}>Copy Admin token</Button>
-              </InlineStack>
+                {/* Row 3: Troubleshooting Category | Serial # (only when checked; 50/50 split) */}
+                {form.hasTroubleshooting && (
+                  <InlineStack gap="small">
+                    <Box minInlineSize="50%" maxInlineSize="50%">
+                      <Select
+                        label="Troubleshooting Category"
+                        value={form.troubleshootingCategory}
+                        onChange={onChange("troubleshootingCategory")}
+                        options={troubleshootingCategoryOptions}
+                      />
+                    </Box>
+                    <Box minInlineSize="50%" maxInlineSize="50%">
+                      <TextField
+                        label="Serial #"
+                        value={form.associatedSerialNumber}
+                        onChange={onChange("associatedSerialNumber")}
+                      />
+                    </Box>
+                  </InlineStack>
+                )}
+
+                {/* Notes always visible when open */}
+                <TextArea
+                  label={form.hasTroubleshooting ? "Customer reported info / troubleshooting steps" : "Customer reported info"}
+                  value={form.customerReportedInfo}
+                  onChange={onChange("customerReportedInfo")}
+                  maxLength={2000}
+                />
+
+                <InlineStack gap="small">
+                  <Button kind="primary" onPress={handleSave} disabled={saving}>
+                    {saving ? "Saving…" : "Save"}
+                  </Button>
+                </InlineStack>
+
+                {DEBUG && (
+                  <InlineStack gap="small">
+                    <Button onPress={async () => {
+                      const t = await getSessionTokenWithRetry(shopify);
+                      if (t) { await navigator.clipboard.writeText(t); shopify?.toast?.show?.("Session token copied"); console.info("SESSION_TOKEN:", t); }
+                      else { shopify?.toast?.show?.("No token in this context"); }
+                    }}>Copy Admin token</Button>
+                  </InlineStack>
+                )}
+              </BlockStack>
             )}
           </BlockStack>
         )}

@@ -4,8 +4,8 @@ generator client {
 
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL") // pooled (PgBouncer)
-  directUrl = env("DIRECT_URL") // direct compute, used for migrate/introspect
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Session {
@@ -178,4 +178,50 @@ model RepairEntry {
   updatedAt             DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
 
   @@map("repair_entry")
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model department {
+  id   Int     @default(autoincrement())
+  name String? @db.Char(1)
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model note {
+  id                Int     @default(autoincrement())
+  department_id     Int?
+  user_gid          String? @db.Char(1)
+  note              String?
+  return_entries_id Int?
+
+  @@ignore
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model return_entries {
+  id                           Int       @id(map: "return_entries_pk") @default(autoincrement())
+  date_requested               DateTime? @db.Date
+  original_order_id            String    @db.Char(1)
+  original_order_gid           String?   @db.Char(1)
+  customer_name                String    @db.Char(1)
+  customer_gid                 String?   @db.Char(1)
+  primary_customer_reason      Int?
+  item                         Int?
+  return_type                  Int?
+  customer_service_status      Int?
+  rsl_csr                      String?   @db.Char(1)
+  rsl_csr_gid                  String?   @db.Char(1)
+  return_item_required         Boolean?
+  final_disposition            Int?
+  date_received                DateTime? @db.Date
+  repair_condition_received_id Int?
+  date_inspected               DateTime? @db.Date
+  rsl_rd_staff                 String?   @db.Char(1)
+  rsl_rd_staff_gid             Int?
+  replaced_items_todo          Int?
+  status                       Int?
 }
