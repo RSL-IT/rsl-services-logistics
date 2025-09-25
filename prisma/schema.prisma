@@ -138,28 +138,6 @@ model tblkp_CsdRefundEligible {
   @@map("csd_refund_eligible")
 }
 
-model CsdEntry {
-  id                                             Int       @id @default(autoincrement())
-  serviceNumber                                  DateTime  @map("service_number") @db.Timestamptz(6)
-  dateOfReturnRequest                            DateTime? @map("date_of_return_request") @db.Timestamptz(6)
-  originalOrder                                  String?   @map("original_order")
-  customerName                                   String?   @map("customer_name")
-  primaryCustomerReportedReasonForReturnWarranty String?   @map("primary_customer_reported_reason_for_return_warranty")
-  colUnnamed                                     String?   @map("col_unnamed")
-  item                                           String?   @map("item")
-  replacementOrder                               String?   @map("replacement_order")
-  returnType                                     String?   @map("return_type")
-  troubleshootingNotes                           String?   @map("troubleshooting_notes")
-  customerServiceStatus                          String?   @map("customer_service_status")
-  rslCsd                                         String?   @map("rsl_csd")
-  returnItemRequired                             Boolean?  @map("return_item_required")
-  repairDeptDesignation                          String?   @map("repair_dept_designation")
-  createdAt                                      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt                                      DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
-
-  @@map("csd_entry")
-}
-
 model RepairEntry {
   id                    Int       @id @default(autoincrement())
   serviceNumber         DateTime? @map("service_number") @db.Timestamptz(6)
@@ -180,48 +158,44 @@ model RepairEntry {
   @@map("repair_entry")
 }
 
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
 model department {
-  id   Int     @default(autoincrement())
+  id   Int     @id @default(autoincrement())
   name String? @db.Char(1)
 
-  @@ignore
+  @@map("tlkp_department")
 }
 
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
 model note {
-  id                Int     @default(autoincrement())
-  department_id     Int?
-  user_gid          String? @db.Char(1)
-  note              String?
-  return_entries_id Int?
+  id              Int     @id @default(autoincrement())
+  department_id   Int?
+  user_gid        String? @db.Char(1)
+  note            String?
+  return_entry_id Int?
 
-  @@ignore
+  @@map("tbljn_note_departmentUserReturnEntry")
 }
 
-/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
-model return_entries {
-  id                           Int       @id(map: "return_entries_pk") @default(autoincrement())
+model return_entry {
+  id                           Int       @id(map: "return_entry_pk") @default(autoincrement())
   date_requested               DateTime? @db.Date
-  original_order_id            String    @db.Char(1)
+  original_order               String    @db.Char(1)
   original_order_gid           String?   @db.Char(1)
   customer_name                String    @db.Char(1)
   customer_gid                 String?   @db.Char(1)
-  primary_customer_reason      Int?
-  item                         Int?
-  return_type                  Int?
-  customer_service_status      Int?
+  primary_customer_reason_id   Int?
+  item_id                      Int?
+  return_type_id               Int?
+  customer_service_status_id   Int?
   rsl_csr                      String?   @db.Char(1)
   rsl_csr_gid                  String?   @db.Char(1)
   return_item_required         Boolean?
-  final_disposition            Int?
+  final_disposition_id         Int?
   date_received                DateTime? @db.Date
   repair_condition_received_id Int?
   date_inspected               DateTime? @db.Date
   rsl_rd_staff                 String?   @db.Char(1)
   rsl_rd_staff_gid             Int?
+  replacement_order            Int?
   replaced_items_todo          Int?
-  status                       Int?
+  status_id                    Int?
 }
