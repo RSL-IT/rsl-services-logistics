@@ -2,7 +2,7 @@
 CREATE SCHEMA IF NOT EXISTS "public";
 
 -- CreateTable
-CREATE TABLE "public"."Session" (
+CREATE TABLE IF NOT EXISTS "public"."Session" (
     "id" TEXT NOT NULL,
     "shop" TEXT NOT NULL,
     "state" TEXT NOT NULL,
@@ -23,7 +23,7 @@ CREATE TABLE "public"."Session" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_condition_received" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_condition_received" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -31,7 +31,7 @@ CREATE TABLE "public"."repair_entry_condition_received" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_photos" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_photos" (
     "id" SERIAL NOT NULL,
     "value" BOOLEAN NOT NULL,
 
@@ -39,7 +39,7 @@ CREATE TABLE "public"."repair_entry_photos" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_diagnosis" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_diagnosis" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -47,7 +47,7 @@ CREATE TABLE "public"."repair_entry_diagnosis" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_disposition" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_disposition" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -55,7 +55,7 @@ CREATE TABLE "public"."repair_entry_disposition" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_replaced_items" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_replaced_items" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -63,7 +63,7 @@ CREATE TABLE "public"."repair_entry_replaced_items" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_feedback_to_csd" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_feedback_to_csd" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -71,7 +71,7 @@ CREATE TABLE "public"."repair_entry_feedback_to_csd" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_returns_repair_status" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_returns_repair_status" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -79,7 +79,7 @@ CREATE TABLE "public"."repair_entry_returns_repair_status" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry_replacement_item_delivery_date" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry_replacement_item_delivery_date" (
     "id" SERIAL NOT NULL,
     "value" TIMESTAMPTZ(6) NOT NULL,
 
@@ -87,7 +87,7 @@ CREATE TABLE "public"."repair_entry_replacement_item_delivery_date" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_primary_customer_reported_reason_for_return_warranty" (
+CREATE TABLE IF NOT EXISTS "public"."csd_primary_customer_reported_reason_for_return_warranty" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -95,7 +95,7 @@ CREATE TABLE "public"."csd_primary_customer_reported_reason_for_return_warranty"
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_item" (
+CREATE TABLE IF NOT EXISTS "public"."csd_item" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -103,7 +103,7 @@ CREATE TABLE "public"."csd_item" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_return_type" (
+CREATE TABLE IF NOT EXISTS "public"."csd_return_type" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -111,7 +111,7 @@ CREATE TABLE "public"."csd_return_type" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_troubleshooting_notes" (
+CREATE TABLE IF NOT EXISTS "public"."csd_troubleshooting_notes" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -119,7 +119,7 @@ CREATE TABLE "public"."csd_troubleshooting_notes" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_customer_service_status" (
+CREATE TABLE IF NOT EXISTS "public"."csd_customer_service_status" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -127,7 +127,7 @@ CREATE TABLE "public"."csd_customer_service_status" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_rsl_csd" (
+CREATE TABLE IF NOT EXISTS "public"."csd_rsl_csd" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -135,7 +135,7 @@ CREATE TABLE "public"."csd_rsl_csd" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_return_item_required" (
+CREATE TABLE IF NOT EXISTS "public"."csd_return_item_required" (
     "id" SERIAL NOT NULL,
     "value" BOOLEAN NOT NULL,
 
@@ -143,7 +143,7 @@ CREATE TABLE "public"."csd_return_item_required" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."csd_refund_eligible" (
+CREATE TABLE IF NOT EXISTS "public"."csd_refund_eligible" (
     "id" SERIAL NOT NULL,
     "value" TEXT NOT NULL,
 
@@ -151,7 +151,7 @@ CREATE TABLE "public"."csd_refund_eligible" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."repair_entry" (
+CREATE TABLE IF NOT EXISTS "public"."repair_entry" (
     "id" SERIAL NOT NULL,
     "service_number" TIMESTAMPTZ(6),
     "date_of_repair_request" TIMESTAMPTZ(6),
@@ -172,7 +172,7 @@ CREATE TABLE "public"."repair_entry" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."tlkp_department" (
+CREATE TABLE IF NOT EXISTS "public"."tlkp_department" (
     "id" SERIAL NOT NULL,
     "name" CHAR(1),
 
@@ -180,7 +180,7 @@ CREATE TABLE "public"."tlkp_department" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."tbljn_note_departmentUserReturnEntry" (
+CREATE TABLE IF NOT EXISTS "public"."tbljn_note_departmentUserReturnEntry" (
     "id" SERIAL NOT NULL,
     "department_id" INTEGER,
     "user_gid" CHAR(1),
@@ -191,7 +191,7 @@ CREATE TABLE "public"."tbljn_note_departmentUserReturnEntry" (
 );
 
 -- CreateTable
-CREATE TABLE "public"."return_entry" (
+CREATE TABLE IF NOT EXISTS "public"."return_entry" (
     "id" SERIAL NOT NULL,
     "date_requested" DATE,
     "original_order" CHAR(1) NOT NULL,

@@ -13,9 +13,9 @@ import {
   Box,
   useApi,
 } from "@shopify/ui-extensions-react/admin";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const DEBUG = false;
+const DEBUG = true; // set to false when you're done debugging
 const TARGET = "admin.order-details.block.render";
 
 // Prefer CLI tunnel via __APP_URL__, then Vite var, then Fly
@@ -25,15 +25,22 @@ const BASE_URL =
   "https://rsl-services-app.fly.dev";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function getSessionTokenWithRetry(shopify, attempts = 5) {
+
+async function getSessionTokenWithRetry(shopify, attempts = 10) {
   for (let i = 0; i < attempts; i++) {
     try {
-      const t = shopify?.sessionToken?.get ? await shopify.sessionToken.get() : null;
+      // Ask Admin to mint a *fresh* token (important on some shops)
+      const t = shopify?.sessionToken?.get
+        ? await shopify.sessionToken.get({ fresh: true })
+        : null;
       if (t) return t;
-    } catch {}
-    await sleep(150 * (i + 1));
+    } catch {
+      /* swallow and retry */
+    }
+    // progressive backoff
+    await sleep(150 + i * 250);
   }
-  return null;
+  return null; // fallback to server bypass if enabled
 }
 
 function todayISO() {
@@ -46,38 +53,61 @@ function todayISO() {
 
 const PLACEHOLDERS = {
   returnType: { value: "", label: "Pick a return type" },
-  troubleshootingCategory: { value: "", label: "Pick a troubleshooting category" },
-  primaryReason: { value: "", label: "Pick a customer reason category" },
+  troubleshootingCategory: { value: "", label: "Set troubleshooting category" },
+  primaryReason: { value: "", label: "Set customer reason" },
 };
 
 const DEFAULT_STATE = {
-  orderId: "",           // hidden but stored (human-readable)
-  orderGid: "",          // hidden but stored (GID)
-  customerGid: "",       // hidden
-  userGid: "",           // hidden (current Shopify staff user)
+  // Hidden but stored
+  orderId: "",
+  orderGid: "",
+  customerGid: "",
+  userGid: "",
+  customerName: "",
+  csrUsername: "",
+
+  // Visible inputs
   returnType: PLACEHOLDERS.returnType.value,
   primaryReason: PLACEHOLDERS.primaryReason.value,
   troubleOccurredOn: todayISO(),
-  associatedSerialNumber: "",
+
   hasTroubleshooting: false,
   troubleshootingCategory: PLACEHOLDERS.troubleshootingCategory.value,
+  associatedSerialNumber: "",
   customerReportedInfo: "",
 };
 
 function normalizeOptions(rows, placeholder) {
   const opts = Array.isArray(rows)
-    ? rows.map(({ id, label }) => ({ value: String(id), label: String(label ?? id) }))
+    ? rows.map(({ id, label }) => ({
+      value: String(id),
+      label: String(label ?? id),
+    }))
     : [];
   return [placeholder, ...opts];
 }
 
-async function fetchLookups({ shopify, signal }) {
+async function fetchLookupsOnce(shopify, { timeoutMs = 10000, signal } = {}) {
   const token = await getSessionTokenWithRetry(shopify);
   const url = `${BASE_URL}/apps/returns/lookups?sets=returnTypes,troubleshootingCategories,primaryReasons`;
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
-  const res = await fetch(url, { headers, signal });
-  if (!res.ok) throw new Error(`Lookups fetch failed ${res.status}: ${await res.text()}`);
-  return res.json();
+
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  signal?.addEventListener?.("abort", onAbort, { once: true });
+  const to = setTimeout(() => ctrl.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, { headers, signal: ctrl.signal });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`Lookups fetch failed ${res.status}: ${t}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(to);
+    signal?.removeEventListener?.("abort", onAbort);
+  }
 }
 
 export default reactExtension(TARGET, () => <BlockExtension />);
@@ -86,117 +116,207 @@ function BlockExtension() {
   const shopify = useApi(TARGET); // { data, query, sessionToken, toast, ... }
 
   // state
-  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
   const [lookups, setLookups] = useState({
     returnTypes: [],
     troubleshootingCategories: [],
     primaryReasons: [],
   });
+  const [lookupsLoading, setLookupsLoading] = useState(false);
+  const [lookupsLoaded, setLookupsLoaded] = useState(false);
+  const lookupsAbortRef = useRef(null);
+
   const [form, setForm] = useState(DEFAULT_STATE);
   const [isOpen, setIsOpen] = useState(false); // collapsed by default
 
-  // Auto-fill hidden order/customer/user identifiers using Admin context
-  useEffect(() => {
-    if (!isOpen) return; // only hydrate identifiers when opening the form
-    const orderGid = shopify?.data?.selected?.[0]?.id;
-    if (!orderGid) return;
-
-    setForm((p) => (p.orderGid ? p : { ...p, orderGid }));
-
-    if (typeof shopify?.query === "function") {
-      (async () => {
-        try {
-          const { data } = await shopify.query(
-            `#graphql
-            query OrderInfo($id: ID!) {
-              order(id: $id) {
-                id
-                name
-                legacyResourceId
-                customer { id }
-              }
-            }
-          `,
-            { variables: { id: orderGid } }
-          );
-          const o = data?.order;
-          const display = o?.name || (o?.legacyResourceId ? String(o.legacyResourceId) : orderGid);
-          setForm((p) => ({
-            ...p,
-            orderId: p.orderId || display,
-            customerGid: p.customerGid || o?.customer?.id || "",
-          }));
-        } catch {
-          setForm((p) => ({ ...p, orderId: p.orderId || orderGid }));
-        }
-
-        // Best-effort: capture current staff user id if available
-        try {
-          const { data: me } = await shopify.query(
-            `#graphql
-            query CurrentUser { currentUser { id } }
-          `
-          );
-          const uid = me?.currentUser?.id;
-          if (uid) setForm((p) => ({ ...p, userGid: p.userGid || uid }));
-        } catch {
-          // ignore if not supported on this API version/shop
-        }
-      })();
-    }
-  }, [shopify?.data, isOpen]);
-
-  // debug helper (optional)
-  useEffect(() => {
-    if (!DEBUG) return;
-    (async () => {
-      const t = await getSessionTokenWithRetry(shopify);
-      if (t) {
-        // eslint-disable-next-line no-console
-        console.info("SESSION_TOKEN:", t);
-        try { (globalThis || window).__ADMIN_TOKEN = t; } catch {}
-      }
-    })();
-  }, [shopify]);
+  const onChange = (key) => (value) =>
+    setForm((prev) => ({ ...prev, [key]: value }));
 
   const returnTypeOptions = useMemo(
     () => normalizeOptions(lookups.returnTypes, PLACEHOLDERS.returnType),
     [lookups.returnTypes]
   );
   const troubleshootingCategoryOptions = useMemo(
-    () => normalizeOptions(lookups.troubleshootingCategories, PLACEHOLDERS.troubleshootingCategory),
+    () =>
+      normalizeOptions(
+        lookups.troubleshootingCategories,
+        PLACEHOLDERS.troubleshootingCategory
+      ),
     [lookups.troubleshootingCategories]
   );
   const primaryReasonOptions = useMemo(
-    () => normalizeOptions(lookups.primaryReasons, PLACEHOLDERS.primaryReason),
+    () =>
+      normalizeOptions(lookups.primaryReasons, PLACEHOLDERS.primaryReason),
     [lookups.primaryReasons]
   );
 
-  // load lookups only when the form is open
+  // 🔇 Quiet prefetch at mount
+  useEffect(() => {
+    if (lookupsLoaded || lookupsLoading) return;
+
+    const abort = new AbortController();
+    lookupsAbortRef.current = abort;
+    setLookupsLoading(true);
+    setError(null);
+
+    fetchLookupsOnce(shopify, { timeoutMs: 10000, signal: abort.signal })
+      .then((data) => {
+        setLookups({
+          returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
+          troubleshootingCategories: Array.isArray(
+            data.troubleshootingCategories
+          )
+            ? data.troubleshootingCategories
+            : [],
+          primaryReasons: Array.isArray(data.primaryReasons)
+            ? data.primaryReasons
+            : [],
+        });
+        setLookupsLoaded(true);
+      })
+      .catch((e) => {
+        if (DEBUG) console.warn("Prefetch lookups failed:", e);
+        // Don't block UI; we'll retry when opened
+      })
+      .finally(() => {
+        setLookupsLoading(false);
+        lookupsAbortRef.current = null;
+      });
+
+    return () => {
+      abort.abort();
+      lookupsAbortRef.current = null;
+    };
+  }, [shopify, lookupsLoaded, lookupsLoading]);
+
+  // ▶️ When opening, ensure lookups are present
   useEffect(() => {
     if (!isOpen) return;
-    let aborted = false; const ctrl = new AbortController();
-    (async () => {
-      setLoading(true); setError(null);
-      try {
-        const data = await fetchLookups({ shopify, signal: ctrl.signal });
-        if (!aborted) {
-          setLookups({
-            returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
-            troubleshootingCategories: Array.isArray(data.troubleshootingCategories) ? data.troubleshootingCategories : [],
-            primaryReasons: Array.isArray(data.primaryReasons) ? data.primaryReasons : [],
-          });
-        }
-      } catch (e) {
-        if (!aborted) setError(e.message);
-      } finally { if (!aborted) setLoading(false); }
-    })();
-    return () => { aborted = true; ctrl.abort(); };
-  }, [shopify, isOpen]);
+    if (lookupsLoaded) return;
 
-  const onChange = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value }));
+    if (lookupsAbortRef.current) {
+      try {
+        lookupsAbortRef.current.abort();
+      } catch {}
+      lookupsAbortRef.current = null;
+    }
+
+    const abort = new AbortController();
+    lookupsAbortRef.current = abort;
+    setLookupsLoading(true);
+    setError(null);
+
+    fetchLookupsOnce(shopify, { timeoutMs: 12000, signal: abort.signal })
+      .then((data) => {
+        setLookups({
+          returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
+          troubleshootingCategories: Array.isArray(
+            data.troubleshootingCategories
+          )
+            ? data.troubleshootingCategories
+            : [],
+          primaryReasons: Array.isArray(data.primaryReasons)
+            ? data.primaryReasons
+            : [],
+        });
+        setLookupsLoaded(true);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => {
+        setLookupsLoading(false);
+        lookupsAbortRef.current = null;
+      });
+  }, [isOpen, shopify, lookupsLoaded]);
+
+  // Auto-fill hidden order/customer/user identifiers (only when opening)
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const orderGid = shopify?.data?.selected?.[0]?.id;
+    if (orderGid && !form.orderGid) {
+      setForm((p) => ({ ...p, orderGid }));
+    }
+
+    if (typeof shopify?.query === "function" && orderGid) {
+      (async () => {
+        try {
+          // Get order display name + customer IDs/names
+          const { data } = await shopify.query(
+            /* GraphQL */ `
+              query OrderInfo($id: ID!) {
+                order(id: $id) {
+                  id
+                  name
+                  legacyResourceId
+                  customer {
+                    id
+                    displayName
+                    firstName
+                    lastName
+                  }
+                }
+              }
+            `,
+            { variables: { id: orderGid } }
+          );
+          const o = data?.order;
+          const display =
+            o?.name ||
+            (o?.legacyResourceId ? String(o.legacyResourceId) : orderGid);
+          const cust = o?.customer;
+          const custName =
+            cust?.displayName ||
+            [cust?.firstName, cust?.lastName].filter(Boolean).join(" ") ||
+            "";
+
+          setForm((p) => ({
+            ...p,
+            orderId: p.orderId || display,
+            customerGid: p.customerGid || cust?.id || "",
+            customerName: p.customerName || custName,
+          }));
+        } catch {
+          setForm((p) => ({
+            ...p,
+            orderId: p.orderId || orderGid,
+          }));
+        }
+
+        try {
+          // Current staff user (for CSR fields)
+          const { data: me } = await shopify.query(
+            /* GraphQL */ `
+              query CurrentUser {
+                currentUser {
+                  id
+                  displayName
+                  firstName
+                  lastName
+                  email
+                }
+              }
+            `
+          );
+          const u = me?.currentUser;
+          const name =
+            u?.displayName ||
+            [u?.firstName, u?.lastName].filter(Boolean).join(" ") ||
+            u?.email ||
+            "";
+          setForm((p) => ({
+            ...p,
+            userGid: p.userGid || u?.id || "",
+            csrUsername: p.csrUsername || name,
+          }));
+        } catch {
+          /* ignore */
+        }
+      })();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shopify?.data, isOpen]);
 
   function resetForm() {
     setForm(DEFAULT_STATE);
@@ -204,29 +324,66 @@ function BlockExtension() {
 
   function toggleOpen() {
     if (isOpen) {
-      // cancel: clear fields and collapse
       resetForm();
       setIsOpen(false);
     } else {
-      // open: expand, identifiers + lookups will hydrate via effects
       setIsOpen(true);
     }
   }
 
   async function handleSave() {
-    setSaving(true); setError(null);
+    setSaving(true);
+    setError(null);
     try {
       const token = await getSessionTokenWithRetry(shopify);
-      if (!token) throw new Error("No Admin session token available; open in Admin (not Preview)");
-      const url = `${BASE_URL}/apps/returns/save`;
-      const res = await fetch(url, {
+
+      const toIntOrNull = (v) => {
+        const n = parseInt(v, 10);
+        return Number.isFinite(n) ? n : null;
+      };
+
+      const payload = {
+        // FKs (Int)
+        return_type_id: toIntOrNull(form.returnType),
+        primary_customer_reason_id: toIntOrNull(form.primaryReason),
+
+        // Shopify identifiers (GIDs)
+        original_order_gid: form.orderGid || null,
+        customer_gid: form.customerGid || null,
+        rsl_csr_gid: form.userGid || null,
+
+        // Business fields
+        original_order: form.orderId || null,
+        customer_name: form.customerName || null,
+        rsl_csr: form.csrUsername || null,
+        serial_number: form.associatedSerialNumber || null,
+
+        // Notes are not saved here because return_entry has no notes column
+        // (use your junction table route when ready)
+      };
+
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(`${BASE_URL}/apps/returns/save`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(form),
+        headers,
+        body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error(`Save failed ${res.status}: ${await res.text()}`);
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Save failed ${res.status}: ${txt}`);
+      }
+
       shopify?.toast?.show?.("Saved.");
-    } catch (e) { setError(e.message); } finally { setSaving(false); }
+      // Optionally collapse/reset after save:
+      // resetForm(); setIsOpen(false);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -237,6 +394,7 @@ function BlockExtension() {
           <Button kind={isOpen ? "secondary" : "primary"} onPress={toggleOpen}>
             {isOpen ? "Cancel RSL Return Data Entry" : "Enter RSL Return Data"}
           </Button>
+          {!isOpen && !lookupsLoaded && lookupsLoading && <Text>…</Text>}
         </InlineStack>
 
         {/* Hidden until opened */}
@@ -246,11 +404,22 @@ function BlockExtension() {
               <InlineStack gap="small">
                 <Text emphasis>Problem</Text>
                 <Text>{String(error)}</Text>
+                <Button
+                  kind="secondary"
+                  onPress={() => {
+                    setError(null);
+                    setLookupsLoaded(false); // trigger refetch on next open
+                  }}
+                >
+                  Retry
+                </Button>
               </InlineStack>
             )}
 
-            {loading ? (
-              <InlineStack gap="small"><Text>Loading lookups…</Text></InlineStack>
+            {!lookupsLoaded && lookupsLoading ? (
+              <InlineStack gap="small">
+                <Text>Preparing …</Text>
+              </InlineStack>
             ) : (
               <BlockStack gap="small">
                 {/* Row 1: Request Date | Return Type | Reason Category */}
@@ -280,7 +449,9 @@ function BlockExtension() {
                     <Checkbox
                       label="Troubleshooting performed"
                       checked={form.hasTroubleshooting}
-                      onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
+                      onChange={(v) =>
+                        setForm((p) => ({ ...p, hasTroubleshooting: v }))
+                      }
                     />
                   </Box>
                 </InlineStack>
@@ -306,29 +477,52 @@ function BlockExtension() {
                   </InlineStack>
                 )}
 
-                {/* Notes always visible when open */}
+                {/* Notes always visible when open, with dynamic label */}
                 <TextArea
-                  label={form.hasTroubleshooting ? "Customer reported info / troubleshooting steps" : "Customer reported info"}
+                  label={
+                    form.hasTroubleshooting
+                      ? "Customer reported info / troubleshooting steps"
+                      : "Customer reported info"
+                  }
                   value={form.customerReportedInfo}
                   onChange={onChange("customerReportedInfo")}
                   maxLength={2000}
                 />
+
+                {/* Optional debug context */}
+                {DEBUG && (
+                  <InlineStack gap="small">
+                    <Text>
+                      host: {globalThis.location?.host || "?"} · ref:{" "}
+                      {typeof document !== "undefined"
+                        ? document.referrer || "?"
+                        : "?"}
+                    </Text>
+                    <Button
+                      onPress={async () => {
+                        const t = await getSessionTokenWithRetry(shopify);
+                        if (t) {
+                          try {
+                            await navigator.clipboard.writeText(t);
+                          } catch {}
+                          shopify?.toast?.show?.("Session token copied");
+                          console.info("SESSION_TOKEN:", t);
+                        } else {
+                          shopify?.toast?.show?.("No token in this context");
+                          console.info("No token available in this context");
+                        }
+                      }}
+                    >
+                      Copy Admin token
+                    </Button>
+                  </InlineStack>
+                )}
 
                 <InlineStack gap="small">
                   <Button kind="primary" onPress={handleSave} disabled={saving}>
                     {saving ? "Saving…" : "Save"}
                   </Button>
                 </InlineStack>
-
-                {DEBUG && (
-                  <InlineStack gap="small">
-                    <Button onPress={async () => {
-                      const t = await getSessionTokenWithRetry(shopify);
-                      if (t) { await navigator.clipboard.writeText(t); shopify?.toast?.show?.("Session token copied"); console.info("SESSION_TOKEN:", t); }
-                      else { shopify?.toast?.show?.("No token in this context"); }
-                    }}>Copy Admin token</Button>
-                  </InlineStack>
-                )}
               </BlockStack>
             )}
           </BlockStack>

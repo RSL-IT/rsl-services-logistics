@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
+  engineType = "library" // or "binary" (either is fine on Node)
 }
 
 datasource db {
@@ -86,6 +87,9 @@ model tblkp_CsdPrimaryCustomerReportedReasonForReturnWarranty {
   id    Int    @id @default(autoincrement())
   value String
 
+  // back-relation → ReturnEntry.reasonCategory
+  returnEntries ReturnEntry[] @relation("ReasonEntries")
+
   @@map("csd_primary_customer_reported_reason_for_return_warranty")
 }
 
@@ -99,6 +103,9 @@ model tblkp_CsdItem {
 model tblkp_CsdReturnType {
   id    Int    @id @default(autoincrement())
   value String
+
+  // back-relation → ReturnEntry.returnType
+  returnEntries ReturnEntry[] @relation("ReturnTypeEntries")
 
   @@map("csd_return_type")
 }
@@ -175,27 +182,40 @@ model note {
   @@map("tbljn_note_departmentUserReturnEntry")
 }
 
-model return_entry {
+/**
+ * Canonical Prisma model for DB table "return_entry".
+ * (We renamed the Prisma model to PascalCase while keeping @@map so existing data is preserved.)
+ */
+model ReturnEntry {
   id                           Int       @id(map: "return_entry_pk") @default(autoincrement())
   date_requested               DateTime? @db.Date
-  original_order               String    @db.Char(1)
-  original_order_gid           String?   @db.Char(1)
-  customer_name                String    @db.Char(1)
-  customer_gid                 String?   @db.Char(1)
+  original_order               String    @db.Text // was @db.Char(1)
+  original_order_gid           String?   @db.Text // was @db.Char(1)
+  customer_name                String    @db.Text // was @db.Char(1)
+  customer_gid                 String?   @db.Text // was @db.Char(1)
   primary_customer_reason_id   Int?
   item_id                      Int?
   return_type_id               Int?
   customer_service_status_id   Int?
-  rsl_csr                      String?   @db.Char(1)
-  rsl_csr_gid                  String?   @db.Char(1)
+  rsl_csr                      String?   @db.Text // was @db.Char(1)
+  rsl_csr_gid                  String?   @db.Text // was @db.Char(1)
   return_item_required         Boolean?
   final_disposition_id         Int?
   date_received                DateTime? @db.Date
   repair_condition_received_id Int?
   date_inspected               DateTime? @db.Date
-  rsl_rd_staff                 String?   @db.Char(1)
+  rsl_rd_staff                 String?   @db.Text // was @db.Char(1)
   rsl_rd_staff_gid             Int?
   replacement_order            Int?
   replaced_items_todo          Int?
   status_id                    Int?
+  serial_number                String?   @db.Text // was @db.Char(1)
+
+  // Named relations (unchanged)
+  returnType     tblkp_CsdReturnType?                                     @relation("ReturnTypeEntries", fields: [return_type_id], references: [id])
+  reasonCategory tblkp_CsdPrimaryCustomerReportedReasonForReturnWarranty? @relation("ReasonEntries", fields: [primary_customer_reason_id], references: [id])
+
+  @@index([return_type_id])
+  @@index([primary_customer_reason_id])
+  @@map("return_entry")
 }
