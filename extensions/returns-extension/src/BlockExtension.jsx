@@ -25,22 +25,18 @@ const BASE_URL =
   "https://rsl-services-app.fly.dev";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function getSessionTokenWithRetry(shopify, attempts = 10) {
   for (let i = 0; i < attempts; i++) {
     try {
-      // Ask Admin to mint a *fresh* token (important on some shops)
-      const t = shopify?.sessionToken?.get
-        ? await shopify.sessionToken.get({ fresh: true })
-        : null;
+      // Call with no args for widest compatibility
+      const t = shopify?.sessionToken?.get ? await shopify.sessionToken.get() : null;
       if (t) return t;
     } catch {
-      /* swallow and retry */
+      /* ignore and retry */
     }
-    // progressive backoff
-    await sleep(150 + i * 250);
+    await sleep(150 + i * 200);
   }
-  return null; // fallback to server bypass if enabled
+  return null;
 }
 
 function todayISO() {
@@ -79,10 +75,7 @@ const DEFAULT_STATE = {
 
 function normalizeOptions(rows, placeholder) {
   const opts = Array.isArray(rows)
-    ? rows.map(({ id, label }) => ({
-      value: String(id),
-      label: String(label ?? id),
-    }))
+    ? rows.map(({ id, label }) => ({ value: String(id), label: String(label ?? id) }))
     : [];
   return [placeholder, ...opts];
 }
@@ -117,6 +110,7 @@ function BlockExtension() {
 
   // state
   const [saving, setSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
   const [error, setError] = useState(null);
 
   const [lookups, setLookups] = useState({
@@ -130,25 +124,20 @@ function BlockExtension() {
 
   const [form, setForm] = useState(DEFAULT_STATE);
   const [isOpen, setIsOpen] = useState(false); // collapsed by default
+  const [adminTokenReady, setAdminTokenReady] = useState(false);
 
-  const onChange = (key) => (value) =>
-    setForm((prev) => ({ ...prev, [key]: value }));
+  const onChange = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value }));
 
   const returnTypeOptions = useMemo(
     () => normalizeOptions(lookups.returnTypes, PLACEHOLDERS.returnType),
     [lookups.returnTypes]
   );
   const troubleshootingCategoryOptions = useMemo(
-    () =>
-      normalizeOptions(
-        lookups.troubleshootingCategories,
-        PLACEHOLDERS.troubleshootingCategory
-      ),
+    () => normalizeOptions(lookups.troubleshootingCategories, PLACEHOLDERS.troubleshootingCategory),
     [lookups.troubleshootingCategories]
   );
   const primaryReasonOptions = useMemo(
-    () =>
-      normalizeOptions(lookups.primaryReasons, PLACEHOLDERS.primaryReason),
+    () => normalizeOptions(lookups.primaryReasons, PLACEHOLDERS.primaryReason),
     [lookups.primaryReasons]
   );
 
@@ -165,20 +154,15 @@ function BlockExtension() {
       .then((data) => {
         setLookups({
           returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
-          troubleshootingCategories: Array.isArray(
-            data.troubleshootingCategories
-          )
+          troubleshootingCategories: Array.isArray(data.troubleshootingCategories)
             ? data.troubleshootingCategories
             : [],
-          primaryReasons: Array.isArray(data.primaryReasons)
-            ? data.primaryReasons
-            : [],
+          primaryReasons: Array.isArray(data.primaryReasons) ? data.primaryReasons : [],
         });
         setLookupsLoaded(true);
       })
       .catch((e) => {
         if (DEBUG) console.warn("Prefetch lookups failed:", e);
-        // Don't block UI; we'll retry when opened
       })
       .finally(() => {
         setLookupsLoading(false);
@@ -191,9 +175,15 @@ function BlockExtension() {
     };
   }, [shopify, lookupsLoaded, lookupsLoading]);
 
-  // ▶️ When opening, ensure lookups are present
+  // ▶️ When opening, ensure lookups are present; also probe token
   useEffect(() => {
     if (!isOpen) return;
+    (async () => {
+      const t = await getSessionTokenWithRetry(shopify);
+      setAdminTokenReady(!!t);
+      if (DEBUG) console.info("Admin token present?", !!t);
+    })();
+
     if (lookupsLoaded) return;
 
     if (lookupsAbortRef.current) {
@@ -212,14 +202,10 @@ function BlockExtension() {
       .then((data) => {
         setLookups({
           returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
-          troubleshootingCategories: Array.isArray(
-            data.troubleshootingCategories
-          )
+          troubleshootingCategories: Array.isArray(data.troubleshootingCategories)
             ? data.troubleshootingCategories
             : [],
-          primaryReasons: Array.isArray(data.primaryReasons)
-            ? data.primaryReasons
-            : [],
+          primaryReasons: Array.isArray(data.primaryReasons) ? data.primaryReasons : [],
         });
         setLookupsLoaded(true);
       })
@@ -263,8 +249,7 @@ function BlockExtension() {
           );
           const o = data?.order;
           const display =
-            o?.name ||
-            (o?.legacyResourceId ? String(o.legacyResourceId) : orderGid);
+            o?.name || (o?.legacyResourceId ? String(o.legacyResourceId) : orderGid);
           const cust = o?.customer;
           const custName =
             cust?.displayName ||
@@ -318,24 +303,87 @@ function BlockExtension() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shopify?.data, isOpen]);
 
-  function resetForm() {
-    setForm(DEFAULT_STATE);
+  /**
+   * Ensure we have CSR identity JUST-IN-TIME for saving.
+   * Returns the identity so handleSave can use it immediately.
+   * Also updates state for UI, but handleSave must use the returned values.
+   */
+  async function ensureActorIdentity() {
+    let userGid = form.userGid;
+    let csrUsername = form.csrUsername;
+
+    if (userGid && csrUsername) return { userGid, csrUsername };
+    if (typeof shopify?.query !== "function") return { userGid, csrUsername };
+
+    try {
+      const { data: me } = await shopify.query(
+        /* GraphQL */ `
+          query CurrentUser {
+            currentUser {
+              id
+              displayName
+              firstName
+              lastName
+              email
+            }
+          }
+        `
+      );
+      const u = me?.currentUser;
+      const name =
+        u?.displayName ||
+        [u?.firstName, u?.lastName].filter(Boolean).join(" ") ||
+        u?.email ||
+        "";
+      userGid = userGid || u?.id || "";
+      csrUsername = csrUsername || name;
+
+      setForm((p) => ({ ...p, userGid, csrUsername }));
+    } catch {
+      // ignore; return whatever we have
+    }
+    return { userGid, csrUsername };
+  }
+
+  function resetForAnother() {
+    // Clear the visible inputs but preserve hidden context (order/user/customer)
+    setForm((p) => ({
+      ...DEFAULT_STATE,
+      orderId: p.orderId,
+      orderGid: p.orderGid,
+      customerGid: p.customerGid,
+      userGid: p.userGid,
+      customerName: p.customerName,
+      csrUsername: p.csrUsername,
+      troubleOccurredOn: todayISO(),
+    }));
   }
 
   function toggleOpen() {
     if (isOpen) {
-      resetForm();
+      setForm(DEFAULT_STATE);
       setIsOpen(false);
     } else {
       setIsOpen(true);
     }
   }
 
+  // ---- Save gating & label logic ----
+  const essentialFieldsSelected = Boolean(form.returnType) || Boolean(form.primaryReason);
+  const preconditionsMet = lookupsLoaded && essentialFieldsSelected;
+  const saveDisabled = !preconditionsMet || saving || saveSuccess;
+  const saveLabel = saving ? "Saving…" : saveSuccess ? "Save successful" : "Save";
+
   async function handleSave() {
     setSaving(true);
     setError(null);
     try {
+      // Fetch identity JUST-IN-TIME and use it directly
+      const { userGid, csrUsername } = await ensureActorIdentity();
+
+      // Try for a fresh Admin token (server will use it to fill CSR if needed)
       const token = await getSessionTokenWithRetry(shopify);
+      setAdminTokenReady(!!token);
 
       const toIntOrNull = (v) => {
         const n = parseInt(v, 10);
@@ -350,17 +398,23 @@ function BlockExtension() {
         // Shopify identifiers (GIDs)
         original_order_gid: form.orderGid || null,
         customer_gid: form.customerGid || null,
-        rsl_csr_gid: form.userGid || null,
+        rsl_csr_gid: userGid || null, // <- use resolved identity
 
         // Business fields
         original_order: form.orderId || null,
         customer_name: form.customerName || null,
-        rsl_csr: form.csrUsername || null,
+        rsl_csr: csrUsername || null, // <- use resolved identity
         serial_number: form.associatedSerialNumber || null,
-
-        // Notes are not saved here because return_entry has no notes column
-        // (use your junction table route when ready)
       };
+
+      if (DEBUG) {
+        console.info("SAVE payload identity:", {
+          rsl_csr_gid: payload.rsl_csr_gid,
+          rsl_csr: payload.rsl_csr,
+          adminTokenReady,
+          tokenPresentForThisCall: !!token,
+        });
+      }
 
       const headers = { "Content-Type": "application/json" };
       if (token) headers.Authorization = `Bearer ${token}`;
@@ -376,9 +430,10 @@ function BlockExtension() {
         throw new Error(`Save failed ${res.status}: ${txt}`);
       }
 
-      shopify?.toast?.show?.("Saved.");
-      // Optionally collapse/reset after save:
-      // resetForm(); setIsOpen(false);
+      // ✅ Success: show temporary success label, disable button, then reset
+      setSaveSuccess(true);
+      resetForAnother();
+      setTimeout(() => setSaveSuccess(false), 1500);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -449,9 +504,7 @@ function BlockExtension() {
                     <Checkbox
                       label="Troubleshooting performed"
                       checked={form.hasTroubleshooting}
-                      onChange={(v) =>
-                        setForm((p) => ({ ...p, hasTroubleshooting: v }))
-                      }
+                      onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
                     />
                   </Box>
                 </InlineStack>
@@ -489,14 +542,21 @@ function BlockExtension() {
                   maxLength={2000}
                 />
 
+                {/* Optional hint if identity missing / no token */}
+                {DEBUG && (!Boolean(form.userGid && form.csrUsername) || !adminTokenReady) && (
+                  <Text appearance="subdued" size="small">
+                    {adminTokenReady
+                      ? "CSR identity not available; saving will omit CSR fields unless opened in Admin."
+                      : "No Admin token detected — CSR may be blank with dev bypass. Open in Admin to record user."}
+                  </Text>
+                )}
+
                 {/* Optional debug context */}
                 {DEBUG && (
                   <InlineStack gap="small">
                     <Text>
                       host: {globalThis.location?.host || "?"} · ref:{" "}
-                      {typeof document !== "undefined"
-                        ? document.referrer || "?"
-                        : "?"}
+                      {typeof document !== "undefined" ? document.referrer || "?" : "?"}
                     </Text>
                     <Button
                       onPress={async () => {
@@ -519,8 +579,16 @@ function BlockExtension() {
                 )}
 
                 <InlineStack gap="small">
-                  <Button kind="primary" onPress={handleSave} disabled={saving}>
-                    {saving ? "Saving…" : "Save"}
+                  <Button
+                    kind="primary"
+                    onPress={handleSave}
+                    disabled={
+                      (!lookupsLoaded || (!form.returnType && !form.primaryReason)) ||
+                      saving ||
+                      saveSuccess
+                    }
+                  >
+                    {saveLabel}
                   </Button>
                 </InlineStack>
               </BlockStack>

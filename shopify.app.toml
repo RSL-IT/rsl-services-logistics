@@ -3,11 +3,11 @@
 client_id = "be8e8039e18f100d31437e7c4dcfe1b0"
 name = "RSL Services"
 handle = "rsl-services-app"
-application_url = "https://talent-twice-important-fell.trycloudflare.com"
+application_url = "https://rsl-services-app.fly.dev"
 embedded = true
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
 
 [webhooks]
 api_version = "2025-04"
@@ -26,9 +26,9 @@ scopes = "read_inventory,read_locales,read_locations,write_inventory,write_local
 
 [auth]
 redirect_urls = [
-  "https://talent-twice-important-fell.trycloudflare.com/auth/callback",
-  "https://talent-twice-important-fell.trycloudflare.com/auth/shopify/callback",
-  "https://talent-twice-important-fell.trycloudflare.com/api/auth/callback"
+  "https://rsl-services-app.fly.dev/auth/callback",
+  "https://rsl-services-app.fly.dev/auth/shopify/callback",
+  "https://rsl-services-app.fly.dev/api/auth/callback"
 ]
 
 [pos]
