@@ -21,7 +21,7 @@ const TARGET = "admin.order-details.block.render";
 // Prefer CLI tunnel via __APP_URL__, then Vite var, then Fly
 const BASE_URL =
   (typeof __APP_URL__ !== "undefined" && __APP_URL__) ||
-  (typeof import.meta !== "undefined" && import.meta.env?.VITE_APP_URL) ||
+  (typeof globalThis !== "undefined" && globalThis.__APP_URL__) ||
   "https://rsl-services-app.fly.dev";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
