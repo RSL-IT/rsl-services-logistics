@@ -3,165 +3,113 @@ import { json } from "@remix-run/node";
 import { prisma } from "../db.server";
 import { authenticate } from "../shopify.server";
 
-// ---- helpers ----
-const ALLOWED_ORIGINS = new Set([
-  "https://admin.shopify.com",
-  "https://ui-extensions.shopifyapps.com",
-  "https://extensions.shopifycdn.com",
-]);
-
-const isTrue = (v) => /^(true|1|yes|y|on)$/i.test(String(v || "").trim());
-
-function cors(origin = "") {
-  const allowOrigin = ALLOWED_ORIGINS.has(origin) ? origin : "https://admin.shopify.com";
-  return {
-    "Access-Control-Allow-Origin": allowOrigin,
-    "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Headers": "authorization,content-type",
-    "Access-Control-Allow-Methods": "POST,OPTIONS",
-    "Access-Control-Max-Age": "600",
-    Vary: "Origin",
-  };
-}
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Expose-Headers": "X-Shopify-API-Request-Failure-Reauthorize-Url",
+};
 
 export async function loader({ request }) {
-  const CORS = cors(request.headers.get("origin") || "");
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-  return new Response(null, { status: 405, headers: CORS });
+  // Allow preflight to succeed
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+  return json({ error: "method_not_allowed" }, { status: 405, headers: corsHeaders });
 }
 
 export async function action({ request }) {
-  const origin = request.headers.get("origin") || "";
-  const CORS = cors(origin);
-
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-  if (request.method !== "POST") return new Response(null, { status: 405, headers: CORS });
-
-  // ---- auth mode detection ----
-  const authz = request.headers.get("authorization") || "";
-  const hasBearer = authz.toLowerCase().startsWith("bearer ");
-  const ALLOW_INSECURE_RETURNS_SAVE = isTrue(process.env.ALLOW_INSECURE_RETURNS_SAVE);
-
-  // Optional debug: shows up in logs
-  console.log("RETURNS_SAVE auth:", {
-    hasBearer,
-    ALLOW_INSECURE_RETURNS_SAVE,
-    origin,
-  });
-
-  // If no bearer and bypass is not enabled -> 401
-  if (!hasBearer && !ALLOW_INSECURE_RETURNS_SAVE) {
-    return json(
-      {
-        error: "missing_bearer",
-        detail: "POST requires Authorization: Bearer <token>.",
-        hint: "Enable ALLOW_INSECURE_RETURNS_SAVE=true for dev, or open in real Admin.",
-        saw: { hasBearer, ALLOW_INSECURE_RETURNS_SAVE },
-      },
-      { status: 401, headers: CORS }
-    );
+  // CORS preflight
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+  if (request.method !== "POST") {
+    return json({ error: "method_not_allowed" }, { status: 405, headers: corsHeaders });
   }
 
-  // Try to hydrate Admin context if a bearer was provided
-  let admin = null;
-  if (hasBearer) {
+  // In dev you can bypass auth by setting ALLOW_INSECURE_SAVE=true
+  const allowInsecure = process.env.ALLOW_INSECURE_SAVE === "true";
+  if (!allowInsecure) {
     try {
-      const auth = await authenticate.admin(request);
-      admin = auth?.admin || null;
-    } catch (e) {
+      await authenticate.admin(request);
+    } catch {
       return json(
-        { error: "unauthorized", detail: String(e?.message || e) },
-        { status: 401, headers: CORS }
+        { error: "missing_bearer", detail: "POST requires Authorization: Bearer <token>." },
+        { status: 401, headers: corsHeaders }
       );
     }
   }
 
-  // ---- parse body ----
   let body;
   try {
     body = await request.json();
   } catch {
-    return json({ error: "invalid_json" }, { status: 400, headers: CORS });
+    return json({ error: "bad_json" }, { status: 400, headers: corsHeaders });
   }
 
+  // Helper casts
   const toIntOrNull = (v) => {
-    if (v === null || v === undefined || v === "") return null;
     const n = parseInt(v, 10);
     return Number.isFinite(n) ? n : null;
   };
-  const toStrOrNull = (v) => (v === null || v === undefined || v === "" ? null : String(v));
+  const nul = (v) => (v === undefined || v === "" ? null : v);
 
-  // ---- build record ----
-  const data = {
-    // FKs
-    return_type_id: toIntOrNull(body.return_type_id ?? body.returnType),
-    primary_customer_reason_id: toIntOrNull(
-      body.primary_customer_reason_id ?? body.reason_category_id ?? body.primaryReason
-    ),
+  // Expected payload from the extension
+  const payload = {
+    // FK ints
+    item_id: toIntOrNull(body.item_id),
+    return_type_id: toIntOrNull(body.return_type_id),
+    primary_customer_reason_id: toIntOrNull(body.primary_customer_reason_id),
 
-    // Shopify identifiers (GIDs)
-    original_order_gid: toStrOrNull(body.original_order_gid ?? body.order_gid ?? body.orderGid),
-    customer_gid: toStrOrNull(body.customer_gid),
-    rsl_csr_gid: toStrOrNull(body.rsl_csr_gid ?? body.user_gid ?? body.userGid),
+    // Shopify GIDs
+    original_order_gid: nul(body.original_order_gid),
+    customer_gid: nul(body.customer_gid),
+    rsl_csr_gid: nul(body.rsl_csr_gid),
 
     // Business fields
-    date_requested: new Date(), // server time
-    original_order: toStrOrNull(body.original_order ?? body.order_name ?? body.orderId),
-    customer_name: toStrOrNull(body.customer_name),
-    rsl_csr: toStrOrNull(body.rsl_csr ?? body.csrUsername),
-    serial_number: toStrOrNull(body.serial_number ?? body.associatedSerialNumber),
+    original_order: nul(body.original_order),
+    customer_name: nul(body.customer_name),
+    rsl_csr: nul(body.rsl_csr),
+    serial_number: nul(body.serial_number),
   };
 
-  // ---- server-side CSR fallback if we do have Admin but CSR fields missing ----
-  if (admin && (!data.rsl_csr || !data.rsl_csr_gid)) {
-    try {
-      const resp = await admin.graphql(`
-        query CurrentUserForServer {
-          currentUser {
-            id
-            displayName
-            firstName
-            lastName
-            email
-          }
-        }
-      `);
-      const j = await resp.json();
-      const u = j?.data?.currentUser;
-      if (u) {
-        data.rsl_csr_gid = data.rsl_csr_gid ?? u.id ?? null;
-        data.rsl_csr =
-          data.rsl_csr ??
-          (u.displayName ||
-            [u.firstName, u.lastName].filter(Boolean).join(" ") ||
-            u.email ||
-            null);
-      }
-    } catch {
-      // ignore; keep whatever we have
-    }
-  }
-
   try {
-    const created = await prisma.returnEntry.create({ data });
-    return json(
-      {
-        ok: true,
-        id: created.id,
-        debug: DEBUG_RESPONSE(), // remove later if you prefer
-      },
-      { headers: CORS }
-    );
-  } catch (e) {
-    return json({ error: "db_error", detail: String(e?.message || e) }, { status: 500, headers: CORS });
-  }
+    // Use SQL so we don't depend on Prisma model naming; returns the created id
+    const [created] = await prisma.$queryRaw`
+      INSERT INTO return_entry (
+        date_requested,
+        original_order,
+        original_order_gid,
+        customer_name,
+        customer_gid,
+        item_id,
+        return_type_id,
+        primary_customer_reason_id,
+        rsl_csr,
+        rsl_csr_gid,
+        serial_number
+      )
+      VALUES (
+        CURRENT_DATE,
+        ${payload.original_order},
+        ${payload.original_order_gid},
+        ${payload.customer_name},
+        ${payload.customer_gid},
+        ${payload.item_id},
+        ${payload.return_type_id},
+        ${payload.primary_customer_reason_id},
+        ${payload.rsl_csr},
+        ${payload.rsl_csr_gid},
+        ${payload.serial_number}
+      )
+      RETURNING id
+    `;
 
-  function DEBUG_RESPONSE() {
-    // minimal, non-sensitive echo to help you confirm behavior
-    return {
-      hadBearer: hasBearer,
-      bypass: ALLOW_INSECURE_RETURNS_SAVE,
-      csrIncludedFromClient: Boolean(body.rsl_csr || body.userGid || body.rsl_csr_gid),
-    };
+    return json({ ok: true, id: created?.id ?? null }, { headers: corsHeaders });
+  } catch (e) {
+    // Surface constraint/foreign key issues clearly
+    return json(
+      { ok: false, error: "insert_failed", detail: String(e?.message || e) },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }

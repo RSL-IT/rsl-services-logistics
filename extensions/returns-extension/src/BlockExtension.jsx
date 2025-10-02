@@ -18,7 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const DEBUG = true; // set to false when you're done debugging
 const TARGET = "admin.order-details.block.render";
 
-// Prefer CLI tunnel via __APP_URL__, then Vite var, then Fly
+// Prefer a compile-time define (__APP_URL__), then a global override, then Fly
 const BASE_URL =
   (typeof __APP_URL__ !== "undefined" && __APP_URL__) ||
   (typeof globalThis !== "undefined" && globalThis.__APP_URL__) ||
@@ -28,12 +28,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function getSessionTokenWithRetry(shopify, attempts = 10) {
   for (let i = 0; i < attempts; i++) {
     try {
-      // Call with no args for widest compatibility
       const t = shopify?.sessionToken?.get ? await shopify.sessionToken.get() : null;
       if (t) return t;
-    } catch {
-      /* ignore and retry */
-    }
+    } catch {}
     await sleep(150 + i * 200);
   }
   return null;
@@ -51,6 +48,7 @@ const PLACEHOLDERS = {
   returnType: { value: "", label: "Pick a return type" },
   troubleshootingCategory: { value: "", label: "Set troubleshooting category" },
   primaryReason: { value: "", label: "Set customer reason" },
+  item: { value: "", label: "Pick an item" },
 };
 
 const DEFAULT_STATE = {
@@ -64,6 +62,7 @@ const DEFAULT_STATE = {
 
   // Visible inputs
   returnType: PLACEHOLDERS.returnType.value,
+  itemId: PLACEHOLDERS.item.value, // <- maps to return_entry.item_id
   primaryReason: PLACEHOLDERS.primaryReason.value,
   troubleOccurredOn: todayISO(),
 
@@ -82,7 +81,8 @@ function normalizeOptions(rows, placeholder) {
 
 async function fetchLookupsOnce(shopify, { timeoutMs = 10000, signal } = {}) {
   const token = await getSessionTokenWithRetry(shopify);
-  const url = `${BASE_URL}/apps/returns/lookups?sets=returnTypes,troubleshootingCategories,primaryReasons`;
+  // include "items" in the requested sets
+  const url = `${BASE_URL}/apps/returns/lookups?sets=items,returnTypes,troubleshootingCategories,primaryReasons`;
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
   const ctrl = new AbortController();
@@ -92,10 +92,7 @@ async function fetchLookupsOnce(shopify, { timeoutMs = 10000, signal } = {}) {
 
   try {
     const res = await fetch(url, { headers, signal: ctrl.signal });
-    if (!res.ok) {
-      const t = await res.text().catch(() => "");
-      throw new Error(`Lookups fetch failed ${res.status}: ${t}`);
-    }
+    if (!res.ok) throw new Error(`Lookups fetch failed ${res.status}: ${await res.text()}`);
     return await res.json();
   } finally {
     clearTimeout(to);
@@ -114,6 +111,7 @@ function BlockExtension() {
   const [error, setError] = useState(null);
 
   const [lookups, setLookups] = useState({
+    items: [],
     returnTypes: [],
     troubleshootingCategories: [],
     primaryReasons: [],
@@ -128,6 +126,10 @@ function BlockExtension() {
 
   const onChange = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value }));
 
+  const itemOptions = useMemo(
+    () => normalizeOptions(lookups.items, PLACEHOLDERS.item),
+    [lookups.items]
+  );
   const returnTypeOptions = useMemo(
     () => normalizeOptions(lookups.returnTypes, PLACEHOLDERS.returnType),
     [lookups.returnTypes]
@@ -153,6 +155,7 @@ function BlockExtension() {
     fetchLookupsOnce(shopify, { timeoutMs: 10000, signal: abort.signal })
       .then((data) => {
         setLookups({
+          items: Array.isArray(data.items) ? data.items : [],
           returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
           troubleshootingCategories: Array.isArray(data.troubleshootingCategories)
             ? data.troubleshootingCategories
@@ -201,6 +204,7 @@ function BlockExtension() {
     fetchLookupsOnce(shopify, { timeoutMs: 12000, signal: abort.signal })
       .then((data) => {
         setLookups({
+          items: Array.isArray(data.items) ? data.items : [],
           returnTypes: Array.isArray(data.returnTypes) ? data.returnTypes : [],
           troubleshootingCategories: Array.isArray(data.troubleshootingCategories)
             ? data.troubleshootingCategories
@@ -295,19 +299,12 @@ function BlockExtension() {
             userGid: p.userGid || u?.id || "",
             csrUsername: p.csrUsername || name,
           }));
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       })();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shopify?.data, isOpen]);
 
-  /**
-   * Ensure we have CSR identity JUST-IN-TIME for saving.
-   * Returns the identity so handleSave can use it immediately.
-   * Also updates state for UI, but handleSave must use the returned values.
-   */
   async function ensureActorIdentity() {
     let userGid = form.userGid;
     let csrUsername = form.csrUsername;
@@ -339,14 +336,11 @@ function BlockExtension() {
       csrUsername = csrUsername || name;
 
       setForm((p) => ({ ...p, userGid, csrUsername }));
-    } catch {
-      // ignore; return whatever we have
-    }
+    } catch {}
     return { userGid, csrUsername };
   }
 
   function resetForAnother() {
-    // Clear the visible inputs but preserve hidden context (order/user/customer)
     setForm((p) => ({
       ...DEFAULT_STATE,
       orderId: p.orderId,
@@ -378,10 +372,7 @@ function BlockExtension() {
     setSaving(true);
     setError(null);
     try {
-      // Fetch identity JUST-IN-TIME and use it directly
       const { userGid, csrUsername } = await ensureActorIdentity();
-
-      // Try for a fresh Admin token (server will use it to fill CSR if needed)
       const token = await getSessionTokenWithRetry(shopify);
       setAdminTokenReady(!!token);
 
@@ -392,18 +383,19 @@ function BlockExtension() {
 
       const payload = {
         // FKs (Int)
+        item_id: toIntOrNull(form.itemId),
         return_type_id: toIntOrNull(form.returnType),
         primary_customer_reason_id: toIntOrNull(form.primaryReason),
 
         // Shopify identifiers (GIDs)
         original_order_gid: form.orderGid || null,
         customer_gid: form.customerGid || null,
-        rsl_csr_gid: userGid || null, // <- use resolved identity
+        rsl_csr_gid: userGid || null,
 
         // Business fields
         original_order: form.orderId || null,
         customer_name: form.customerName || null,
-        rsl_csr: csrUsername || null, // <- use resolved identity
+        rsl_csr: csrUsername || null,
         serial_number: form.associatedSerialNumber || null,
       };
 
@@ -430,7 +422,6 @@ function BlockExtension() {
         throw new Error(`Save failed ${res.status}: ${txt}`);
       }
 
-      // ✅ Success: show temporary success label, disable button, then reset
       setSaveSuccess(true);
       resetForAnother();
       setTimeout(() => setSaveSuccess(false), 1500);
@@ -442,7 +433,7 @@ function BlockExtension() {
   }
 
   return (
-    <Box padding="none" maxBlockSize={isOpen ? 520 : 80}>
+    <Box padding="none" maxBlockSize={isOpen ? 560 : 80}>
       <BlockStack gap="small">
         {/* Toggle button always visible */}
         <InlineStack gap="small">
@@ -477,7 +468,7 @@ function BlockExtension() {
               </InlineStack>
             ) : (
               <BlockStack gap="small">
-                {/* Row 1: Request Date | Return Type | Reason Category */}
+                {/* Row 1: Request Date | Item | Return Type (Item moved before Return Type) */}
                 <InlineStack gap="small">
                   <DateField
                     label="Request Date"
@@ -485,27 +476,39 @@ function BlockExtension() {
                     onChange={onChange("troubleOccurredOn")}
                   />
                   <Select
+                    label="Item"
+                    value={form.itemId}
+                    onChange={onChange("itemId")}
+                    options={itemOptions}
+                  />
+                  <Select
                     label="Return Type"
                     value={form.returnType}
                     onChange={onChange("returnType")}
                     options={returnTypeOptions}
                   />
-                  <Select
-                    label="Reason Category"
-                    value={form.primaryReason}
-                    onChange={onChange("primaryReason")}
-                    options={primaryReasonOptions}
-                  />
                 </InlineStack>
 
-                {/* Row 2: Troubleshooting performed (checkbox only; label must not wrap) */}
+                {/* Row 2: Troubleshooting performed (left) | Reason Category (right), vertically centered */}
                 <InlineStack gap="small" blockAlignment="center">
-                  <Box minInlineSize="40ch" maxInlineSize="100%">
+                  {/* Left half: checkbox */}
+                  <Box minInlineSize="50%" maxInlineSize="50%">
                     <Checkbox
                       label="Troubleshooting performed"
                       checked={form.hasTroubleshooting}
                       onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
                     />
+                  </Box>
+                  {/* Right half: reason category aligned to the end and centered */}
+                  <Box minInlineSize="50%" maxInlineSize="50%">
+                    <InlineStack inlineAlignment="end" blockAlignment="center">
+                      <Select
+                        label="Reason Category"
+                        value={form.primaryReason}
+                        onChange={onChange("primaryReason")}
+                        options={primaryReasonOptions}
+                      />
+                    </InlineStack>
                   </Box>
                 </InlineStack>
 
@@ -530,7 +533,7 @@ function BlockExtension() {
                   </InlineStack>
                 )}
 
-                {/* Notes always visible when open, with dynamic label */}
+                {/* Notes */}
                 <TextArea
                   label={
                     form.hasTroubleshooting
@@ -551,7 +554,6 @@ function BlockExtension() {
                   </Text>
                 )}
 
-                {/* Optional debug context */}
                 {DEBUG && (
                   <InlineStack gap="small">
                     <Text>
