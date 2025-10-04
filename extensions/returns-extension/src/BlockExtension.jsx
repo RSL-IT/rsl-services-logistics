@@ -81,7 +81,6 @@ function normalizeOptions(rows, placeholder) {
 
 async function fetchLookupsOnce(shopify, { timeoutMs = 10000, signal } = {}) {
   const token = await getSessionTokenWithRetry(shopify);
-  // include "items" in the requested sets
   const url = `${BASE_URL}/apps/returns/lookups?sets=items,returnTypes,troubleshootingCategories,primaryReasons`;
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
@@ -468,7 +467,7 @@ function BlockExtension() {
               </InlineStack>
             ) : (
               <BlockStack gap="small">
-                {/* Row 1: Request Date | Item | Return Type (Item moved before Return Type) */}
+                {/* Row 1: Request Date | Item | Serial # (Serial moved here, replacing Return Type) */}
                 <InlineStack gap="small">
                   <DateField
                     label="Request Date"
@@ -481,25 +480,25 @@ function BlockExtension() {
                     onChange={onChange("itemId")}
                     options={itemOptions}
                   />
-                  <Select
-                    label="Return Type"
-                    value={form.returnType}
-                    onChange={onChange("returnType")}
-                    options={returnTypeOptions}
+                  <TextField
+                    label="Serial #"
+                    value={form.associatedSerialNumber}
+                    onChange={onChange("associatedSerialNumber")}
                   />
                 </InlineStack>
 
-                {/* Row 2: Troubleshooting performed (left) | Reason Category (right), vertically centered */}
+                {/* Row 2: Return Type (left) | Reason Category (right), vertically centered */}
                 <InlineStack gap="small" blockAlignment="center">
-                  {/* Left half: checkbox */}
+                  {/* Left half: Return Type (took the checkbox’s old spot) */}
                   <Box minInlineSize="50%" maxInlineSize="50%">
-                    <Checkbox
-                      label="Troubleshooting performed"
-                      checked={form.hasTroubleshooting}
-                      onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
+                    <Select
+                      label="Return Type"
+                      value={form.returnType}
+                      onChange={onChange("returnType")}
+                      options={returnTypeOptions}
                     />
                   </Box>
-                  {/* Right half: reason category aligned to the end and centered */}
+                  {/* Right half: Reason Category aligned end & centered */}
                   <Box minInlineSize="50%" maxInlineSize="50%">
                     <InlineStack inlineAlignment="end" blockAlignment="center">
                       <Select
@@ -512,7 +511,19 @@ function BlockExtension() {
                   </Box>
                 </InlineStack>
 
-                {/* Row 3: Troubleshooting Category | Serial # (only when checked; 50/50 split) */}
+                {/* Row 3: Troubleshooting performed checkbox (below Return Type) */}
+                <InlineStack gap="small">
+                  <Box minInlineSize="50%" maxInlineSize="50%">
+                    <Checkbox
+                      label="Troubleshooting performed"
+                      checked={form.hasTroubleshooting}
+                      onChange={(v) => setForm((p) => ({ ...p, hasTroubleshooting: v }))}
+                    />
+                  </Box>
+                  <Box minInlineSize="50%" maxInlineSize="50%">{/* spacer to balance */}</Box>
+                </InlineStack>
+
+                {/* Row 4: Troubleshooting Category (only when checked) */}
                 {form.hasTroubleshooting && (
                   <InlineStack gap="small">
                     <Box minInlineSize="50%" maxInlineSize="50%">
@@ -523,13 +534,7 @@ function BlockExtension() {
                         options={troubleshootingCategoryOptions}
                       />
                     </Box>
-                    <Box minInlineSize="50%" maxInlineSize="50%">
-                      <TextField
-                        label="Serial #"
-                        value={form.associatedSerialNumber}
-                        onChange={onChange("associatedSerialNumber")}
-                      />
-                    </Box>
+                    <Box minInlineSize="50%" maxInlineSize="50%">{/* spacer */}</Box>
                   </InlineStack>
                 )}
 
@@ -545,7 +550,6 @@ function BlockExtension() {
                   maxLength={2000}
                 />
 
-                {/* Optional hint if identity missing / no token */}
                 {DEBUG && (!Boolean(form.userGid && form.csrUsername) || !adminTokenReady) && (
                   <Text appearance="subdued" size="small">
                     {adminTokenReady
