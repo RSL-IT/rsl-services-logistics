@@ -1,6 +1,6 @@
 // /app/routes/app.returns.jsx
 import { json } from "@remix-run/node";
-import { useLoaderData } from "@remix-run/react";
+import { useLoaderData, useFetcher } from "@remix-run/react";
 import { prisma } from "../db.server";
 import { authenticate } from "../shopify.server";
 import {
@@ -24,14 +24,99 @@ const SCHEMA = process.env.DB_SCHEMA || "public";
 // ───────────────────────────────────────────────────────────────────────────────
 
 /**
+ * ACTION: Lookup by serial or tracking, open modal on match
+ * - Prefers serialNumber if both provided
+ * - Case-insensitive EXACT match on canonical column first (LOWER(col::text) = LOWER(value))
+ * - Falls back to alias columns if needed
+ */
+export async function action({ request }) {
+  await authenticate.admin(request);
+
+  const form = await request.formData();
+  const intent = form.get("intent");
+
+  if (intent !== "lookup") {
+    return json({ error: "Unknown action intent." }, { status: 400 });
+  }
+
+  const serialNumber = String(form.get("serialNumber") || "").trim();
+  const trackingNumber = String(form.get("trackingNumber") || "").trim();
+
+  if (!serialNumber && !trackingNumber) {
+    return json({ error: "Enter a Serial Number or a Tracking Number to lookup." }, { status: 400 });
+  }
+
+  const MODE = serialNumber ? "serial" : "tracking";
+  const value = (serialNumber || trackingNumber).trim();
+  const valueLC = value.toLowerCase();
+  const valLitLC = sqlQuote(valueLC);
+
+  // 1) Canonical column first (exact, case-insensitive)
+  const targetCol = MODE === "serial" ? `"serial_number"` : `"tracking_number"`;
+
+  const qExactSchema = `
+    SELECT * FROM "${SCHEMA}"."return_entry"
+    WHERE LOWER(${targetCol}::text) = ${valLitLC}
+    ORDER BY 1 DESC
+    LIMIT 1
+  `;
+  const qExactSimple = `
+    SELECT * FROM return_entry
+    WHERE LOWER(${targetCol}::text) = ${valLitLC}
+    ORDER BY 1 DESC
+    LIMIT 1
+  `;
+
+  let rows = [];
+  try { rows = await prisma.$queryRawUnsafe(qExactSchema); } catch {}
+  if (!Array.isArray(rows) || rows.length === 0) {
+    try { rows = await prisma.$queryRawUnsafe(qExactSimple); } catch {}
+  }
+
+  // 2) Alias columns as fallback (exact, case-insensitive)
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const SERIAL_CANDS = [`"serial_number"`, `"serial"`, `"serialNumber"`, `"sn"`, `"serial_no"`, `"serialNo"`];
+    const TRACK_CANDS  = [`"tracking_number"`, `"tracking"`, `"trackingNumber"`, `"tracking_no"`, `"trackingNo"`];
+    const cands = MODE === "serial" ? SERIAL_CANDS : TRACK_CANDS;
+
+    const conds = cands.map((c) => `LOWER(${c}::text) = ${valLitLC}`).join(" OR ");
+
+    const qSchema = `
+      SELECT * FROM "${SCHEMA}"."return_entry"
+      WHERE ${conds}
+      ORDER BY 1 DESC
+      LIMIT 1
+    `;
+    const qSimple = `
+      SELECT * FROM return_entry
+      WHERE ${conds}
+      ORDER BY 1 DESC
+      LIMIT 1
+    `;
+
+    try { rows = await prisma.$queryRawUnsafe(qSchema); } catch {}
+    if (!Array.isArray(rows) || rows.length === 0) {
+      try { rows = await prisma.$queryRawUnsafe(qSimple); } catch {}
+    }
+  }
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const label = MODE === "serial" ? "serial number" : "tracking number";
+    return json({ error: `No match found for ${label}: ${value}` }, { status: 404 });
+  }
+
+  const row = bigIntSafeRow(rows[0]);
+  return json({ row });
+}
+
+function sqlQuote(v) {
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+/**
  * Loader: never-throw, SELECT * fallback, diagnostics, lookups
  *  - Tries join → SELECT * (unqualified) → SELECT * (schema-qualified)
- *  - Returns diagnostics so you can see what's happening
- *  - Lookups:
- *      items                ← csd_item
- *      statuses             ← (model mapped to repair_entry_returns_repair_status) or SQL fallback
- *      finalDispositions    ← (model mapped to repair_entry_disposition) or SQL fallback
- *      repairConditions     ← (model mapped to repair_entry_condition_received) or SQL fallback
+ *  - Lookups via Prisma models when available, else SQL fallback
  */
 export async function loader({ request }) {
   await authenticate.admin(request);
@@ -48,7 +133,6 @@ export async function loader({ request }) {
     repairCondModelUsed: null,
   };
 
-  // Quick DB ping
   try {
     await prisma.$queryRaw`SELECT 1`;
     diagnostics.dbOk = true;
@@ -135,20 +219,14 @@ export async function loader({ request }) {
     `;
   } catch {}
 
-  // ── Statuses: use the Prisma model mapped to `repair_entry_returns_repair_status` if available
+  // Statuses via model if available, else SQL
   try {
     lookups.statuses = await tryFindManyOnFirstModel(
-      [
-        "repairEntryReturnsRepairStatus",     // common Prisma model name
-        "repair_entry_returns_repair_status", // if model mirrors table
-        "returnsRepairStatus",                // alternate naming
-      ],
+      ["repairEntryReturnsRepairStatus", "repair_entry_returns_repair_status", "returnsRepairStatus"],
       { select: { id: true, value: true }, orderBy: { value: "asc" } },
       diagnostics,
       "statusModelUsed"
     );
-
-    // Fallback to SQL if no model matched
     if (!Array.isArray(lookups.statuses) || lookups.statuses.length === 0) {
       lookups.statuses = await prisma.$queryRaw`
         SELECT id, value FROM repair_entry_returns_repair_status ORDER BY value
@@ -164,20 +242,14 @@ export async function loader({ request }) {
     } catch {}
   }
 
-  // ── Final Dispositions: use the Prisma model mapped to `repair_entry_disposition` if available
+  // Final Disposition via model if available, else SQL
   try {
     lookups.finalDispositions = await tryFindManyOnFirstModel(
-      [
-        "repairEntryDisposition",   // common Prisma model name
-        "repair_entry_disposition", // if model mirrors table
-        "finalDisposition",         // alternate naming
-      ],
+      ["repairEntryDisposition", "repair_entry_disposition", "finalDisposition"],
       { select: { id: true, value: true }, orderBy: { value: "asc" } },
       diagnostics,
       "finalDispModelUsed"
     );
-
-    // Fallback to SQL if no model matched
     if (!Array.isArray(lookups.finalDispositions) || lookups.finalDispositions.length === 0) {
       lookups.finalDispositions = await prisma.$queryRaw`
         SELECT id, value FROM repair_entry_disposition ORDER BY value
@@ -193,20 +265,14 @@ export async function loader({ request }) {
     } catch {}
   }
 
-  // ── Repair Condition Received: use the Prisma model mapped to `repair_entry_condition_received` if available
+  // Repair Condition Received via model if available, else SQL
   try {
     lookups.repairConditions = await tryFindManyOnFirstModel(
-      [
-        "repairEntryConditionReceived",   // common Prisma model name
-        "repair_entry_condition_received",// if model mirrors table
-        "conditionReceived",              // alternate naming
-      ],
+      ["repairEntryConditionReceived", "repair_entry_condition_received", "conditionReceived"],
       { select: { id: true, value: true }, orderBy: { value: "asc" } },
       diagnostics,
       "repairCondModelUsed"
     );
-
-    // Fallback to SQL if no model matched
     if (!Array.isArray(lookups.repairConditions) || lookups.repairConditions.length === 0) {
       lookups.repairConditions = await prisma.$queryRaw`
         SELECT id, value FROM repair_entry_condition_received ORDER BY value
@@ -231,10 +297,7 @@ export async function loader({ request }) {
   return json({ rows: safeRows, lookups: safeLookups, diagnostics });
 }
 
-/**
- * Try a list of potential Prisma client model names and return the first successful findMany result.
- * Records which model name worked into diagnostics[diagKey].
- */
+/** Try a list of potential Prisma model names; return first successful findMany result. */
 async function tryFindManyOnFirstModel(candidates, args, diagnostics, diagKey) {
   for (const name of candidates) {
     const delegate = prisma?.[name];
@@ -244,7 +307,7 @@ async function tryFindManyOnFirstModel(candidates, args, diagnostics, diagKey) {
         diagnostics[diagKey] = `Model:${name}`;
         return res;
       } catch {
-        // continue to next candidate
+        // continue
       }
     }
   }
@@ -265,6 +328,7 @@ function bigIntSafeRow(obj) {
 // ───────────────────────────────────────────────────────────────────────────────
 export default function ReturnsPage() {
   const { rows, lookups, diagnostics } = useLoaderData();
+  const fetcher = useFetcher();
 
   // Infer mapping from actual DB columns so UI works regardless of naming
   const schemaMap = useMemo(() => inferSchemaMap(rows), [rows]);
@@ -298,7 +362,6 @@ export default function ReturnsPage() {
     [lookups.finalDispositions]
   );
 
-  // For safety/consistency, also include a placeholder here so empty values render cleanly.
   const repairConditionOptions = useMemo(
     () => [
       { label: "select an option", value: "" },
@@ -320,26 +383,44 @@ export default function ReturnsPage() {
   const [form, setForm] = useState(null);
   const [initialForm, setInitialForm] = useState(null);
 
-  function openEditor(row) {
-    const next = toForm(row, schemaMap);
+  function openEditorWithRow(row) {
+    const mapForRow = inferSchemaMap([row]);
+    const next = toForm(row, mapForRow);
     setForm(next);
     setInitialForm(next);
     setModalOpen(true);
   }
+
+  function openEditor(row) {
+    openEditorWithRow(row);
+  }
+
   function closeEditor() {
     setModalOpen(false);
     setForm(null);
     setInitialForm(null);
   }
+
   const isDirty = form && initialForm ? JSON.stringify(form) !== JSON.stringify(initialForm) : false;
 
+  // Lookup submit
   function onLookup() {
-    console.log("Lookup triggered:", { trackingNumber, serialNumber });
+    const fd = new FormData();
+    fd.append("intent", "lookup");
+    fd.append("trackingNumber", trackingNumber);
+    fd.append("serialNumber", serialNumber);
+    fetcher.submit(fd, { method: "post" });
   }
-  async function handleSave() {
-    console.log("Save payload:", form);
-    // TODO: submit to action
-  }
+
+  // On lookup response, open modal if row returned
+  useEffect(() => {
+    if (fetcher?.data?.row) {
+      openEditorWithRow(fetcher.data.row);
+    }
+  }, [fetcher?.data?.row]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const lookupPending = fetcher.state !== "idle";
+  const lookupError = fetcher?.data?.error;
 
   const showing = Array.isArray(rows) ? rows.length : 0;
 
@@ -366,17 +447,50 @@ export default function ReturnsPage() {
         {/* Left: Lookup Panel */}
         <div style={{ width: 320, maxWidth: 320, flex: "0 0 auto" }}>
           <Card title="Lookup Panel" sectioned>
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-              <TextField label="Tracking Number" value={trackingNumber} onChange={setTrackingNumber} autoComplete="off" />
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.75rem",
+                minHeight: 260,
+              }}
+            >
+              <TextField
+                label="Tracking Number"
+                value={trackingNumber}
+                onChange={setTrackingNumber}
+                autoComplete="off"
+              />
               <div style={{ textAlign: "center" }}>
-                <Text as="p" variant="bodyMd">OR</Text>
+                <Text as="p" variant="bodyMd">
+                  OR
+                </Text>
               </div>
-              <TextField label="Serial Number" value={serialNumber} onChange={setSerialNumber} autoComplete="off" />
-              {hasLookupInput && (
-                <div style={{ marginTop: "0.75rem" }}>
-                  <Button fullWidth onClick={onLookup}>Lookup Order</Button>
-                </div>
-              )}
+              <TextField
+                label="Serial Number"
+                value={serialNumber}
+                onChange={setSerialNumber}
+                autoComplete="off"
+              />
+
+              {/* Bottom-anchored Lookup button */}
+              <div style={{ marginTop: "auto" }}>
+                <Button
+                  fullWidth
+                  onClick={onLookup}
+                  disabled={!hasLookupInput}
+                  loading={lookupPending}
+                >
+                  Lookup Order
+                </Button>
+              </div>
+
+              {/* Inline error (if any) */}
+              {lookupError ? (
+                <Text as="p" tone="critical" variant="bodySm">
+                  {lookupError}
+                </Text>
+              ) : null}
             </div>
           </Card>
         </div>
@@ -406,7 +520,7 @@ export default function ReturnsPage() {
         open={modalOpen}
         onClose={closeEditor}
         title={form ? `Edit Return #${form.original_order || form.id}` : "Edit Return"}
-        primaryAction={{ content: "Save", onAction: handleSave, disabled: !isDirty }}
+        primaryAction={{ content: "Save", onAction: () => {}, disabled: !isDirty }}
         secondaryActions={[{ content: "Cancel", onAction: closeEditor }]}
         large
       >
@@ -414,60 +528,141 @@ export default function ReturnsPage() {
           {form ? (
             <div className="editor-grid" style={{ display: "grid", gap: 12 }}>
               {/* Line 1: Order number, Date Received, Customer Name (clickable), CSR GOES HERE */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, alignItems: "end" }}>
-                <TextField label="Order number" value={form.original_order || ""} onChange={(v) => setForm({ ...form, original_order: v })} autoComplete="off" />
-                <TextField label="Date Received" type="date" value={form.date_received || ""} onChange={(v) => setForm({ ...form, date_received: v })} />
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr 1fr 1fr",
+                  gap: 12,
+                  alignItems: "end",
+                }}
+              >
+                <TextField
+                  label="Order number"
+                  value={form.original_order || ""}
+                  onChange={(v) => setForm({ ...form, original_order: v })}
+                  autoComplete="off"
+                />
+                <TextField
+                  label="Date Received"
+                  type="date"
+                  value={form.date_received || ""}
+                  onChange={(v) => setForm({ ...form, date_received: v })}
+                />
                 <div>
-                  <Text as="p" variant="bodySm">Customer Name</Text>
+                  <Text as="p" variant="bodySm">
+                    Customer Name
+                  </Text>
                   <div>
                     {form.customer_gid ? (
-                      <Link url={customerAdminUrl(form.customer_gid)} external>{form.customer_name || "—"}</Link>
+                      <Link url={customerAdminUrl(form.customer_gid)} external>
+                        {form.customer_name || "—"}
+                      </Link>
                     ) : (
-                      <Text as="span" variant="bodyMd">{form.customer_name || "—"}</Text>
+                      <Text as="span" variant="bodyMd">
+                        {form.customer_name || "—"}
+                      </Text>
                     )}
                   </div>
                 </div>
-                <div><Text as="p" variant="bodySm">CSR GOES HERE</Text></div>
+                <div>
+                  <Text as="p" variant="bodySm">
+                    CSR GOES HERE
+                  </Text>
+                </div>
               </div>
 
               {/* Line 2: Item, Serial Number, Tracking Number */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, alignItems: "end" }}>
-                <Select label="Item" options={itemOptions} value={form.item_id || ""} onChange={(v) => setForm({ ...form, item_id: v })} />
-                <TextField label="Serial Number" value={form.serial_number || ""} onChange={(v) => setForm({ ...form, serial_number: v })} />
-                <TextField label="Tracking Number" value={form.tracking_number || ""} onChange={(v) => setForm({ ...form, tracking_number: v })} />
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr 1fr",
+                  gap: 12,
+                  alignItems: "end",
+                }}
+              >
+                <Select
+                  label="Item"
+                  options={itemOptions}
+                  value={form.item_id || ""}
+                  onChange={(v) => setForm({ ...form, item_id: v })}
+                />
+                <TextField
+                  label="Serial Number"
+                  value={form.serial_number || ""}
+                  onChange={(v) => setForm({ ...form, serial_number: v })}
+                />
+                <TextField
+                  label="Tracking Number"
+                  value={form.tracking_number || ""}
+                  onChange={(v) => setForm({ ...form, tracking_number: v })}
+                />
               </div>
 
               {/* Line 3: Date Requested, Date Inspected, Inspector, Repair Condition Received */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, alignItems: "end" }}>
-                <TextField label="Date Requested" type="date" value={form.date_requested || ""} onChange={(v) => setForm({ ...form, date_requested: v })} />
-                <TextField label="Date Inspected" type="date" value={form.date_inspected || ""} onChange={(v) => setForm({ ...form, date_inspected: v })} />
-                <TextField label="Inspector" value={form.rsl_rd_staff || ""} onChange={(v) => setForm({ ...form, rsl_rd_staff: v })} />
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr 1fr 1fr",
+                  gap: 12,
+                  alignItems: "end",
+                }}
+              >
+                <TextField
+                  label="Date Requested"
+                  type="date"
+                  value={form.date_requested || ""}
+                  onChange={(v) => setForm({ ...form, date_requested: v })}
+                />
+                <TextField
+                  label="Date Inspected"
+                  type="date"
+                  value={form.date_inspected || ""}
+                  onChange={(v) => setForm({ ...form, date_inspected: v })}
+                />
+                <TextField
+                  label="Inspector"
+                  value={form.rsl_rd_staff || ""}
+                  onChange={(v) => setForm({ ...form, rsl_rd_staff: v })}
+                />
                 <Select
                   label="Repair Condition Received"
                   options={repairConditionOptions}
-                  value={form.repair_condition_received_id ?? ""} // if set => selected; else placeholder
-                  onChange={(v) => setForm({ ...form, repair_condition_received_id: v })}
+                  value={form.repair_condition_received_id ?? ""}
+                  onChange={(v) =>
+                    setForm({ ...form, repair_condition_received_id: v })
+                  }
                 />
               </div>
 
               {/* Line 4: Status, Final Disposition */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, alignItems: "end" }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 12,
+                  alignItems: "end",
+                }}
+              >
                 <Select
                   label="Status"
                   options={statusOptions}
-                  value={form?.status_id ?? ""} // existing value → selected; else placeholder
+                  value={form?.status_id ?? ""}
                   onChange={(v) => setForm({ ...form, status_id: v })}
                 />
                 <Select
                   label="Final Disposition"
                   options={finalDispositionOptions}
-                  value={form?.final_disposition_id ?? ""} // existing value → selected; else placeholder
-                  onChange={(v) => setForm({ ...form, final_disposition_id: v })}
+                  value={form?.final_disposition_id ?? ""}
+                  onChange={(v) =>
+                    setForm({ ...form, final_disposition_id: v })
+                  }
                 />
               </div>
             </div>
           ) : (
-            <Text as="p" variant="bodyMd">Loading…</Text>
+            <Text as="p" variant="bodyMd">
+              Loading…
+            </Text>
           )}
         </Modal.Section>
       </Modal>
@@ -596,9 +791,7 @@ function inferSchemaMap(rows) {
     serial_number: null,
     tracking_number: null,
     rsl_rd_staff: null,
-    // Include both spellings:
-    //   repair_condition_received_id  (no "ed")
-    //   repair_conditioned_received_id (with "ed")
+    // handle common spellings for condition received
     repair_condition_received_id: null,
     status_id: null,
     final_disposition_id: null,
@@ -620,7 +813,7 @@ function inferSchemaMap(rows) {
   map.rsl_rd_staff = pick("rsl_rd_staff", "inspector", "inspected_by", "inspectedBy");
   map.repair_condition_received_id = pick(
     "repair_condition_received_id",
-    "repair_conditioned_received_id", // variant with "ed"
+    "repair_conditioned_received_id",
     "repair_condition_id",
     "condition_received_id"
   );
@@ -661,7 +854,6 @@ function toForm(row, map) {
     serial_number: get(map.serial_number),
     tracking_number: get(map.tracking_number),
     rsl_rd_staff: get(map.rsl_rd_staff),
-    // Use the resolved column (covers both spellings)
     repair_condition_received_id: stringOr(get(map.repair_condition_received_id)),
     status_id: stringOr(get(map.status_id)),
     final_disposition_id: stringOr(get(map.final_disposition_id)),
