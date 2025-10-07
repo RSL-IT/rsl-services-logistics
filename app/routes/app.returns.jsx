@@ -1,6 +1,6 @@
 // /app/routes/app.returns.jsx
 import { json } from "@remix-run/node";
-import { useLoaderData, useFetcher } from "@remix-run/react";
+import { useLoaderData, useFetcher, useRevalidator } from "@remix-run/react";
 import { prisma } from "../db.server";
 import { authenticate } from "../shopify.server";
 import {
@@ -15,7 +15,10 @@ import {
   Select,
   Link,
   InlineStack,
+  Popover,
+  DatePicker,
 } from "@shopify/polaris";
+import { CalendarIcon } from "@shopify/polaris-icons";
 import { useEffect, useMemo, useState } from "react";
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -24,22 +27,75 @@ const SCHEMA = process.env.DB_SCHEMA || "public";
 // ───────────────────────────────────────────────────────────────────────────────
 
 /**
- * ACTION: Lookup by serial, tracking, or order number; open modal on single match,
- * filter rows on multiple; error on zero.
- * - Priority when multiple provided: serial > tracking > order
- * - Case-insensitive EXACT match (LOWER(col::text) = LOWER(value))
- * - Canonical column first, fallback to alias columns
+ * ACTIONS:
+ *  - lookup
+ *  - saveEdit
+ *  - saveReceiving
  */
 export async function action({ request }) {
   await authenticate.admin(request);
 
   const form = await request.formData();
-  const intent = form.get("intent");
+  const intent = String(form.get("intent") || "");
 
-  if (intent !== "lookup") {
-    return json({ error: "Unknown action intent." }, { status: 400 });
+  if (intent === "lookup") {
+    return handleLookup(form);
   }
 
+  if (intent === "saveEdit") {
+    const id = toIntOrNull(form.get("id"));
+    if (!id) return json({ ok: false, intent, error: "Missing id" }, { status: 400 });
+
+    // Build payload from form (dates may be ISO or MM/DD/YYYY; normalize later)
+    const payload = {
+      original_order: toStringOrNull(form.get("original_order")),
+      date_requested: toDateOrNull(form.get("date_requested")),
+      date_received: toDateOrNull(form.get("date_received")),
+      date_inspected: toDateOrNull(form.get("date_inspected")),
+      customer_name: toStringOrNull(form.get("customer_name")),
+      customer_gid: toStringOrNull(form.get("customer_gid")),
+      item_id: toIntOrNull(form.get("item_id")),
+      serial_number: toStringOrNull(form.get("serial_number")),
+      tracking_number: toStringOrNull(form.get("tracking_number")),
+      rsl_rd_staff: toStringOrNull(form.get("rsl_rd_staff")),
+      repair_condition_received_id: toIntOrNull(form.get("repair_condition_received_id")),
+      status_id: toIntOrNull(form.get("status_id")),
+      final_disposition_id: toIntOrNull(form.get("final_disposition_id")),
+    };
+
+    // Server-side validation + normalization
+    const fieldErrors = validateEditServer(payload);
+    if (Object.keys(fieldErrors).length > 0) {
+      return json({ ok: false, intent, fieldErrors }, { status: 422 });
+    }
+
+    const { row, error } = await updateReturnEntry(id, payload);
+    if (error) return json({ ok: false, intent, error }, { status: 500 });
+    return json({ ok: true, intent, updated: bigIntSafeRow(row) });
+  }
+
+  if (intent === "saveReceiving") {
+    const id = toIntOrNull(form.get("id"));
+    const date_received = toDateOrNull(form.get("date_received"));
+    if (!id) return json({ ok: false, intent, error: "Missing id" }, { status: 400 });
+
+    // Server-side validation + normalization
+    const p = { date_received };
+    const fieldErrors = validateReceivingServer(p);
+    if (Object.keys(fieldErrors).length > 0) {
+      return json({ ok: false, intent, fieldErrors }, { status: 422 });
+    }
+
+    const { row, error } = await updateReturnEntry(id, { date_received: p.date_received });
+    if (error) return json({ ok: false, intent, error }, { status: 500 });
+    return json({ ok: true, intent, updated: bigIntSafeRow(row) });
+  }
+
+  return json({ error: "Unknown action intent." }, { status: 400 });
+}
+
+// ── lookup handler ─────────────────────────────────────────────────────────────
+async function handleLookup(form) {
   const serialNumber = String(form.get("serialNumber") || "").trim();
   const trackingNumber = String(form.get("trackingNumber") || "").trim();
   const orderNumber = String(form.get("orderNumber") || "").trim();
@@ -71,7 +127,6 @@ export async function action({ request }) {
   const canonCond = `LOWER(${CANON}::text) = ${valLitLC}`;
   const aliasCond = ALIASES.map((c) => `LOWER(${c}::text) = ${valLitLC}`).join(" OR ");
 
-  // Helper to try schema-qualified then unqualified
   async function countWhere(whereSql) {
     try {
       const r = await prisma.$queryRawUnsafe(
@@ -104,36 +159,195 @@ export async function action({ request }) {
     return null;
   }
 
-  // 1) Try canonical column first
+  // 1) canonical
   let n = await countWhere(canonCond);
   if (n === 1) {
     const row = await getOneRow(canonCond);
-    if (row) return json({ row: bigIntSafeRow(row), mode: MODE });
+    if (row) return json({ row: bigIntSafeRow(row), mode: MODE, intent: "lookup" });
   }
-  if (n > 1) {
-    // multiple canonical matches → filter on client
-    return json({ multi: { mode: MODE, value } });
-  }
+  if (n > 1) return json({ multi: { mode: MODE, value }, intent: "lookup" });
 
-  // 2) Fallback to alias columns
+  // 2) aliases
   n = await countWhere(aliasCond);
   if (n === 0) {
     const label = MODE === "serial" ? "serial number" : MODE === "tracking" ? "tracking number" : "order number";
-    return json({ error: `No match found for ${label}: ${value}` }, { status: 404 });
+    return json({ error: `No match found for ${label}: ${value}`, intent: "lookup" }, { status: 404 });
   }
-  if (n > 1) {
-    return json({ multi: { mode: MODE, value } });
-  }
-  // n === 1
+  if (n > 1) return json({ multi: { mode: MODE, value }, intent: "lookup" });
+
   const row = await getOneRow(aliasCond);
-  if (!row) {
-    return json({ error: "Lookup failed after match found." }, { status: 500 });
-  }
-  return json({ row: bigIntSafeRow(row), mode: MODE });
+  if (!row) return json({ error: "Lookup failed after match found.", intent: "lookup" }, { status: 500 });
+  return json({ row: bigIntSafeRow(row), mode: MODE, intent: "lookup" });
 }
 
+// ── UPDATE helper ──────────────────────────────────────────────────────────────
+async function updateReturnEntry(id, payload) {
+  // Only allow known columns
+  const allow = new Set([
+    "original_order",
+    "date_requested",
+    "date_received",
+    "date_inspected",
+    "customer_name",
+    "customer_gid",
+    "item_id",
+    "serial_number",
+    "tracking_number",
+    "rsl_rd_staff",
+    "repair_condition_received_id",
+    "status_id",
+    "final_disposition_id",
+  ]);
+
+  const sets = [];
+  for (const [k, v] of Object.entries(payload || {})) {
+    if (!allow.has(k)) continue;
+    sets.push(sqlSet(k, v));
+  }
+  if (sets.length === 0) return { error: "Nothing to update." };
+
+  const setSql = sets.join(", ");
+  try {
+    const res = await prisma.$queryRawUnsafe(
+      `UPDATE "${SCHEMA}"."return_entry" SET ${setSql} WHERE id = ${Number(id)} RETURNING *`
+    );
+    const row = Array.isArray(res) ? res[0] : res;
+    if (!row) throw new Error("No row returned");
+    return { row };
+  } catch (e) {
+    // fallback: unqualified
+    try {
+      const res2 = await prisma.$queryRawUnsafe(
+        `UPDATE return_entry SET ${setSql} WHERE id = ${Number(id)} RETURNING *`
+      );
+      const row2 = Array.isArray(res2) ? res2[0] : res2;
+      if (!row2) throw new Error("No row returned");
+      return { row: row2 };
+    } catch (e2) {
+      return { error: String(e2?.message || e2 || "Update failed") };
+    }
+  }
+}
+
+// Build a safe SET fragment per field based on type
+function sqlSet(col, val) {
+  const idCols = new Set(["item_id", "status_id", "final_disposition_id", "repair_condition_received_id"]);
+  const dateCols = new Set(["date_requested", "date_received", "date_inspected"]);
+
+  if (val === null) {
+    return `"${col}" = NULL`;
+  }
+  if (idCols.has(col)) {
+    const n = Number(val);
+    return Number.isFinite(n) ? `"${col}" = ${n}::int` : `"${col}" = NULL`;
+  }
+  if (dateCols.has(col)) {
+    return `"${col}" = ${sqlQuote(val)}::date`;
+  }
+  return `"${col}" = ${sqlQuote(String(val))}`;
+}
+
+// ── coercion + date parsing helpers (server) ───────────────────────────────────
+function toIntOrNull(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Accepts YYYY-MM-DD or MM/DD/YYYY; returns ISO or null
+function parseDateToISO(value) {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+
+  // ISO: YYYY-MM-DD
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (isoMatch) {
+    const y = +isoMatch[1], m = +isoMatch[2], d = +isoMatch[3];
+    if (isValidYMD(y, m, d)) return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+    return null;
+  }
+
+  // US: M(M)/D(D)/YYYY
+  const usMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (usMatch) {
+    const m = +usMatch[1], d = +usMatch[2], y = +usMatch[3];
+    if (isValidYMD(y, m, d)) return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+    return null;
+  }
+
+  return null;
+}
+
+function isValidYMD(y, m, d) {
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return false;
+  if (m < 1 || m > 12) return false;
+  if (d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && (dt.getUTCMonth() + 1) === m && dt.getUTCDate() === d;
+}
+
+// Converts allowed inputs to ISO or returns null
+function toDateOrNull(v) {
+  return parseDateToISO(v);
+}
+
+function toStringOrNull(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v);
+  return s.length ? s : null;
+}
 function sqlQuote(v) {
   return `'${String(v).replace(/'/g, "''")}'`;
+}
+
+// ── validation helpers (server) ────────────────────────────────────────────────
+function cmpISO(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0; // 'YYYY-MM-DD'
+}
+function todayISO() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+function validateEditServer(p) {
+  const errors = {};
+
+  const rqISO = p.date_requested ? parseDateToISO(p.date_requested) : null;
+  const rcISO = p.date_received ? parseDateToISO(p.date_received) : null;
+  const insISO = p.date_inspected ? parseDateToISO(p.date_inspected) : null;
+
+  if (p.date_requested && !rqISO) errors.date_requested = "Use YYYY-MM-DD or MM/DD/YYYY";
+  if (p.date_received && !rcISO) errors.date_received = "Use YYYY-MM-DD or MM/DD/YYYY";
+  if (p.date_inspected && !insISO) errors.date_inspected = "Use YYYY-MM-DD or MM/DD/YYYY";
+
+  if (!errors.date_requested && rqISO && rcISO && cmpISO(rcISO, rqISO) < 0) {
+    errors.date_received = "Date Received cannot be before Date Requested";
+  }
+  if (!errors.date_received && rcISO && insISO && cmpISO(insISO, rcISO) < 0) {
+    errors.date_inspected = "Date Inspected cannot be before Date Received";
+  }
+
+  // normalize for DB
+  if (rqISO) p.date_requested = rqISO;
+  if (rcISO) p.date_received = rcISO;
+  if (insISO) p.date_inspected = insISO;
+
+  return errors;
+}
+function validateReceivingServer(p) {
+  const errors = {};
+  const rcISO = parseDateToISO(p.date_received);
+  if (!p.date_received) errors.date_received = "Date Received is required";
+  else if (!rcISO) errors.date_received = "Use YYYY-MM-DD or MM/DD/YYYY";
+  else {
+    const today = todayISO();
+    if (cmpISO(rcISO, today) > 0) errors.date_received = "Date Received cannot be in the future";
+  }
+  if (!errors.date_received) p.date_received = rcISO; // normalize
+  return errors;
 }
 
 /**
@@ -145,7 +359,7 @@ export async function loader({ request }) {
   const diagnostics = {
     dbOk: null,
     count: null,
-    used: null, // "join" | "simpleStar" | "schemaStar" | "none"
+    used: null,
     joinErr: null,
     simpleStarErr: null,
     schemaStarErr: null,
@@ -338,11 +552,113 @@ function bigIntSafeRow(obj) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
+/** DateInput: TextField + Popover DatePicker (opens on focus or via icon) */
+// ───────────────────────────────────────────────────────────────────────────────
+function DateInput({ id, label, value, onChange, error, disabled = false }) {
+  const [active, setActive] = useState(false);
+
+  // parse text value -> Date (or null)
+  const toDate = (val) => {
+    const iso = parseDateToISOClient(val);
+    if (!iso) return null;
+    const [y, m, d] = iso.split("-").map((x) => +x);
+    return new Date(y, m - 1, d);
+  };
+
+  const selectedDate = toDate(value) || null;
+  const initial = selectedDate || new Date();
+
+  const [{ month, year }, setMonthYear] = useState({
+    month: initial.getMonth(),
+    year: initial.getFullYear(),
+  });
+
+  const handlePick = (date) => {
+    const iso = dateToISO(date);
+    onChange?.(iso);
+    setActive(false);
+  };
+
+  const handleText = (text) => {
+    onChange?.(text); // allow free typing
+  };
+
+  const handleBlur = () => {
+    // If the manually entered text parses, normalize to ISO in field
+    const iso = parseDateToISOClient(value);
+    if (iso) onChange?.(iso);
+  };
+
+  const handleFocus = () => {
+    // Open the calendar when the field gains focus (helps in modals)
+    setActive(true);
+  };
+
+  const rangeSelected = {
+    start: selectedDate || initial,
+    end: selectedDate || initial,
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "end" }}>
+      <div style={{ flex: 1 }}>
+        <TextField
+          id={id}
+          label={label}
+          value={value || ""}
+          onChange={handleText}
+          onBlur={handleBlur}
+          onFocus={handleFocus}
+          placeholder="YYYY-MM-DD or MM/DD/YYYY"
+          error={error}
+          autoComplete="off"
+          disabled={disabled}
+        />
+      </div>
+      <Popover
+        active={active}
+        activator={
+          <Button
+            icon={CalendarIcon}
+            accessibilityLabel={`Choose ${label}`}
+            onClick={() => setActive((a) => !a)}
+            disabled={disabled}
+          />
+        }
+        autofocusTarget="none"
+        onClose={() => setActive(false)}
+        preferredAlignment="right"
+      >
+        <div style={{ padding: 8 }}>
+          <DatePicker
+            month={month}
+            year={year}
+            onMonthChange={(m, y) => setMonthYear({ month: m, year: y })}
+            selected={rangeSelected}
+            onChange={({ start }) => handlePick(start || new Date())}
+          />
+        </div>
+      </Popover>
+    </div>
+  );
+}
+
+function dateToISO(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
 // Component
 // ───────────────────────────────────────────────────────────────────────────────
 export default function ReturnsPage() {
   const { rows, lookups, diagnostics } = useLoaderData();
-  const fetcher = useFetcher();
+  const lookupFetcher = useFetcher();
+  const saveEditFetcher = useFetcher();
+  const saveReceivingFetcher = useFetcher();
+  const revalidator = useRevalidator();
 
   // Infer mapping from actual DB columns so UI works regardless of naming
   const schemaMap = useMemo(() => inferSchemaMap(rows), [rows]);
@@ -356,13 +672,16 @@ export default function ReturnsPage() {
 
   // Lookup options/maps
   const itemOptions = useMemo(
-    () => (lookups.items || []).map((o) => ({ label: o.value, value: String(o.id) })),
+    () => [
+      { label: "Enter Item", value: "" }, // placeholder
+      ...(lookups.items || []).map((o) => ({ label: o.value, value: String(o.id) })),
+    ],
     [lookups.items]
   );
 
   const statusOptions = useMemo(
     () => [
-      { label: "select an option", value: "" },
+      { label: "Set Status", value: "" }, // placeholder
       ...(lookups.statuses || []).map((o) => ({ label: o.value, value: String(o.id) })),
     ],
     [lookups.statuses]
@@ -396,7 +715,7 @@ export default function ReturnsPage() {
     serialNumber.trim().length > 0 ||
     orderNumber.trim().length > 0;
 
-  // Refs + focus helpers (use ids to focus Polaris inputs)
+  // ids to manage focus
   const trackingId = "trackingInput";
   const serialId = "serialInput";
   const orderId = "orderInput";
@@ -408,67 +727,51 @@ export default function ReturnsPage() {
   // Initial focus: Tracking Number
   useEffect(() => {
     focusById(trackingId);
-  }, []); // on mount
+  }, []);
 
-  // Handle Tab/Shift+Tab cycling among lookup fields + Enter-to-lookup
+  // Enter to lookup + tab trap
   function handleLookupKeyDown(e, field) {
     if (e.key === "Enter") {
       if (hasLookupInput) {
         e.preventDefault();
-        // New lookup resets current filter; server will re-apply if multi
         setFilterSpec(null);
         onLookup();
       }
       return;
     }
     if (e.key === "Tab") {
-      // trap focus within the three fields
       if (!e.shiftKey) {
-        if (field === "tracking") {
-          e.preventDefault();
-          focusById(serialId);
-        } else if (field === "serial") {
-          e.preventDefault();
-          focusById(orderId);
-        } else if (field === "order") {
-          e.preventDefault();
-          focusById(trackingId);
-        }
+        if (field === "tracking") { e.preventDefault(); focusById(serialId); }
+        else if (field === "serial") { e.preventDefault(); focusById(orderId); }
+        else if (field === "order") { e.preventDefault(); focusById(trackingId); }
       } else {
-        if (field === "tracking") {
-          e.preventDefault();
-          focusById(orderId);
-        } else if (field === "serial") {
-          e.preventDefault();
-          focusById(trackingId);
-        } else if (field === "order") {
-          e.preventDefault();
-          focusById(serialId);
-        }
+        if (field === "tracking") { e.preventDefault(); focusById(orderId); }
+        else if (field === "serial") { e.preventDefault(); focusById(trackingId); }
+        else if (field === "order") { e.preventDefault(); focusById(serialId); }
       }
     }
   }
 
-  // Feedback area text (hidden until set)
+  // Feedback + error for lookup
   const [feedbackText, setFeedbackText] = useState("");
-
-  // Inline error we can clear on Reset
   const [lookupErrorMsg, setLookupErrorMsg] = useState("");
 
-  // Table filtering state (set when multi-match occurs)
-  const [filterSpec, setFilterSpec] = useState(null); // { mode: 'serial'|'tracking'|'order', value: 'lowercased' }
+  // Table filtering
+  const [filterSpec, setFilterSpec] = useState(null); // { mode, value }
 
-  // Modal state (Edit)
+  // Modals: Edit
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState(null);
   const [initialForm, setInitialForm] = useState(null);
+  const [editErrors, setEditErrors] = useState({});
 
-  // Modal state (Receiving a Return)
+  // Modals: Receiving
   const [receivingOpen, setReceivingOpen] = useState(false);
   const [receivingForm, setReceivingForm] = useState(null);
   const [receivingInitial, setReceivingInitial] = useState(null);
+  const [receivingErrors, setReceivingErrors] = useState({});
 
-  // Decide which popup to open based on date_received presence
+  // Open correct editor based on Date Received presence
   function openAppropriate(row) {
     const mapForRow = inferSchemaMap([row]);
     const rawDateReceived = mapForRow.date_received ? row?.[mapForRow.date_received] : null;
@@ -476,11 +779,8 @@ export default function ReturnsPage() {
       rawDateReceived === null ||
       rawDateReceived === undefined ||
       String(rawDateReceived).trim() === "";
-    if (missing) {
-      openReceiving(row, mapForRow);
-    } else {
-      openEditorWithRow(row, mapForRow);
-    }
+    if (missing) openReceiving(row, mapForRow);
+    else openEditorWithRow(row, mapForRow);
   }
 
   function openEditorWithRow(row, mapForRowParam) {
@@ -490,9 +790,9 @@ export default function ReturnsPage() {
     setModalOpen(true);
     setForm(next);
     setInitialForm(next);
+    setEditErrors({});
   }
 
-  // Prefill Date Received with today if missing; SAVE enabled by default
   function openReceiving(row, mapForRowParam) {
     const mapForRow = mapForRowParam || inferSchemaMap([row]);
     const initial = toReceivingForm(row, mapForRow, { defaultToday: false });
@@ -501,17 +801,20 @@ export default function ReturnsPage() {
     setReceivingOpen(true);
     setReceivingForm(next);
     setReceivingInitial(initial);
+    setReceivingErrors(validateReceivingClient(next)); // compute once to enable/disable button
   }
 
   function closeEditor() {
     setModalOpen(false);
     setForm(null);
     setInitialForm(null);
+    setEditErrors({});
   }
   function closeReceiving() {
     setReceivingOpen(false);
     setReceivingForm(null);
     setReceivingInitial(null);
+    setReceivingErrors({});
   }
 
   const isDirty = form && initialForm ? JSON.stringify(form) !== JSON.stringify(initialForm) : false;
@@ -525,52 +828,118 @@ export default function ReturnsPage() {
     fd.append("trackingNumber", trackingNumber);
     fd.append("serialNumber", serialNumber);
     fd.append("orderNumber", orderNumber);
-    // Clear feedback & error until we know the outcome
     setFeedbackText("");
     setLookupErrorMsg("");
-    fetcher.submit(fd, { method: "post" });
+    lookupFetcher.submit(fd, { method: "post" });
   }
 
-  // On lookup response:
-  // - single match => open modal (and clear filter) + feedback
-  // - multiple => set filter only, no popup + feedback
+  // Lookup response handling
   useEffect(() => {
-    if (!fetcher?.data) return;
+    if (!lookupFetcher?.data) return;
+    const mode = lookupFetcher.data.mode || lookupFetcher.data?.multi?.mode || null;
 
-    const mode = fetcher.data.mode || fetcher.data?.multi?.mode || null;
-
-    if (fetcher.data.row) {
+    if (lookupFetcher.data.row) {
       setFilterSpec(null);
-      // Feedback (single match)
-      if (mode === "tracking") {
-        setFeedbackText("Tracking number found on entry in the window to the right.");
-      } else if (mode === "serial") {
-        setFeedbackText("Serial number found on entry in the window to the right.");
-      } else if (mode === "order") {
-        setFeedbackText("Order number found on entry in the window to the right.");
-      }
+      if (mode === "tracking") setFeedbackText("Tracking number found on entry in the window to the right.");
+      else if (mode === "serial") setFeedbackText("Serial number found on entry in the window to the right.");
+      else if (mode === "order") setFeedbackText("Order number found on entry in the window to the right.");
       setLookupErrorMsg("");
-      openAppropriate(fetcher.data.row);
-    } else if (fetcher.data.multi) {
-      const { mode: m, value } = fetcher.data.multi;
+      openAppropriate(lookupFetcher.data.row);
+    } else if (lookupFetcher.data.multi) {
+      const { mode: m, value } = lookupFetcher.data.multi;
       setFilterSpec({ mode: m, value: String(value).toLowerCase() });
-      // Feedback (multiple matches)
-      if (m === "tracking") {
+      if (m === "tracking")
         setFeedbackText("Tracking number found on several entries -- pick one of the entries to the right.");
-      } else if (m === "serial") {
+      else if (m === "serial")
         setFeedbackText("Serial number found on several entries -- this might be a mistake.  Please check the entries to the right.");
-      } else if (m === "order") {
+      else if (m === "order")
         setFeedbackText("Order number found on several entries -- pick one of the entries to the right.");
-      }
       setLookupErrorMsg("");
-    } else if (fetcher.data.error) {
-      // Keep inline error, no feedback text
+    } else if (lookupFetcher.data.error) {
       setFeedbackText("");
-      setLookupErrorMsg(fetcher.data.error);
+      setLookupErrorMsg(lookupFetcher.data.error);
     }
-  }, [fetcher?.data]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lookupFetcher?.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const lookupPending = fetcher.state !== "idle";
+  const lookupPending = lookupFetcher.state !== "idle";
+
+  // Client-side validation as user edits
+  useEffect(() => {
+    if (form) setEditErrors(validateEditClient(form));
+  }, [form]);
+
+  useEffect(() => {
+    if (receivingForm) setReceivingErrors(validateReceivingClient(receivingForm));
+  }, [receivingForm]);
+
+  // Save: Edit modal
+  function handleEditSave() {
+    if (!form?.id) return;
+    const errs = validateEditClient(form);
+    if (Object.keys(errs).length > 0) {
+      setEditErrors(errs);
+      return;
+    }
+    // normalize to ISO for submit
+    const normalized = {
+      ...form,
+      date_requested: form.date_requested ? parseDateToISOClient(form.date_requested) : "",
+      date_received:  form.date_received  ? parseDateToISOClient(form.date_received)  : "",
+      date_inspected: form.date_inspected ? parseDateToISOClient(form.date_inspected) : "",
+    };
+    const fd = new FormData();
+    fd.append("intent", "saveEdit");
+    Object.entries(normalized).forEach(([k, v]) => fd.append(k, v ?? ""));
+    saveEditFetcher.submit(fd, { method: "post" });
+  }
+
+  // Save: Receiving modal
+  function handleReceivingSave() {
+    if (!receivingForm?.id) return;
+    const errs = validateReceivingClient(receivingForm);
+    if (Object.keys(errs).length > 0) {
+      setReceivingErrors(errs);
+      return;
+    }
+    const fd = new FormData();
+    fd.append("intent", "saveReceiving");
+    fd.append("id", receivingForm.id);
+    fd.append(
+      "date_received",
+      parseDateToISOClient(receivingForm.date_received) || ""
+    );
+    saveReceivingFetcher.submit(fd, { method: "post" });
+  }
+
+  // React to save results (Edit)
+  useEffect(() => {
+    const d = saveEditFetcher.data;
+    if (!d) return;
+    if (d.fieldErrors) {
+      setEditErrors(d.fieldErrors);
+      return;
+    }
+    if (d.ok && d.intent === "saveEdit") {
+      closeEditor();
+      revalidator.revalidate();
+      setFeedbackText("Changes saved.");
+    }
+  }, [saveEditFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // React to save results (Receiving)
+  useEffect(() => {
+    const d = saveReceivingFetcher.data;
+    if (!d) return;
+    if (d.fieldErrors) {
+      setReceivingErrors(d.fieldErrors);
+      return;
+    }
+    if (d.ok && d.intent === "saveReceiving") {
+      closeReceiving();
+      revalidator.revalidate();
+      setFeedbackText("Order marked as received.");
+    }
+  }, [saveReceivingFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Derived: rows to display (filtered if needed)
   const baseRows = Array.isArray(rows) ? rows : [];
@@ -581,7 +950,7 @@ export default function ReturnsPage() {
 
   const showing = displayedRows.length;
 
-  // Reset handler: clear filter + lookup panel + feedback + inline error
+  // Reset handler
   function handleReset() {
     setFilterSpec(null);
     setTrackingNumber("");
@@ -589,13 +958,12 @@ export default function ReturnsPage() {
     setOrderNumber("");
     setFeedbackText("");
     setLookupErrorMsg("");
-    // Put focus back to Tracking Number after reset
     setTimeout(() => focusById(trackingId), 0);
   }
 
   return (
     <Page fullWidth title="RSL Services - Returns">
-      {/* Diagnostics (remove once verified) */}
+      {/* Diagnostics */}
       <InlineStack align="start">
         <Text as="span" tone="subdued" variant="bodySm">
           DB {diagnostics?.dbOk ? "✅" : "❓"} • Showing {showing}
@@ -611,20 +979,12 @@ export default function ReturnsPage() {
         </Text>
       </InlineStack>
 
-      {/* Keep 20px spacing; left Lookup Panel fixed width; table fills remainder */}
+      {/* Layout: Lookup + Table */}
       <div style={{ display: "flex", alignItems: "flex-start", gap: 20 }}>
-        {/* Left: Lookup Panel */}
+        {/* Lookup Panel */}
         <div style={{ width: 320, maxWidth: 320, flex: "0 0 auto" }}>
           <Card title="Lookup Panel" sectioned>
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.75rem",
-                minHeight: 480,
-              }}
-            >
-              {/* Wrap inputs to catch onKeyDown reliably */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", minHeight: 480 }}>
               <div onKeyDown={(e) => handleLookupKeyDown(e, "tracking")}>
                 <TextField
                   id={trackingId}
@@ -635,9 +995,7 @@ export default function ReturnsPage() {
                 />
               </div>
               <div style={{ textAlign: "center" }}>
-                <Text as="p" variant="bodyMd">
-                  OR
-                </Text>
+                <Text as="p" variant="bodyMd">OR</Text>
               </div>
               <div onKeyDown={(e) => handleLookupKeyDown(e, "serial")}>
                 <TextField
@@ -649,9 +1007,7 @@ export default function ReturnsPage() {
                 />
               </div>
               <div style={{ textAlign: "center" }}>
-                <Text as="p" variant="bodyMd">
-                  OR
-                </Text>
+                <Text as="p" variant="bodyMd">OR</Text>
               </div>
               <div onKeyDown={(e) => handleLookupKeyDown(e, "order")}>
                 <TextField
@@ -663,7 +1019,7 @@ export default function ReturnsPage() {
                 />
               </div>
 
-              {/* Feedback area (no title; darker text) */}
+              {/* Feedback (no title, darker) */}
               {feedbackText ? (
                 <div
                   aria-label="Feedback"
@@ -673,7 +1029,7 @@ export default function ReturnsPage() {
                     padding: "8px 10px",
                     minHeight: 72,
                     whiteSpace: "pre-wrap",
-                    color: "#111", // darker text
+                    color: "#111",
                     background: "rgba(0,0,0,0.03)",
                   }}
                 >
@@ -681,15 +1037,11 @@ export default function ReturnsPage() {
                 </div>
               ) : null}
 
-              {/* Bottom-anchored Lookup button */}
+              {/* Bottom Lookup button */}
               <div style={{ marginTop: "auto" }}>
                 <Button
                   fullWidth
-                  onClick={() => {
-                    // New lookup resets current filter; server will re-apply if multi
-                    setFilterSpec(null);
-                    onLookup();
-                  }}
+                  onClick={() => { setFilterSpec(null); onLookup(); }}
                   disabled={!hasLookupInput}
                   loading={lookupPending}
                 >
@@ -697,7 +1049,7 @@ export default function ReturnsPage() {
                 </Button>
               </div>
 
-              {/* Inline error (if any) */}
+              {/* Inline error */}
               {lookupErrorMsg ? (
                 <Text as="p" tone="critical" variant="bodySm">
                   {lookupErrorMsg}
@@ -707,7 +1059,7 @@ export default function ReturnsPage() {
           </Card>
         </div>
 
-        {/* Right: table/tabs fills remaining viewport width */}
+        {/* Table / Tabs */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <Card>
             <Tabs tabs={tabs} selected={selected} onSelect={setSelected}>
@@ -722,7 +1074,6 @@ export default function ReturnsPage() {
                     defaultSortKey="age"
                     defaultSortDir="desc"
                   />
-                  {/* Footer reset area (always available) */}
                   <div
                     style={{
                       display: "flex",
@@ -754,7 +1105,7 @@ export default function ReturnsPage() {
         open={modalOpen}
         onClose={closeEditor}
         title={form ? `Edit Return #${form.original_order || form.id}` : "Edit Return"}
-        primaryAction={{ content: "Save", onAction: () => {}, disabled: !isDirty }}
+        primaryAction={{ content: "Save", onAction: handleEditSave, disabled: !isDirty || Object.keys(editErrors).length > 0 }}
         secondaryActions={[{ content: "Cancel", onAction: closeEditor }]}
         large
       >
@@ -769,11 +1120,11 @@ export default function ReturnsPage() {
                   onChange={(v) => setForm({ ...form, original_order: v })}
                   autoComplete="off"
                 />
-                <TextField
+                <DateInput
                   label="Date Received"
-                  type="date"
                   value={form.date_received || ""}
                   onChange={(v) => setForm({ ...form, date_received: v })}
+                  error={editErrors.date_received}
                 />
                 <div>
                   <Text as="p" variant="bodySm">Customer Name</Text>
@@ -812,17 +1163,17 @@ export default function ReturnsPage() {
 
               {/* Line 3 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, alignItems: "end" }}>
-                <TextField
+                <DateInput
                   label="Date Requested"
-                  type="date"
                   value={form.date_requested || ""}
                   onChange={(v) => setForm({ ...form, date_requested: v })}
+                  error={editErrors.date_requested}
                 />
-                <TextField
+                <DateInput
                   label="Date Inspected"
-                  type="date"
                   value={form.date_inspected || ""}
                   onChange={(v) => setForm({ ...form, date_inspected: v })}
+                  error={editErrors.date_inspected}
                 />
                 <TextField
                   label="Inspector"
@@ -862,21 +1213,14 @@ export default function ReturnsPage() {
       {/* RECEIVING A RETURN Modal */}
       <Modal
         open={receivingOpen}
-        onClose={() => {
-          // Cancel should behave like Reset
-          handleReset();
-          closeReceiving();
-        }}
+        onClose={() => { handleReset(); closeReceiving(); }}
         title="RECEIVING A RETURN"
         primaryAction={{
           content: "MARK ORDER AS RECEIVED",
-          onAction: () => console.log("Receiving SAVE payload:", receivingForm),
-          disabled: !receivingDirty
+          onAction: handleReceivingSave,
+          disabled: !receivingDirty || Object.keys(receivingErrors).length > 0
         }}
-        secondaryActions={[{ content: "Cancel", onAction: () => {
-            handleReset();
-            closeReceiving();
-          }}]}
+        secondaryActions={[{ content: "Cancel", onAction: () => { handleReset(); closeReceiving(); } }]}
         large
       >
         <Modal.Section>
@@ -891,11 +1235,11 @@ export default function ReturnsPage() {
                 <TextField label="Tracking Number" value={receivingForm.tracking_number || ""} disabled />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
-                <TextField
+                <DateInput
                   label="Date Received"
-                  type="date"
                   value={receivingForm.date_received || ""}
                   onChange={(v) => setReceivingForm({ ...receivingForm, date_received: v })}
+                  error={receivingErrors.date_received}
                 />
               </div>
             </div>
@@ -989,10 +1333,9 @@ function DashboardTable({
     const dirMul = sortDir === "asc" ? 1 : -1;
 
     const isNilA = va === null || va === undefined || va === "";
-    // nulls/empties last
     const isNilB = vb === null || vb === undefined || vb === "";
     if (isNilA && isNilB) return 0;
-    if (isNilA) return 1;
+    if (isNilA) return 1; // nulls/empties last
     if (isNilB) return -1;
 
     if (typeof va === "number" && typeof vb === "number") {
@@ -1009,12 +1352,8 @@ function DashboardTable({
   }, [items, sortKey, sortDir]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleSort = (key) => {
-    if (sortKey === key) {
-      setSortDir((d) => (d === "desc" ? "asc" : "desc"));
-    } else {
-      setSortKey(key);
-      setSortDir("desc");
-    }
+    if (sortKey === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    else { setSortKey(key); setSortDir("desc"); }
   };
 
   const SortHeader = ({ label, keyName }) => {
@@ -1032,11 +1371,12 @@ function DashboardTable({
         }}
         title={`Sort by ${label}`}
       >
-        <span>{label}</span>
-        <span style={{ opacity: active ? 1 : 0.3 }}>{arrow}</span>
-      </span>
+      <span>{label}</span>
+      <span style={{ opacity: active ? 1 : 0.3 }}>{arrow}</span>
+    </span>
     );
   };
+
 
   return (
     <IndexTable
@@ -1126,7 +1466,6 @@ function applyFilter(rows, filterSpec, map) {
         map.original_order;
 
   return rows.filter((row) => {
-    // Prefer inferred key; fall back to common aliases present on the row.
     const tryKeys = mappedKey ? [mappedKey, ...KEYS[filterSpec.mode]] : KEYS[filterSpec.mode];
     for (const k of tryKeys) {
       if (Object.prototype.hasOwnProperty.call(row, k)) {
@@ -1316,4 +1655,72 @@ function daysSince(d) {
   } catch {
     return 0;
   }
+}
+
+// ── validation helpers (client) ────────────────────────────────────────────────
+function parseDateToISOClient(value) {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+
+  // ISO: YYYY-MM-DD
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (iso) {
+    const y = +iso[1], m = +iso[2], d = +iso[3];
+    return isValidYMDClient(y, m, d)
+      ? `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`
+      : null;
+  }
+
+  // US: M(M)/D(D)/YYYY
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (us) {
+    const m = +us[1], d = +us[2], y = +us[3];
+    return isValidYMDClient(y, m, d)
+      ? `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`
+      : null;
+  }
+
+  return null;
+}
+function isValidYMDClient(y, m, d) {
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return false;
+  if (m < 1 || m > 12) return false;
+  if (d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && (dt.getUTCMonth() + 1) === m && dt.getUTCDate() === d;
+}
+function todayISOClient() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+function validateEditClient(f) {
+  const errors = {};
+  const rqISO = f?.date_requested ? parseDateToISOClient(f.date_requested) : null;
+  const rcISO = f?.date_received ? parseDateToISOClient(f.date_received) : null;
+  const insISO = f?.date_inspected ? parseDateToISOClient(f.date_inspected) : null;
+
+  if (f?.date_requested && !rqISO) errors.date_requested = "Use YYYY-MM-DD or MM/DD/YYYY";
+  if (f?.date_received && !rcISO) errors.date_received = "Use YYYY-MM-DD or MM/DD/YYYY";
+  if (f?.date_inspected && !insISO) errors.date_inspected = "Use YYYY-MM-DD or MM/DD/YYYY";
+
+  if (!errors.date_requested && rqISO && rcISO && rcISO < rqISO) {
+    errors.date_received = "Date Received cannot be before Date Requested";
+  }
+  if (!errors.date_received && rcISO && insISO && insISO < rcISO) {
+    errors.date_inspected = "Date Inspected cannot be before Date Received";
+  }
+
+  return errors;
+}
+function validateReceivingClient(f) {
+  const errors = {};
+  const rcISO = f?.date_received ? parseDateToISOClient(f.date_received) : null;
+  if (!f?.date_received) errors.date_received = "Date Received is required";
+  else if (!rcISO) errors.date_received = "Use YYYY-MM-DD or MM/DD/YYYY";
+  else if (rcISO > todayISOClient()) errors.date_received = "Date Received cannot be in the future";
+  return errors;
 }

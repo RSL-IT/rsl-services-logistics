@@ -210,6 +210,9 @@ model ReturnEntry {
   replaced_items_todo          Int?
   status_id                    Int?
   serial_number                String?   @db.Text // was @db.Char(1)
+  tracking_number              String?   @db.Text
+  return_closed                Boolean?
+  shopify_return_gid           String?
 
   // Named relations (unchanged)
   returnType     tblkp_CsdReturnType?                                     @relation("ReturnTypeEntries", fields: [return_type_id], references: [id])
