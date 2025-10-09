@@ -124,11 +124,13 @@ model tblkp_CsdCustomerServiceStatus {
   @@map("csd_customer_service_status")
 }
 
-model tblkp_CsdRslCsd {
-  id    Int    @id @default(autoincrement())
-  value String
+model tbl_staff {
+  id   Int     @id @default(autoincrement())
+  name String? @db.Text
+  role String? @db.Text
+  gid  String? @db.Text
 
-  @@map("csd_rsl_csd")
+  @@map("rsl_staff")
 }
 
 model tblkp_CsdReturnItemRequired {
@@ -145,38 +147,31 @@ model tblkp_CsdRefundEligible {
   @@map("csd_refund_eligible")
 }
 
-model RepairEntry {
-  id                    Int       @id @default(autoincrement())
-  serviceNumber         DateTime? @map("service_number") @db.Timestamptz(6)
-  dateOfRepairRequest   DateTime? @map("date_of_repair_request") @db.Timestamptz(6)
-  originalOrder         String?   @map("original_order")
-  customerName          String?   @map("customer_name")
-  item                  String?   @map("item")
-  replacementOrder      String?   @map("replacement_order")
-  repairType            String?   @map("repair_type")
-  repairNotes           String?   @map("repair_notes")
-  customerServiceStatus String?   @map("customer_service_status")
-  rslRepairDept         String?   @map("rsl_repair_dept")
-  repairCompleted       Boolean?  @map("repair_completed")
-  repairDeptDesignation String?   @map("repair_dept_designation")
-  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt             DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
-
-  @@map("repair_entry")
-}
-
-model department {
-  id   Int     @id @default(autoincrement())
-  name String? @db.Char(1)
-
-  @@map("tlkp_department")
-}
+/**
+ * model RepairEntry {
+ * id                    Int       @id @default(autoincrement())
+ * serviceNumber         DateTime? @map("service_number") @db.Timestamptz(6)
+ * dateOfRepairRequest   DateTime? @map("date_of_repair_request") @db.Timestamptz(6)
+ * originalOrder         String?   @map("original_order")
+ * customerName          String?   @map("customer_name")
+ * item                  String?   @map("item")
+ * replacementOrder      String?   @map("replacement_order")
+ * repairType            String?   @map("repair_type")
+ * repairNotes           String?   @map("repair_notes")
+ * customerServiceStatus String?   @map("customer_service_status")
+ * rslRepairDept         String?   @map("rsl_repair_dept")
+ * repairCompleted       Boolean?  @map("repair_completed")
+ * repairDeptDesignation String?   @map("repair_dept_designation")
+ * createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+ * updatedAt             DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+ * @@map("repair_entry")
+ * }
+ */
 
 model note {
   id              Int     @id @default(autoincrement())
-  department_id   Int?
-  user_gid        String? @db.Char(1)
-  note            String?
+  user_gid        String? @db.Text
+  note            String? @db.Text
   return_entry_id Int?
 
   @@map("tbljn_note_departmentUserReturnEntry")
@@ -205,14 +200,14 @@ model ReturnEntry {
   repair_condition_received_id Int?
   date_inspected               DateTime? @db.Date
   rsl_rd_staff                 String?   @db.Text // was @db.Char(1)
-  rsl_rd_staff_gid             Int?
-  replacement_order            Int?
+  rsl_rd_staff_gid             String?   @db.Text
+  replacement_order            String?   @db.Text
   replaced_items_todo          Int?
   status_id                    Int?
   serial_number                String?   @db.Text // was @db.Char(1)
   tracking_number              String?   @db.Text
   return_closed                Boolean?
-  shopify_return_gid           String?
+  shopify_return_gid           String?   @db.Text
 
   // Named relations (unchanged)
   returnType     tblkp_CsdReturnType?                                     @relation("ReturnTypeEntries", fields: [return_type_id], references: [id])

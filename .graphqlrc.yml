@@ -1,0 +1,3 @@
+schema: "schema/admin-${SHOPIFY_API_VERSION:-2025-01}.json"
+documents:
+  - "app/**/*.{graphql,gql,js,jsx,ts,tsx}"
