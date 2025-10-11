@@ -1,0 +1,16 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "8df1aafaf8983402791883992262d84b"
+name = "rsl-services"
+application_url = "https://example.com"
+embedded = true
+
+[webhooks]
+api_version = "2026-01"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_customers,read_inventory,read_locales,read_locations,read_orders,read_returns,write_customers,write_inventory,write_locales,write_locations,write_orders,write_products,write_returns"
+
+[auth]
+redirect_urls = [ "https://example.com/api/auth" ]
