@@ -12,6 +12,11 @@ import {
 import { authenticate } from "./shopify.server";
 import polarisStylesHref from "@shopify/polaris/build/esm/styles.css?url";
 
+// Polaris (CJS-friendly) + English locale for i18n
+import Polaris from "@shopify/polaris";
+import en from "@shopify/polaris/locales/en.json";
+const { AppProvider } = Polaris;
+
 export const links = () => [
   { rel: "stylesheet", href: polarisStylesHref },
 ];
@@ -47,7 +52,11 @@ export default function App() {
       <Links />
     </head>
     <body>
-    <Outlet />
+    {/* Global Polaris provider so Page, Button, etc. don't throw MissingAppProviderError */}
+    <AppProvider i18n={en}>
+      <Outlet />
+    </AppProvider>
+
     <ScrollRestoration />
     <Scripts />
     <LiveReload />
@@ -65,6 +74,7 @@ export function ErrorBoundary({ error }) {
       <title>App Error</title>
     </head>
     <body>
+    {/* Keep error UI simple; Polaris not required here */}
     <div style={{ padding: 16 }}>
       <h1>Something went wrong</h1>
       <pre style={{ whiteSpace: "pre-wrap" }}>{String(error?.stack || error)}</pre>

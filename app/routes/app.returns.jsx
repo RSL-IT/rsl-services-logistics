@@ -46,7 +46,6 @@ export async function action({ request }) {
     const id = toIntOrNull(form.get("id"));
     if (!id) return json({ ok: false, intent, error: "Missing id" }, { status: 400 });
 
-    // Build payload from form (dates may be ISO or MM/DD/YYYY; normalize later)
     const payload = {
       original_order: toStringOrNull(form.get("original_order")),
       date_requested: toDateOrNull(form.get("date_requested")),
@@ -63,7 +62,6 @@ export async function action({ request }) {
       final_disposition_id: toIntOrNull(form.get("final_disposition_id")),
     };
 
-    // Server-side validation + normalization
     const fieldErrors = validateEditServer(payload);
     if (Object.keys(fieldErrors).length > 0) {
       return json({ ok: false, intent, fieldErrors }, { status: 422 });
@@ -79,7 +77,6 @@ export async function action({ request }) {
     const date_received = toDateOrNull(form.get("date_received"));
     if (!id) return json({ ok: false, intent, error: "Missing id" }, { status: 400 });
 
-    // Server-side validation + normalization
     const p = { date_received };
     const fieldErrors = validateReceivingServer(p);
     if (Object.keys(fieldErrors).length > 0) {
@@ -99,61 +96,89 @@ async function handleLookup(form) {
   const serialNumber = String(form.get("serialNumber") || "").trim();
   const trackingNumber = String(form.get("trackingNumber") || "").trim();
   const orderNumber = String(form.get("orderNumber") || "").trim();
+  const lastName = String(form.get("lastName") || "").trim();
 
-  if (!serialNumber && !trackingNumber && !orderNumber) {
+  if (!serialNumber && !trackingNumber && !orderNumber && !lastName) {
     return json(
-      { error: "Enter a Serial Number, Tracking Number, or Order Number to lookup." },
+      { error: "Enter a Serial Number, Tracking Number, Order Number, or Last Name to lookup." },
       { status: 400 }
     );
   }
 
-  const MODE = serialNumber ? "serial" : trackingNumber ? "tracking" : "order";
-  const value = (serialNumber || trackingNumber || orderNumber).trim();
+  const MODE = serialNumber
+    ? "serial"
+    : trackingNumber
+      ? "tracking"
+      : orderNumber
+        ? "order"
+        : "last";
+
+  const value = (serialNumber || trackingNumber || orderNumber || lastName).trim();
   const valueLC = value.toLowerCase();
   const valLitLC = sqlQuote(valueLC);
 
+  // Canonical column or expression per mode
   const CANON =
-    MODE === "serial" ? `"serial_number"` :
-      MODE === "tracking" ? `"tracking_number"` :
-        `"original_order"`;
+    MODE === "serial"
+      ? `"serial_number"`
+      : MODE === "tracking"
+        ? `"tracking_number"`
+        : MODE === "order"
+          ? `"original_order"`
+          : /* last name from customer_name */ `LOWER(split_part(trim("customer_name"), ' ', array_length(string_to_array(trim("customer_name"), ' '), 1)))`;
 
   const ALIASES =
     MODE === "serial"
       ? [`"serial_number"`, `"serial"`, `"serialNumber"`, `"sn"`, `"serial_no"`, `"serialNo"`]
       : MODE === "tracking"
         ? [`"tracking_number"`, `"tracking"`, `"trackingNumber"`, `"tracking_no"`, `"trackingNo"`]
-        : [`"original_order"`, `"order_number"`, `"order_no"`, `"orderid"`, `"order_id"`, `"orderId"`, `"order"`];
+        : MODE === "order"
+          ? [`"original_order"`, `"order_number"`, `"order_no"`, `"orderid"`, `"order_id"`, `"orderId"`, `"order"`]
+          : []; // no aliases for last name
 
-  const canonCond = `LOWER(${CANON}::text) = ${valLitLC}`;
-  const aliasCond = ALIASES.map((c) => `LOWER(${c}::text) = ${valLitLC}`).join(" OR ");
+  const canonCond =
+    MODE === "last"
+      ? `${CANON} = ${valLitLC}`
+      : `LOWER(${CANON}::text) = ${valLitLC}`;
+
+  const aliasCond =
+    MODE === "last"
+      ? "" // not used
+      : ALIASES.map((c) => `LOWER(${c}::text) = ${valLitLC}`).join(" OR ");
 
   async function countWhere(whereSql) {
-    try {
-      const r = await prisma.$queryRawUnsafe(
+    const try1 = async () =>
+      prisma.$queryRawUnsafe(
         `SELECT COUNT(*)::int AS n FROM "${SCHEMA}"."return_entry" WHERE ${whereSql}`
       );
+    const try2 = async () =>
+      prisma.$queryRawUnsafe(`SELECT COUNT(*)::int AS n FROM return_entry WHERE ${whereSql}`);
+
+    try {
+      const r = await try1();
       return Array.isArray(r) ? Number(r[0]?.n ?? 0) : Number(r?.n ?? 0);
     } catch {}
     try {
-      const r2 = await prisma.$queryRawUnsafe(
-        `SELECT COUNT(*)::int AS n FROM return_entry WHERE ${whereSql}`
-      );
+      const r2 = await try2();
       return Array.isArray(r2) ? Number(r2[0]?.n ?? 0) : Number(r2?.n ?? 0);
     } catch {}
     return 0;
   }
 
   async function getOneRow(whereSql) {
-    try {
-      const a = await prisma.$queryRawUnsafe(
+    const try1 = async () =>
+      prisma.$queryRawUnsafe(
         `SELECT * FROM "${SCHEMA}"."return_entry" WHERE ${whereSql} ORDER BY 1 DESC LIMIT 1`
       );
+    const try2 = async () =>
+      prisma.$queryRawUnsafe(`SELECT * FROM return_entry WHERE ${whereSql} ORDER BY 1 DESC LIMIT 1`);
+
+    try {
+      const a = await try1();
       if (Array.isArray(a) && a.length) return a[0];
     } catch {}
     try {
-      const b = await prisma.$queryRawUnsafe(
-        `SELECT * FROM return_entry WHERE ${whereSql} ORDER BY 1 DESC LIMIT 1`
-      );
+      const b = await try2();
       if (Array.isArray(b) && b.length) return b[0];
     } catch {}
     return null;
@@ -167,22 +192,35 @@ async function handleLookup(form) {
   }
   if (n > 1) return json({ multi: { mode: MODE, value }, intent: "lookup" });
 
-  // 2) aliases
-  n = await countWhere(aliasCond);
-  if (n === 0) {
-    const label = MODE === "serial" ? "serial number" : MODE === "tracking" ? "tracking number" : "order number";
-    return json({ error: `No match found for ${label}: ${value}`, intent: "lookup" }, { status: 404 });
-  }
-  if (n > 1) return json({ multi: { mode: MODE, value }, intent: "lookup" });
+  // 2) aliases (not used for last name)
+  if (MODE !== "last") {
+    n = await countWhere(aliasCond);
+    if (n === 0) {
+      const label =
+        MODE === "serial"
+          ? "serial number"
+          : MODE === "tracking"
+            ? "tracking number"
+            : "order number";
+      return json({ error: `No match found for ${label}: ${value}`, intent: "lookup" }, { status: 404 });
+    }
+    if (n > 1) return json({ multi: { mode: MODE, value }, intent: "lookup" });
 
-  const row = await getOneRow(aliasCond);
-  if (!row) return json({ error: "Lookup failed after match found.", intent: "lookup" }, { status: 500 });
-  return json({ row: bigIntSafeRow(row), mode: MODE, intent: "lookup" });
+    const row = await getOneRow(aliasCond);
+    if (!row) return json({ error: "Lookup failed after match found.", intent: "lookup" }, { status: 500 });
+    return json({ row: bigIntSafeRow(row), mode: MODE, intent: "lookup" });
+  }
+
+  // last name path (no alias)
+  if (n === 0) {
+    return json({ error: `No match found for last name: ${value}`, intent: "lookup" }, { status: 404 });
+  }
+  // n === 1 handled above; if we got here, it's multi
+  return json({ multi: { mode: MODE, value }, intent: "lookup" });
 }
 
 // ── UPDATE helper ──────────────────────────────────────────────────────────────
 async function updateReturnEntry(id, payload) {
-  // Only allow known columns
   const allow = new Set([
     "original_order",
     "date_requested",
@@ -215,7 +253,6 @@ async function updateReturnEntry(id, payload) {
     if (!row) throw new Error("No row returned");
     return { row };
   } catch (e) {
-    // fallback: unqualified
     try {
       const res2 = await prisma.$queryRawUnsafe(
         `UPDATE return_entry SET ${setSql} WHERE id = ${Number(id)} RETURNING *`
@@ -229,7 +266,6 @@ async function updateReturnEntry(id, payload) {
   }
 }
 
-// Build a safe SET fragment per field based on type
 function sqlSet(col, val) {
   const idCols = new Set(["item_id", "status_id", "final_disposition_id", "repair_condition_received_id"]);
   const dateCols = new Set(["date_requested", "date_received", "date_inspected"]);
@@ -260,7 +296,6 @@ function parseDateToISO(value) {
   const s = String(value).trim();
   if (!s) return null;
 
-  // ISO: YYYY-MM-DD
   const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
   if (isoMatch) {
     const y = +isoMatch[1], m = +isoMatch[2], d = +isoMatch[3];
@@ -268,7 +303,6 @@ function parseDateToISO(value) {
     return null;
   }
 
-  // US: M(M)/D(D)/YYYY
   const usMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
   if (usMatch) {
     const m = +usMatch[1], d = +usMatch[2], y = +usMatch[3];
@@ -287,7 +321,6 @@ function isValidYMD(y, m, d) {
   return dt.getUTCFullYear() === y && (dt.getUTCMonth() + 1) === m && dt.getUTCDate() === d;
 }
 
-// Converts allowed inputs to ISO or returns null
 function toDateOrNull(v) {
   return parseDateToISO(v);
 }
@@ -303,7 +336,7 @@ function sqlQuote(v) {
 
 // ── validation helpers (server) ────────────────────────────────────────────────
 function cmpISO(a, b) {
-  return a < b ? -1 : a > b ? 1 : 0; // 'YYYY-MM-DD'
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 function todayISO() {
   const now = new Date();
@@ -330,7 +363,6 @@ function validateEditServer(p) {
     errors.date_inspected = "Date Inspected cannot be before Date Received";
   }
 
-  // normalize for DB
   if (rqISO) p.date_requested = rqISO;
   if (rcISO) p.date_received = rcISO;
   if (insISO) p.date_inspected = insISO;
@@ -346,15 +378,15 @@ function validateReceivingServer(p) {
     const today = todayISO();
     if (cmpISO(rcISO, today) > 0) errors.date_received = "Date Received cannot be in the future";
   }
-  if (!errors.date_received) p.date_received = rcISO; // normalize
+  if (!errors.date_received) p.date_received = rcISO;
   return errors;
 }
 
 /**
- * Loader: never-throw, SELECT * fallback, diagnostics, lookups
+ * Loader: (1) sync rsl_staff from Shopify, (2) returns data & lookups
  */
 export async function loader({ request }) {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
   const diagnostics = {
     dbOk: null,
@@ -366,7 +398,11 @@ export async function loader({ request }) {
     statusModelUsed: null,
     finalDispModelUsed: null,
     repairCondModelUsed: null,
+    staffSync: null,
   };
+
+  // 0) One-time runtime sync of rsl_staff
+  diagnostics.staffSync = await staffAutofillSync(admin);
 
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -398,7 +434,6 @@ export async function loader({ request }) {
     diagnostics.joinErr = String(e?.message || e);
   }
 
-  // Attempt 2: SELECT * unqualified
   if (rows.length === 0) {
     try {
       const r = await prisma.$queryRawUnsafe(
@@ -413,7 +448,6 @@ export async function loader({ request }) {
     }
   }
 
-  // Attempt 3: SELECT * schema-qualified
   if (rows.length === 0) {
     try {
       const r = await prisma.$queryRawUnsafe(
@@ -428,7 +462,6 @@ export async function loader({ request }) {
     }
   }
 
-  // Count (best effort)
   try {
     const c = await prisma.$queryRawUnsafe(
       `SELECT COUNT(*)::int AS count FROM "${SCHEMA}"."return_entry"`
@@ -444,7 +477,6 @@ export async function loader({ request }) {
     }
   }
 
-  // Lookups
   const lookups = { items: [], statuses: [], finalDispositions: [], repairConditions: [] };
 
   try {
@@ -552,12 +584,224 @@ function bigIntSafeRow(obj) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
+// STAFF SYNC (Shopify → rsl_staff via Prisma model `tblkp_staff` or raw SQL)
+// ───────────────────────────────────────────────────────────────────────────────
+const ALLOWED_ROLE_NAMES = new Set(["administrator", "shipping", "customer service"]);
+
+// Prefer Prisma model that maps to rsl_staff; your model name is `tblkp_staff`.
+function getStaffDelegate() {
+  return (
+    prisma?.tblkp_staff || // primary
+    prisma?.rsl_staff ||   // optional fallback if you also defined this
+    null
+  );
+}
+
+async function staffAutofillSync(admin) {
+  // Never throw — always return a result object with details (or error message).
+  const result = {
+    ok: false,
+    usedRoles: false,
+    staffFetched: 0,
+    considered: 0,
+    inserted: 0,
+    error: null,
+  };
+
+  try {
+    let rolesAvailable = true;
+    let staff = [];
+    try {
+      staff = await fetchStaffWithRoles(admin);
+    } catch (e) {
+      rolesAvailable = false;
+      try {
+        staff = await fetchStaffBasic(admin);
+      } catch (e2) {
+        result.error = `Shopify staff fetch failed: ${String(e2?.message || e2)}`;
+        return result;
+      }
+    }
+
+    result.usedRoles = rolesAvailable;
+    result.staffFetched = staff.length;
+
+    // Filter by allowed roles if rolesAvailable; else include all (dev fallback)
+    const candidates = staff.filter((u) => {
+      if (!rolesAvailable) return true;
+      const roles = (u.roles || []).map((r) => String(r).toLowerCase());
+      return roles.some((r) => ALLOWED_ROLE_NAMES.has(r));
+    });
+    result.considered = candidates.length;
+
+    // Existing gids
+    const existing = await getExistingStaffGidSet();
+
+    // Insert missing
+    for (const u of candidates) {
+      const gid = String(u.id || "").trim();
+      if (!gid || existing.has(gid)) continue;
+      const first = (u.firstName || "").trim();
+      const last = (u.lastName || "").trim();
+      const name = [first, last].filter(Boolean).join(" ") || (u.name || "").trim() || "Unknown";
+      const roleCsv = rolesAvailable ? (u.roles || []).join(", ") : "";
+
+      const ok = await insertStaffRow({ gid, name, role: roleCsv });
+      if (ok) {
+        existing.add(gid);
+        result.inserted += 1;
+      }
+    }
+
+    result.ok = true;
+    return result;
+  } catch (e) {
+    result.error = `staffAutofillSync error: ${String(e?.message || e)}`;
+    return result;
+  }
+}
+
+async function fetchStaffBasic(admin) {
+  const query = `#graphql
+    query StaffBasic($first:Int!, $after:String) {
+      staffMembers(first: $first, after: $after, query: "active:true", sortKey: ID) {
+        edges { cursor node { id firstName lastName name active email } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }`;
+  return paginateStaff(admin, query, (n) => ({
+    id: n.id, firstName: n.firstName, lastName: n.lastName, name: n.name, roles: []
+  }));
+}
+
+async function fetchStaffWithRoles(admin) {
+  const query = `#graphql
+    query StaffWithRoles($first:Int!, $after:String) {
+      staffMembers(first: $first, after: $after, query: "active:true", sortKey: ID) {
+        edges {
+          cursor
+          node {
+            id
+            firstName
+            lastName
+            name
+            permissions { userPermissions { name } }
+            privateData { permissions { roles { name } } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }`;
+  return paginateStaff(admin, query, (n) => {
+    let roles = [];
+    if (n?.permissions?.userPermissions) {
+      roles = n.permissions.userPermissions.map((x) => x?.name).filter(Boolean);
+    } else if (n?.privateData?.permissions?.roles) {
+      roles = n.privateData.permissions.roles.map((x) => x?.name).filter(Boolean);
+    }
+    return { id: n.id, firstName: n.firstName, lastName: n.lastName, name: n.name, roles };
+  });
+}
+
+async function paginateStaff(admin, query, mapNode) {
+  const out = [];
+  let after = null;
+  for (let i = 0; i < 10; i++) {
+    const resp = await admin.graphql(query, { variables: { first: 100, after } });
+    const json = await resp.json();
+    if (json?.errors?.length) {
+      const msg = json.errors.map((e) => e.message).join("; ");
+      throw new Error(msg || "GraphQL error");
+    }
+    const edges = json?.data?.staffMembers?.edges || [];
+    edges.forEach(({ node }) => out.push(mapNode(node)));
+    const pageInfo = json?.data?.staffMembers?.pageInfo;
+    if (!pageInfo?.hasNextPage) break;
+    after = pageInfo.endCursor;
+  }
+  return out;
+}
+
+async function getExistingStaffGidSet() {
+  const delegate = getStaffDelegate();
+  if (delegate) {
+    try {
+      const rows = await delegate.findMany({ select: { gid: true } });
+      return new Set(rows.map((r) => String(r.gid)));
+    } catch {
+      // fall through to raw SQL
+    }
+  }
+  try {
+    const r1 = await prisma.$queryRawUnsafe(`SELECT gid FROM "${SCHEMA}"."rsl_staff"`);
+    return new Set((Array.isArray(r1) ? r1 : []).map((r) => String(r.gid)));
+  } catch {
+    try {
+      const r2 = await prisma.$queryRawUnsafe(`SELECT gid FROM rsl_staff`);
+      return new Set((Array.isArray(r2) ? r2 : []).map((r) => String(r.gid)));
+    } catch {
+      return new Set();
+    }
+  }
+}
+
+async function insertStaffRow({ gid, name, role }) {
+  const delegate = getStaffDelegate();
+
+  if (delegate) {
+    try {
+      const exists = await delegate.findFirst({ where: { gid } });
+      if (exists) return true;
+      await delegate.create({ data: { gid, name, role } });
+      return true;
+    } catch {
+      // fall through to raw SQL
+    }
+  }
+
+  // Raw SQL path — check existence first; then plain INSERT (no ON CONFLICT dependency)
+  const exists = await (async () => {
+    try {
+      const r = await prisma.$queryRawUnsafe(
+        `SELECT 1 FROM "${SCHEMA}"."rsl_staff" WHERE gid = ${sqlQuote(gid)} LIMIT 1`
+      );
+      return Array.isArray(r) && r.length > 0;
+    } catch {
+      try {
+        const r2 = await prisma.$queryRawUnsafe(
+          `SELECT 1 FROM rsl_staff WHERE gid = ${sqlQuote(gid)} LIMIT 1`
+        );
+        return Array.isArray(r2) && r2.length > 0;
+      } catch {
+        return false;
+      }
+    }
+  })();
+  if (exists) return true;
+
+  try {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "${SCHEMA}"."rsl_staff" ("gid","name","role") VALUES (${sqlQuote(gid)}, ${sqlQuote(name)}, ${sqlQuote(role)})`
+    );
+    return true;
+  } catch {
+    try {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO rsl_staff ("gid","name","role") VALUES (${sqlQuote(gid)}, ${sqlQuote(name)}, ${sqlQuote(role)})`
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
 /** DateInput: TextField + Popover DatePicker (opens on focus or via icon) */
 // ───────────────────────────────────────────────────────────────────────────────
 function DateInput({ id, label, value, onChange, error, disabled = false }) {
   const [active, setActive] = useState(false);
 
-  // parse text value -> Date (or null)
   const toDate = (val) => {
     const iso = parseDateToISOClient(val);
     if (!iso) return null;
@@ -580,19 +824,15 @@ function DateInput({ id, label, value, onChange, error, disabled = false }) {
   };
 
   const handleText = (text) => {
-    onChange?.(text); // allow free typing
+    onChange?.(text);
   };
 
   const handleBlur = () => {
-    // If the manually entered text parses, normalize to ISO in field
     const iso = parseDateToISOClient(value);
     if (iso) onChange?.(iso);
   };
 
-  const handleFocus = () => {
-    // Open the calendar when the field gains focus (helps in modals)
-    setActive(true);
-  };
+  const handleFocus = () => setActive(true);
 
   const rangeSelected = {
     start: selectedDate || initial,
@@ -660,20 +900,17 @@ export default function ReturnsPage() {
   const saveReceivingFetcher = useFetcher();
   const revalidator = useRevalidator();
 
-  // Infer mapping from actual DB columns so UI works regardless of naming
   const schemaMap = useMemo(() => inferSchemaMap(rows), [rows]);
 
-  // Tabs
   const [selected, setSelected] = useState(0);
   const tabs = useMemo(
     () => [{ id: "dashboard", content: "Dashboard" }, { id: "inspection", content: "Inspection" }],
     []
   );
 
-  // Lookup options/maps
   const itemOptions = useMemo(
     () => [
-      { label: "Enter Item", value: "" }, // placeholder
+      { label: "Enter Item", value: "" },
       ...(lookups.items || []).map((o) => ({ label: o.value, value: String(o.id) })),
     ],
     [lookups.items]
@@ -681,7 +918,7 @@ export default function ReturnsPage() {
 
   const statusOptions = useMemo(
     () => [
-      { label: "Set Status", value: "" }, // placeholder
+      { label: "Set Status", value: "" },
       ...(lookups.statuses || []).map((o) => ({ label: o.value, value: String(o.id) })),
     ],
     [lookups.statuses]
@@ -710,15 +947,18 @@ export default function ReturnsPage() {
   const [trackingNumber, setTrackingNumber] = useState("");
   const [serialNumber, setSerialNumber] = useState("");
   const [orderNumber, setOrderNumber] = useState("");
+  const [lastName, setLastName] = useState("");
   const hasLookupInput =
     trackingNumber.trim().length > 0 ||
     serialNumber.trim().length > 0 ||
-    orderNumber.trim().length > 0;
+    orderNumber.trim().length > 0 ||
+    lastName.trim().length > 0;
 
   // ids to manage focus
   const trackingId = "trackingInput";
   const serialId = "serialInput";
   const orderId = "orderInput";
+  const lastId = "lastInput";
   const focusById = (id) => {
     const el = document.getElementById(id);
     if (el && typeof el.focus === "function") el.focus();
@@ -729,7 +969,7 @@ export default function ReturnsPage() {
     focusById(trackingId);
   }, []);
 
-  // Enter to lookup + tab trap
+  // Enter to lookup + tab cycle across fields
   function handleLookupKeyDown(e, field) {
     if (e.key === "Enter") {
       if (hasLookupInput) {
@@ -743,35 +983,31 @@ export default function ReturnsPage() {
       if (!e.shiftKey) {
         if (field === "tracking") { e.preventDefault(); focusById(serialId); }
         else if (field === "serial") { e.preventDefault(); focusById(orderId); }
-        else if (field === "order") { e.preventDefault(); focusById(trackingId); }
+        else if (field === "order") { e.preventDefault(); focusById(lastId); }
+        else if (field === "last") { e.preventDefault(); focusById(trackingId); }
       } else {
-        if (field === "tracking") { e.preventDefault(); focusById(orderId); }
+        if (field === "tracking") { e.preventDefault(); focusById(lastId); }
         else if (field === "serial") { e.preventDefault(); focusById(trackingId); }
         else if (field === "order") { e.preventDefault(); focusById(serialId); }
+        else if (field === "last") { e.preventDefault(); focusById(orderId); }
       }
     }
   }
 
-  // Feedback + error for lookup
   const [feedbackText, setFeedbackText] = useState("");
   const [lookupErrorMsg, setLookupErrorMsg] = useState("");
-
-  // Table filtering
   const [filterSpec, setFilterSpec] = useState(null); // { mode, value }
 
-  // Modals: Edit
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState(null);
   const [initialForm, setInitialForm] = useState(null);
   const [editErrors, setEditErrors] = useState({});
 
-  // Modals: Receiving
   const [receivingOpen, setReceivingOpen] = useState(false);
   const [receivingForm, setReceivingForm] = useState(null);
   const [receivingInitial, setReceivingInitial] = useState(null);
   const [receivingErrors, setReceivingErrors] = useState({});
 
-  // Open correct editor based on Date Received presence
   function openAppropriate(row) {
     const mapForRow = inferSchemaMap([row]);
     const rawDateReceived = mapForRow.date_received ? row?.[mapForRow.date_received] : null;
@@ -801,7 +1037,7 @@ export default function ReturnsPage() {
     setReceivingOpen(true);
     setReceivingForm(next);
     setReceivingInitial(initial);
-    setReceivingErrors(validateReceivingClient(next)); // compute once to enable/disable button
+    setReceivingErrors(validateReceivingClient(next));
   }
 
   function closeEditor() {
@@ -821,19 +1057,18 @@ export default function ReturnsPage() {
   const receivingDirty =
     receivingForm && receivingInitial ? JSON.stringify(receivingForm) !== JSON.stringify(receivingInitial) : false;
 
-  // Lookup submit
   function onLookup() {
     const fd = new FormData();
     fd.append("intent", "lookup");
     fd.append("trackingNumber", trackingNumber);
     fd.append("serialNumber", serialNumber);
     fd.append("orderNumber", orderNumber);
+    fd.append("lastName", lastName);
     setFeedbackText("");
     setLookupErrorMsg("");
     lookupFetcher.submit(fd, { method: "post" });
   }
 
-  // Lookup response handling
   useEffect(() => {
     if (!lookupFetcher?.data) return;
     const mode = lookupFetcher.data.mode || lookupFetcher.data?.multi?.mode || null;
@@ -843,6 +1078,7 @@ export default function ReturnsPage() {
       if (mode === "tracking") setFeedbackText("Tracking number found on entry in the window to the right.");
       else if (mode === "serial") setFeedbackText("Serial number found on entry in the window to the right.");
       else if (mode === "order") setFeedbackText("Order number found on entry in the window to the right.");
+      else if (mode === "last") setFeedbackText("Last name found on entry in the window to the right.");
       setLookupErrorMsg("");
       openAppropriate(lookupFetcher.data.row);
     } else if (lookupFetcher.data.multi) {
@@ -854,6 +1090,8 @@ export default function ReturnsPage() {
         setFeedbackText("Serial number found on several entries -- this might be a mistake.  Please check the entries to the right.");
       else if (m === "order")
         setFeedbackText("Order number found on several entries -- pick one of the entries to the right.");
+      else if (m === "last")
+        setFeedbackText("Last name found on several entries -- pick one of the entries to the right.");
       setLookupErrorMsg("");
     } else if (lookupFetcher.data.error) {
       setFeedbackText("");
@@ -863,7 +1101,6 @@ export default function ReturnsPage() {
 
   const lookupPending = lookupFetcher.state !== "idle";
 
-  // Client-side validation as user edits
   useEffect(() => {
     if (form) setEditErrors(validateEditClient(form));
   }, [form]);
@@ -872,7 +1109,6 @@ export default function ReturnsPage() {
     if (receivingForm) setReceivingErrors(validateReceivingClient(receivingForm));
   }, [receivingForm]);
 
-  // Save: Edit modal
   function handleEditSave() {
     if (!form?.id) return;
     const errs = validateEditClient(form);
@@ -880,7 +1116,6 @@ export default function ReturnsPage() {
       setEditErrors(errs);
       return;
     }
-    // normalize to ISO for submit
     const normalized = {
       ...form,
       date_requested: form.date_requested ? parseDateToISOClient(form.date_requested) : "",
@@ -893,7 +1128,6 @@ export default function ReturnsPage() {
     saveEditFetcher.submit(fd, { method: "post" });
   }
 
-  // Save: Receiving modal
   function handleReceivingSave() {
     if (!receivingForm?.id) return;
     const errs = validateReceivingClient(receivingForm);
@@ -904,14 +1138,10 @@ export default function ReturnsPage() {
     const fd = new FormData();
     fd.append("intent", "saveReceiving");
     fd.append("id", receivingForm.id);
-    fd.append(
-      "date_received",
-      parseDateToISOClient(receivingForm.date_received) || ""
-    );
+    fd.append("date_received", parseDateToISOClient(receivingForm.date_received) || "");
     saveReceivingFetcher.submit(fd, { method: "post" });
   }
 
-  // React to save results (Edit)
   useEffect(() => {
     const d = saveEditFetcher.data;
     if (!d) return;
@@ -926,7 +1156,6 @@ export default function ReturnsPage() {
     }
   }, [saveEditFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // React to save results (Receiving)
   useEffect(() => {
     const d = saveReceivingFetcher.data;
     if (!d) return;
@@ -939,9 +1168,8 @@ export default function ReturnsPage() {
       revalidator.revalidate();
       setFeedbackText("Order marked as received.");
     }
-  }, [saveReceivingFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [saveReceivingFetcher.data]); // eslint-disable-line react-hooks_exhaustive-deps
 
-  // Derived: rows to display (filtered if needed)
   const baseRows = Array.isArray(rows) ? rows : [];
   const displayedRows = useMemo(
     () => applyFilter(baseRows, filterSpec, schemaMap),
@@ -950,12 +1178,12 @@ export default function ReturnsPage() {
 
   const showing = displayedRows.length;
 
-  // Reset handler
   function handleReset() {
     setFilterSpec(null);
     setTrackingNumber("");
     setSerialNumber("");
     setOrderNumber("");
+    setLastName("");
     setFeedbackText("");
     setLookupErrorMsg("");
     setTimeout(() => focusById(trackingId), 0);
@@ -976,6 +1204,11 @@ export default function ReturnsPage() {
           {diagnostics?.joinErr ? " • joinErr" : ""}
           {diagnostics?.simpleStarErr ? " • simpleErr" : ""}
           {diagnostics?.schemaStarErr ? " • schemaErr" : ""}
+          {diagnostics?.staffSync
+            ? diagnostics.staffSync.error
+              ? ` • staffSync: err (${String(diagnostics.staffSync.error).slice(0, 80)})`
+              : ` • staffSync: ${diagnostics.staffSync.inserted} added / ${diagnostics.staffSync.considered} considered${diagnostics.staffSync.usedRoles ? "" : " (no roles)"}`
+            : ""}
         </Text>
       </InlineStack>
 
@@ -984,7 +1217,7 @@ export default function ReturnsPage() {
         {/* Lookup Panel */}
         <div style={{ width: 320, maxWidth: 320, flex: "0 0 auto" }}>
           <Card title="Lookup Panel" sectioned>
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", minHeight: 480 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", minHeight: 520 }}>
               <div onKeyDown={(e) => handleLookupKeyDown(e, "tracking")}>
                 <TextField
                   id={trackingId}
@@ -1018,8 +1251,19 @@ export default function ReturnsPage() {
                   autoComplete="off"
                 />
               </div>
+              <div style={{ textAlign: "center" }}>
+                <Text as="p" variant="bodyMd">OR</Text>
+              </div>
+              <div onKeyDown={(e) => handleLookupKeyDown(e, "last")}>
+                <TextField
+                  id={lastId}
+                  label="Last Name"
+                  value={lastName}
+                  onChange={setLastName}
+                  autoComplete="off"
+                />
+              </div>
 
-              {/* Feedback (no title, darker) */}
               {feedbackText ? (
                 <div
                   aria-label="Feedback"
@@ -1037,7 +1281,6 @@ export default function ReturnsPage() {
                 </div>
               ) : null}
 
-              {/* Bottom Lookup button */}
               <div style={{ marginTop: "auto" }}>
                 <Button
                   fullWidth
@@ -1049,7 +1292,6 @@ export default function ReturnsPage() {
                 </Button>
               </div>
 
-              {/* Inline error */}
               {lookupErrorMsg ? (
                 <Text as="p" tone="critical" variant="bodySm">
                   {lookupErrorMsg}
@@ -1253,7 +1495,7 @@ export default function ReturnsPage() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Dashboard table (clickable rows) + strict color rules with dynamic mapping
+// Dashboard table and helpers
 // ───────────────────────────────────────────────────────────────────────────────
 function DashboardTable({
                           rows,
@@ -1265,11 +1507,10 @@ function DashboardTable({
                           defaultSortDir = "desc",
                         }) {
   const [sortKey, setSortKey] = useState(defaultSortKey);
-  const [sortDir, setSortDir] = useState(defaultSortDir); // 'asc' | 'desc'
+  const [sortDir, setSortDir] = useState(defaultSortDir);
 
   const items = Array.isArray(rows) ? rows : [];
 
-  // Paint row backgrounds after render (override Polaris styles)
   useEffect(() => {
     const COLORS = {
       green: "rgba(16, 128, 67, 0.16)",
@@ -1284,7 +1525,6 @@ function DashboardTable({
     });
   }, [items]);
 
-  // Helpers using inferred keys
   const k = (row, key) => (key ? row?.[key] ?? null : null);
   const itemLabel = (row) => {
     const id = k(row, map.item_id);
@@ -1299,10 +1539,9 @@ function DashboardTable({
     return statusLabelById.get(key) || "—";
   };
 
-  // Sorting helpers
   const getAge = (row) => {
     const drc = k(row, map.date_received);
-    return drc ? daysSince(drc) : null; // null means no age
+    return drc ? daysSince(drc) : null;
   };
   const getTimestamp = (d) => {
     if (!d) return null;
@@ -1335,7 +1574,7 @@ function DashboardTable({
     const isNilA = va === null || va === undefined || va === "";
     const isNilB = vb === null || vb === undefined || vb === "";
     if (isNilA && isNilB) return 0;
-    if (isNilA) return 1; // nulls/empties last
+    if (isNilA) return 1;
     if (isNilB) return -1;
 
     if (typeof va === "number" && typeof vb === "number") {
@@ -1362,21 +1601,14 @@ function DashboardTable({
     return (
       <span
         onClick={() => toggleSort(keyName)}
-        style={{
-          cursor: "pointer",
-          userSelect: "none",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-        }}
+        style={{ cursor: "pointer", userSelect: "none", display: "inline-flex", alignItems: "center", gap: 6 }}
         title={`Sort by ${label}`}
       >
-      <span>{label}</span>
-      <span style={{ opacity: active ? 1 : 0.3 }}>{arrow}</span>
-    </span>
+        <span>{label}</span>
+        <span style={{ opacity: active ? 1 : 0.3 }}>{arrow}</span>
+      </span>
     );
   };
-
 
   return (
     <IndexTable
@@ -1434,9 +1666,6 @@ function DashboardTable({
   );
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Placeholder
-// ───────────────────────────────────────────────────────────────────────────────
 function Placeholder() {
   return (
     <div style={{ padding: "1rem" }}>
@@ -1460,6 +1689,16 @@ function applyFilter(rows, filterSpec, map) {
     order: ["original_order", "order_number", "order_no", "orderid", "order_id", "orderId", "order"],
   };
 
+  if (filterSpec.mode === "last") {
+    // Match last token of customer_name
+    return rows.filter((row) => {
+      const raw = map.customer_name ? row?.[map.customer_name] : row?.customer_name;
+      if (raw === null || raw === undefined) return false;
+      const last = String(raw).trim().split(/\s+/).pop()?.toLowerCase() || "";
+      return last === v;
+    });
+  }
+
   const mappedKey =
     filterSpec.mode === "serial" ? map.serial_number :
       filterSpec.mode === "tracking" ? map.tracking_number :
@@ -1472,7 +1711,7 @@ function applyFilter(rows, filterSpec, map) {
         const cell = row[k];
         if (cell !== null && cell !== undefined) {
           const sv = String(cell).toLowerCase();
-          if (sv === v) return true; // exact, case-insensitive
+          if (sv === v) return true;
         }
       }
     }
@@ -1559,7 +1798,6 @@ function toForm(row, map) {
   };
 }
 
-// Supports defaulting Date Received to today when missing
 function toReceivingForm(row, map, { defaultToday = false } = {}) {
   const get = (k) => (k ? row?.[k] ?? "" : "");
   const existing = toInputDate(get(map.date_received));
@@ -1605,7 +1843,6 @@ function customerAdminUrl(customerGid) {
   return id ? `/admin/customers/${id}` : undefined;
 }
 
-// STRICT color rules (requires Date Received)
 function colorNameForAgeStrict(age) {
   if (age === null || age === undefined) return null;
   if (age === 1 || age === 2) return "green";
@@ -1614,7 +1851,6 @@ function colorNameForAgeStrict(age) {
   return null;
 }
 
-// Fill the cell by offsetting Polaris padding
 function wrapperStyleForColor(colorName) {
   if (!colorName) return undefined;
   const colorMap = {
@@ -1663,7 +1899,6 @@ function parseDateToISOClient(value) {
   const s = String(value).trim();
   if (!s) return null;
 
-  // ISO: YYYY-MM-DD
   const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
   if (iso) {
     const y = +iso[1], m = +iso[2], d = +iso[3];
@@ -1672,7 +1907,6 @@ function parseDateToISOClient(value) {
       : null;
   }
 
-  // US: M(M)/D(D)/YYYY
   const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
   if (us) {
     const m = +us[1], d = +us[2], y = +us[3];

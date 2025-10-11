@@ -2,12 +2,9 @@
 
 client_id = "be8e8039e18f100d31437e7c4dcfe1b0"
 name = "RSL Services"
-handle = "rsl-services-app"
 application_url = "https://rsl-services-app.fly.dev"
 embedded = true
-
-[build]
-automatically_update_urls_on_dev = false
+handle = "rsl-services-app"
 
 [webhooks]
 api_version = "2025-04"
@@ -22,7 +19,7 @@ api_version = "2025-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_inventory,read_locales,read_locations,write_inventory,write_locales,write_locations,write_products,read_orders,write_orders,read_returns,write_returns,read_customers,write_customers"
+scopes = "read_customers,read_inventory,read_locales,read_locations,read_orders,read_returns,write_customers,write_inventory,write_locales,write_locations,write_orders,write_products,write_returns"
 
 [auth]
 redirect_urls = [
@@ -33,3 +30,6 @@ redirect_urls = [
 
 [pos]
 embedded = false
+
+[build]
+automatically_update_urls_on_dev = true

@@ -124,11 +124,11 @@ model tblkp_CsdCustomerServiceStatus {
   @@map("csd_customer_service_status")
 }
 
-model tbl_staff {
+model tblkp_staff {
   id   Int     @id @default(autoincrement())
-  name String? @db.Text
-  role String? @db.Text
-  gid  String? @db.Text
+  name String? @db.VarChar(60)
+  role String? @db.VarChar(60)
+  gid  String? @db.VarChar(60)
 
   @@map("rsl_staff")
 }
