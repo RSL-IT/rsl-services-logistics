@@ -234,19 +234,44 @@ model tbl_powerbuy_config {
   end_time                   DateTime? @db.Date
   number_of_uses             Int?
   powerbuy_product_id        String?   @db.Text
+
+  codes                 tbl_powerbuy_codes[]
+  tbl_powerbuy_requests tbl_powerbuy_requests[]
 }
 
-model tbl_powerbuy_entries {
-  id                         Int       @id @default(autoincrement())
-  discount_code              String    @db.Text
-  discount_code_gid          String    @db.Text
-  short_description          String?   @db.Text
-  long_description           String    @db.Text
-  confirmation_email_content String?   @db.Text
-  acceptance_email_content   String?   @db.Text
-  rsl_contact_email_address  String?
-  start_time                 DateTime? @db.Date
-  end_time                   DateTime? @db.Date
+model tbl_powerbuy_codes {
+  id                         Int                 @id @default(autoincrement())
+  powerbuy_id                Int
+  powerbuy                   tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
+  discount_code              String              @db.Text
+  discount_code_gid          String              @db.Text
+  short_description          String?             @db.Text
+  long_description           String              @db.Text
+  confirmation_email_content String?             @db.Text
+  acceptance_email_content   String?             @db.Text
+  rsl_contact_email_address  String?             @db.Text
+  start_time                 DateTime?           @db.Date
+  end_time                   DateTime?           @db.Date
   number_of_uses             Int?
-  powerbuy_product_id        String?   @db.Text
+  powerbuy_product_id        String?             @db.Text
+
+  @@index([powerbuy_id])
+  @@index([discount_code])
+}
+
+model tbl_powerbuy_requests {
+  id            Int       @id @default(autoincrement())
+  created_at    DateTime  @default(now())
+  name          String
+  email         String
+  product_id    String
+  powerbuy_id   Int
+  token         String    @unique
+  token_expires DateTime
+  confirmed_at  DateTime?
+  request_ip    String?
+
+  powerbuy tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
+
+  @@index([email, powerbuy_id])
 }
