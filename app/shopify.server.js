@@ -7,6 +7,10 @@ import {
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 
+// ✅ Enable typed REST resources for your API version
+//    (Matches ApiVersion.January25 → path "2025-01")
+import { restResources } from "@shopify/shopify-api/rest/admin/2025-01";
+
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
@@ -16,10 +20,17 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
+
+  // ✅ This populates admin.rest.resources.* (PriceRule, Order, etc.)
+  restResources,
+
   future: {
     unstable_newEmbeddedAuthStrategy: true,
-    removeRest: true,
+    // ⛔ If this is true, REST is removed.
+    //    Keep it false (or delete the line) so admin.rest & resources are available.
+    removeRest: false,
   },
+
   ...(process.env.SHOP_CUSTOM_DOMAIN
     ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
     : {}),

@@ -1,6 +1,4 @@
 // app/root.jsx
-import * as React from "react";
-import { json } from "@remix-run/node";
 import {
   Links,
   Meta,
@@ -8,40 +6,70 @@ import {
   Scripts,
   ScrollRestoration,
   LiveReload,
+  useRouteError,
+  useLoaderData,
+  useLocation,
 } from "@remix-run/react";
-import { authenticate } from "./shopify.server";
-import polarisStylesHref from "@shopify/polaris/build/esm/styles.css?url";
+import { json } from "@remix-run/node";
 
-// Polaris (CJS-friendly) + English locale for i18n
-import Polaris from "@shopify/polaris";
-import en from "@shopify/polaris/locales/en.json";
-const { AppProvider } = Polaris;
+import { AppProvider } from "@shopify/shopify-app-remix/react";
+// ✅ Use the React wrapper (no actions package needed)
+import { NavMenu } from "@shopify/app-bridge-react";
 
-export const links = () => [
-  { rel: "stylesheet", href: polarisStylesHref },
-];
+import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
+import { Banner, Box, InlineStack, Button } from "@shopify/polaris";
+import { useEffect, useState } from "react";
 
-export const meta = () => ([
+export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
+
+export const meta = () => [
+  { charSet: "utf-8" },
   { title: "RSL Services App" },
   { name: "viewport", content: "width=device-width,initial-scale=1" },
-]);
-
-// Only bypass global auth for resource endpoints that must not reauth.
-const API_BYPASS = [
-  /^\/apps\/returns\/lookups(?:$|\/|\?)/, // let the child route handle its own CORS/auth
 ];
 
-export async function loader({ request }) {
-  const { pathname } = new URL(request.url);
+export const loader = async () => {
+  return json({ devTools: process.env.ENABLE_DEV_TOOLS === "1" });
+};
 
-  // ✅ Skip global auth for allowed API routes
-  if (API_BYPASS.some((re) => re.test(pathname))) {
-    return json(null);
-  }
+// Client-only mount avoids SSR timing issues
+function ClientNavMenu() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return null;
+  return (
+    <NavMenu
+      navigationLinks={[
+        { label: "Returns", destination: "/app/returns" },
+        { label: "In Process", destination: "/app/inprocess" },
+        { label: "Inventory Adjust", destination: "/app/inventory-adjust" },
+      ]}
+    />
+  );
+}
 
-  // ⬇️ Normal app pages still require Admin auth
-  await authenticate.admin(request);
-  return json({});
+// Preserve ?host=… across navigations so App Bridge stays happy
+function DevToolsBanner() {
+  const { devTools } = useLoaderData();
+  const { search } = useLocation();
+  if (!devTools) return null;
+
+  const go = (path) => {
+    const hasQuery = !!search && search !== "?";
+    const href = hasQuery ? `${path}${path.includes("?") ? "&" : "?"}${search.slice(1)}` : path;
+    window.location.assign(href);
+  };
+
+  return (
+    <Box padding="200">
+      <Banner title="Dev Tools" tone="info">
+        <InlineStack gap="200" align="start">
+          <Button onClick={() => go("/app/tools/price-rules")}>Price Rules</Button>
+          <Button onClick={() => go("/app/tools/generate-discount")}>Generator</Button>
+        </InlineStack>
+      </Banner>
+    </Box>
+  );
 }
 
 export default function App() {
@@ -52,8 +80,9 @@ export default function App() {
       <Links />
     </head>
     <body>
-    {/* Global Polaris provider so Page, Button, etc. don't throw MissingAppProviderError */}
-    <AppProvider i18n={en}>
+    <AppProvider>
+      <ClientNavMenu />
+      <DevToolsBanner />
       <Outlet />
     </AppProvider>
 
@@ -65,20 +94,29 @@ export default function App() {
   );
 }
 
-export function ErrorBoundary({ error }) {
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const message =
+    (error && ("statusText" in error ? error.statusText : error.message)) ||
+    "Unknown error";
+
   return (
     <html lang="en">
     <head>
       <Meta />
       <Links />
-      <title>App Error</title>
+      <title>Application error</title>
     </head>
     <body>
-    {/* Keep error UI simple; Polaris not required here */}
-    <div style={{ padding: 16 }}>
-      <h1>Something went wrong</h1>
-      <pre style={{ whiteSpace: "pre-wrap" }}>{String(error?.stack || error)}</pre>
-    </div>
+    <AppProvider>
+      <Box padding="400">
+        <Banner tone="critical" title="Something went wrong">
+              <pre style={{ whiteSpace: "pre-wrap", marginTop: 12 }}>
+                {message}
+              </pre>
+        </Banner>
+      </Box>
+    </AppProvider>
     <Scripts />
     </body>
     </html>

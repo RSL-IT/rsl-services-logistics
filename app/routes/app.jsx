@@ -1,41 +1,29 @@
-import { Link, Outlet, useLoaderData, useRouteError } from "@remix-run/react";
-import { boundary } from "@shopify/shopify-app-remix/server";
-import { AppProvider } from "@shopify/shopify-app-remix/react";
+// app/routes/app.jsx
+import { Outlet } from "@remix-run/react";
 import { NavMenu } from "@shopify/app-bridge-react";
-import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
-import { authenticate } from "../shopify.server";
 
-export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
+// No AppProvider here — it's already in root.jsx
 
-export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+// Optional: if you want auth here too, you can keep a loader, but
+// relying on the root loader is usually enough.
+export const loader = async () => null;
 
-  return { apiKey: process.env.SHOPIFY_API_KEY || "" };
-};
-
-export default function App() {
-  const { apiKey } = useLoaderData();
-
+export default function AppLayout() {
   return (
-    <AppProvider isEmbeddedApp apiKey={apiKey}>
+    <>
+      {/* This drives the Shopify Admin left sidebar for your app */}
       <NavMenu>
-        <Link to="/app" rel="home">
-          Home
-        </Link>
-        <Link to="/app/returns">Returns</Link>
-        <Link to="/app/inprocess">In-Process</Link>
-        <Link to="/app/serialnumbers">Serial Number Services</Link>
+        {/* First link labels the group and should point to your layout's home */}
+        <a href="/app" rel="home">RSL Services</a>
+
+        {/* Keep ONLY these three entries */}
+        <a href="/app/returns">Returns</a>
+        <a href="/app/inprocess">In-Process</a>
+        <a href="/app/serialnumbers">Serial Number Services</a>
       </NavMenu>
+
+      {/* Child pages under /app/* render here */}
       <Outlet />
-    </AppProvider>
+    </>
   );
 }
-
-// Shopify needs Remix to catch some thrown responses, so that their headers are included in the response.
-export function ErrorBoundary() {
-  return boundary.error(useRouteError());
-}
-
-export const headers = (headersArgs) => {
-  return boundary.headers(headersArgs);
-};

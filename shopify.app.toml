@@ -32,4 +32,4 @@ redirect_urls = [
 embedded = false
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
