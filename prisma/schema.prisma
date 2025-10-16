@@ -217,3 +217,36 @@ model ReturnEntry {
   @@index([primary_customer_reason_id])
   @@map("return_entry")
 }
+
+model tbl_powerbuy_config {
+  id                         Int       @id @default(autoincrement())
+  date_created               DateTime? @db.Date
+  created_by                 String?
+  created_by_gid             String?
+  title                      String?   @db.Text
+  short_description          String?   @db.Text
+  long_description           String?   @db.Text
+  confirmation_email_content String?   @db.Text
+  acceptance_email_content   String?   @db.Text
+  rsl_contact_email_address  String?   @db.Text
+  discount_prefix            String?   @db.Text
+  start_time                 DateTime? @db.Date
+  end_time                   DateTime? @db.Date
+  number_of_uses             Int?
+  powerbuy_product_id        String?   @db.Text
+}
+
+model tbl_powerbuy_entries {
+  id                         Int       @id @default(autoincrement())
+  discount_code              String    @db.Text
+  discount_code_gid          String    @db.Text
+  short_description          String?   @db.Text
+  long_description           String    @db.Text
+  confirmation_email_content String?   @db.Text
+  acceptance_email_content   String?   @db.Text
+  rsl_contact_email_address  String?
+  start_time                 DateTime? @db.Date
+  end_time                   DateTime? @db.Date
+  number_of_uses             Int?
+  powerbuy_product_id        String?   @db.Text
+}
