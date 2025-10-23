@@ -1,55 +1,19 @@
-import { redirect } from "@remix-run/node";
-import { Form, useLoaderData } from "@remix-run/react";
-import { login } from "../../shopify.server";
+// app/routes/_index/route.jsx
+import { json } from "@remix-run/node";
 import styles from "./styles.module.css";
 
-export const loader = async ({ request }) => {
-  const url = new URL(request.url);
+export const links = () => [{ rel: "stylesheet", href: styles }];
 
-  if (url.searchParams.get("shop")) {
-    throw redirect(`/app?${url.searchParams.toString()}`);
-  }
-
-  return { showForm: Boolean(login) };
+export const loader = async () => {
+  // Basic loader so SSR is happy. No auth here.
+  return json({ ok: true });
 };
 
-export default function App() {
-  const { showForm } = useLoaderData();
-
+export default function Index() {
   return (
-    <div className={styles.index}>
-      <div className={styles.content}>
-        <h1 className={styles.heading}>A short heading about [your app]</h1>
-        <p className={styles.text}>
-          A tagline about [your app] that describes your value proposition.
-        </p>
-        {showForm && (
-          <Form className={styles.form} method="post" action="/auth/login">
-            <label className={styles.label}>
-              <span>Shop domain</span>
-              <input className={styles.input} type="text" name="shop" />
-              <span>e.g: my-shop-domain.myshopify.com</span>
-            </label>
-            <button className={styles.button} type="submit">
-              Log in
-            </button>
-          </Form>
-        )}
-        <ul className={styles.list}>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-        </ul>
-      </div>
-    </div>
+    <main className={styles.container}>
+      <h1>RSL Services App</h1>
+      <p>App is running. To authenticate a shop, go to <code>/auth/login</code>.</p>
+    </main>
   );
 }
