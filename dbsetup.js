@@ -1,39 +1,27 @@
 #!/usr/bin/env node
+// ESM-friendly, forwards all env vars to the child process.
+// Usage examples:
+//   node scripts/dbsetup.js npm run docker-start
+//   node scripts/dbsetup.js node server.js
 
-import { spawn } from 'node:child_process'
-import path from 'node:path'
-import fs from 'node:fs'
+import { spawn } from 'node:child_process';
 
-const env = { ...process.env }
-
-// place Sqlite3 database on volume
-const source = path.resolve('/dev.sqlite')
-const target = '/data/' + path.basename(source)
-if (!fs.existsSync(source) && fs.existsSync('/data')) fs.symlinkSync(target, source)
-const newDb = !fs.existsSync(target)
-if (newDb && process.env.BUCKET_NAME) {
-  await exec(`npx litestream restore -config litestream.yml -if-replica-exists ${target}`)
+const args = process.argv.slice(2);
+if (args.length === 0) {
+  console.error('Usage: node scripts/dbsetup.js <command> [args...]');
+  process.exit(1);
 }
 
-// prepare database
-await exec('npx prisma migrate deploy')
+const child = spawn(args[0], args.slice(1), {
+  stdio: 'inherit',
+  env: process.env, // <-- critical: keep SHOPIFY_* and other secrets visible
+});
 
-// launch application
-if (process.env.BUCKET_NAME) {
-  await exec(`npx litestream replicate -config litestream.yml -exec ${JSON.stringify(process.argv.slice(2).join(' '))}`)
-} else {
-  await exec(process.argv.slice(2).join(' '))
-}
-
-function exec(command) {
-  const child = spawn(command, { shell: true, stdio: 'inherit', env })
-  return new Promise((resolve, reject) => {
-    child.on('exit', code => {
-      if (code === 0) {
-        resolve()
-      } else {
-        reject(new Error(`${command} failed rc=${code}`))
-      }
-    })
-  })
-}
+child.on('exit', (code, signal) => {
+  if (signal) {
+    // Mirror child signal so Docker/Fly see the real reason
+    process.kill(process.pid, signal);
+  } else {
+    process.exit(code ?? 0);
+  }
+});

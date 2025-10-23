@@ -1,3 +1,4 @@
 .cache
+.env
 build
 node_modules

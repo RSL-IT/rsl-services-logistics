@@ -1,6 +1,6 @@
-// app/routes/apps.powerbuy/offerings.js
+// app/routes/apps.powerbuy.offerings.js  -> GET /apps/powerbuy/offerings (JSON)
 import { json } from "@remix-run/node";
-import { prisma } from "../../db.server.js";
+import { prisma } from "../db.server.js"; // one level up from routes/
 
 export async function loader({ request }) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
@@ -26,5 +26,5 @@ export async function loader({ request }) {
   );
 }
 
-// server-only route; no UI
-export default function Empty() { return null; }
+// ❌ Do NOT export a default component here.
+// export default function Empty() { return null; }

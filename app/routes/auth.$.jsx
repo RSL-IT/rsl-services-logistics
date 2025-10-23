@@ -1,7 +1,7 @@
-import { authenticate } from "../shopify.server";
+// app/routes/auth.$.jsx
+import { shopify } from "../shopify.server.js";
 
-export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+// Handles GET/POST callback from Shopify and writes the offline session
+export const loader = (args) => shopify.auth.callback(args);
+export const action = loader;
 
-  return null;
-};

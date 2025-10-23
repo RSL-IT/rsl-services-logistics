@@ -10,16 +10,16 @@ handle = "rsl-services-app"
 api_version = "2025-04"
 
   [[webhooks.subscriptions]]
-  topics = [ "app/uninstalled" ]
-  uri = "/webhooks/app/uninstalled"
-
-  [[webhooks.subscriptions]]
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/webhooks/app/uninstalled"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_customers,read_inventory,read_locales,read_locations,read_orders,read_returns,write_customers,write_inventory,write_locales,write_locations,write_orders,write_products,write_returns"
+scopes = "read_customers,read_inventory,read_locales,read_locations,read_orders,read_returns,write_customers,write_inventory,write_locales,write_locations,write_orders,write_products,write_returns,write_discounts,write_app_proxy,write_price_rules"
 
 [auth]
 redirect_urls = [
