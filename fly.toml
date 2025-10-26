@@ -8,7 +8,6 @@ primary_region = 'ord'
 # Keep runtime-only env here; secrets go in `fly secrets`
 PORT = '3000'
 HOST = '0.0.0.0'
-SHOPIFY_APP_URL = 'https://rsl-services-app.fly.dev'
 
 [processes]
 # Call your start script directly so env/secrets reach the app

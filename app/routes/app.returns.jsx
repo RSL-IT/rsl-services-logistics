@@ -2,7 +2,7 @@
 import { json } from "@remix-run/node";
 import { useLoaderData, useFetcher, useRevalidator } from "@remix-run/react";
 import { prisma } from "../db.server";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
 import {
   Page,
   Card,

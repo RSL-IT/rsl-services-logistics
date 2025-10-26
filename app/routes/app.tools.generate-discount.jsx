@@ -2,7 +2,7 @@
 import { json } from "@remix-run/node";
 import { useFetcher, useLocation } from "@remix-run/react";
 import { useEffect, useState } from "react";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
 
 import {
   Page,

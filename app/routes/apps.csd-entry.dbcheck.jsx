@@ -1,6 +1,6 @@
 // app/routes/apps.csd-entry.dbcheck.js
 import { json } from "@remix-run/node";
-import { authenticate } from "../shopify.server"; // adjust path if needed
+import { authenticate } from "~/shopify.server"; // adjust path if needed
 import { prisma } from "../db.server";            // adjust path if needed
 
 function redactDbUrl(url) {

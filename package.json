@@ -3,21 +3,10 @@
   "private": true,
   "scripts": {
     "build": "remix vite:build",
-    "dev": "shopify app dev",
-    "config:link": "shopify app config link",
-    "generate": "shopify app generate",
-    "deploy": "shopify app deploy",
-    "config:use": "shopify app config use",
-    "env": "shopify app env",
     "start": "remix-serve ./build/server/index.js",
-    "docker-start": "npm run setup && npm run start",
+    "docker-start": "npx --yes prisma generate --schema=prisma/schema.prisma && echo \"Starting on ${HOST:-0.0.0.0}:${PORT:-3000}\" && remix-serve ./build/server/index.js",
     "setup": "prisma generate && prisma migrate deploy",
-    "lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
-    "shopify": "shopify",
-    "prisma": "prisma",
-    "graphql-codegen": "graphql-codegen",
-    "vite": "vite",
-    "fetch:admin:schema": "node scripts/fetch-admin-schema.mjs"
+    "postinstall": "npx --yes prisma generate --schema=prisma/schema.prisma"
   },
   "type": "module",
   "engines": {
@@ -25,7 +14,7 @@
   },
   "dependencies": {
     "@flydotio/litestream": "^1.0.1",
-    "@prisma/client": "^6.17.1",
+    "@prisma/client": "^6.18.0",
     "@prisma/extension-accelerate": "^2.0.2",
     "@remix-run/dev": "^2.16.1",
     "@remix-run/fs-routes": "^2.16.1",
@@ -58,7 +47,7 @@
     "eslint": "^8.42.0",
     "eslint-config-prettier": "^10.0.1",
     "prettier": "^3.2.4",
-    "prisma": "^6.17.1",
+    "prisma": "^6.18.0",
     "typescript": "^5.2.2",
     "vite": "^6.2.2"
   },

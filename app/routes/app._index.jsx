@@ -1,7 +1,14 @@
 // app/routes/app._index.jsx
 import { Page, Layout, Card, Text, Box } from "@shopify/polaris";
+import { addDocumentResponseHeaders, getShopify } from "~/shopify.server";
 
+export const headers = addDocumentResponseHeaders;
 export const meta = () => [{ title: "RSL Services" }];
+
+export const loader = async (args) => {
+  await getShopify().authenticate.public.appRoute(args);
+  return null; // or json({})
+};
 
 export default function AppIndex() {
   return (

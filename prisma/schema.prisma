@@ -14,6 +14,12 @@ enum DiscountType {
   fixed
 }
 
+enum DiscountCodeType {
+  alpha
+  numeric
+  mixed
+}
+
 model Session {
   id            String    @id
   shop          String
@@ -224,24 +230,30 @@ model ReturnEntry {
 }
 
 model tbl_powerbuy_config {
-  id                         Int           @id @default(autoincrement())
-  date_created               DateTime?     @db.Date
-  created_by                 String?
-  created_by_gid             String?
-  title                      String?       @db.Text
-  short_description          String?       @db.Text
-  long_description           String?       @db.Text
-  confirmation_email_content String?       @db.Text
-  acceptance_email_content   String?       @db.Text
-  rsl_contact_email_address  String?       @db.Text
-  discount_prefix            String?       @db.Text
-  start_time                 DateTime?     @db.Date
-  end_time                   DateTime?     @db.Date
+  id                         Int               @id @default(autoincrement())
+  powerbuy_uid               String?
+  date_created               DateTime?         @db.Date
+  created_by                 String?           @db.Text
+  created_by_gid             String?           @db.Text
+  title                      String?           @db.Text
+  code_length                Int?
+  code_type                  DiscountCodeType?
+  short_description          String?           @db.Text
+  long_description           String?           @db.Text
+  confirmation_email_content String?           @db.Text
+  acceptance_email_content   String?           @db.Text
+  rsl_contact_email_address  String?           @db.Text
+  discount_prefix            String?           @db.Text
+  start_time                 DateTime?         @db.Date
+  end_time                   DateTime?         @db.Date
+  duration                   String?           @db.VarChar()
   number_of_uses             Int?
-  powerbuy_product_id        String?       @db.Text
+  powerbuy_product_id        String?           @db.Text
+  powerbuy_variant_ids       String?           @db.Text
   // NEW (optional)
   discount_type              DiscountType?
-  discount_value             Decimal?      @db.Decimal(10, 2)
+  discount_value             Decimal?          @db.Decimal(10, 2)
+  allowed_stores             String?           @db.Text
 
   codes                 tbl_powerbuy_codes[]
   tbl_powerbuy_requests tbl_powerbuy_requests[]

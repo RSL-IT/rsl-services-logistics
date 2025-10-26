@@ -1,7 +1,7 @@
 // /app/routes/apps.returns.lookups.jsx
 import { json } from "@remix-run/node";
 import { prisma } from "../db.server";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
 
 // CORS helpers
 const corsHeaders = {

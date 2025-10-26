@@ -1,7 +1,9 @@
 // app/routes/auth.$.jsx
-import { shopify } from "../shopify.server.js";
+import { addDocumentResponseHeaders, callbackAuth } from "~/shopify.server";
 
-// Handles GET/POST callback from Shopify and writes the offline session
-export const loader = (args) => shopify.auth.callback(args);
+// Apply Shopify’s CSP headers on this route too
+export const headers = addDocumentResponseHeaders;
+
+// This route handles GET/POST from Shopify after OAuth begins
+export const loader = (args) => callbackAuth(args);
 export const action = loader;
-

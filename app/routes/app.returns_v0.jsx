@@ -14,7 +14,7 @@ import {
   Modal,
 } from "@shopify/polaris";
 import { useEffect, useState } from "react";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
 import {TitleBar} from "@shopify/app-bridge-react";
 
 export const meta = () => [{ title: "US Quarantine Inventory" }];

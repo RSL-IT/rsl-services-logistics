@@ -5,9 +5,9 @@ import { useLoaderData } from "@remix-run/react";
 // Polaris (CJS default import), stick to stable components
 //import Polaris from "@shopify/polaris";
 import * as Polaris from "@shopify/polaris";
-const { Page, Card, Text, Button } = Polaris;
 
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
+const { Page, Card, Text, Button } = Polaris;
 
 export const meta = () => [{ title: "CSR Return Management" }];
 

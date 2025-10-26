@@ -2,7 +2,7 @@
 import { json } from "@remix-run/node";
 import { useLoaderData, useSearchParams, Form } from "@remix-run/react";
 import { useCallback } from "react";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
 
 import {
   Page,

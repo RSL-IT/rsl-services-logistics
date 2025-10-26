@@ -15,7 +15,7 @@ import {
   InlineStack,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
 
 // ---------- Meta ----------
 export const meta = () => [{ title: "Returns In Progress" }];

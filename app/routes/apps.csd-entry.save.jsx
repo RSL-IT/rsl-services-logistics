@@ -1,7 +1,7 @@
 // app/routes/apps.csd-entry.save.js
 import { json } from "@remix-run/node";
 import { prisma } from "../db.server";            // ⬅ adjust path if needed
-import { authenticate } from "../shopify.server"; // ⬅ adjust path if needed
+import { authenticate } from "~/shopify.server"; // ⬅ adjust path if needed
 
 export async function action({ request }) {
   await authenticate.admin(request);

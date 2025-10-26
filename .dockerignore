@@ -1,4 +1,9 @@
+# keep prisma in the context!
+node_modules
+build
 .cache
 .env
-build
-node_modules
+.git
+Dockerfile*
+.dockerignore
+npm-debug.log

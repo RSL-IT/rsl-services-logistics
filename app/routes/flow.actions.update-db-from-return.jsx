@@ -1,6 +1,6 @@
 // app/routes/flow.actions.update-db-from-return.jsx
 import { json } from "@remix-run/node";
-import { authenticate } from "../shopify.server";
+import { authenticate } from "~/shopify.server";
 import { prisma } from "../db.server";
 import { adminGraphQLClientForShop } from "../shopify-admin.server";
 
