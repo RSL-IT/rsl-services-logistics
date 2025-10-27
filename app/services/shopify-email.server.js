@@ -1,11 +1,20 @@
 // app/services/shopify-email.server.js
 import { runAdminQuery } from "../shopify-admin.server.js";
 
+const API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
+const BYPASS = process.env.POWERBUY_EMAIL_BYPASS === "1";
+
 /**
  * Find or create a customer, and optionally opt them into marketing.
  * Returns { id }
  */
 async function ensureCustomer(shop, { email, firstName, lastName, marketingOptIn }) {
+  if (BYPASS) {
+    console.log("[PB EMAIL BYPASS] ensureCustomer", { shop, email, firstName, lastName, marketingOptIn });
+    // Return a fake-ish ID that looks like a Shopify GID so downstream code can proceed.
+    return { id: "gid://shopify/Customer/0" };
+  }
+
   // 1) Look up by email
   const findQuery = `#graphql
     query findCustomer($q: String!) {
@@ -13,7 +22,7 @@ async function ensureCustomer(shop, { email, firstName, lastName, marketingOptIn
         edges { node { id email tags } }
       }
     }`;
-  const findRes = await runAdminQuery(shop, findQuery, { q: `email:${email}` });
+  const findRes = await runAdminQuery(shop, findQuery, { q: `email:${email}` }, { version: API_VERSION });
   const edges = findRes?.body?.data?.customers?.edges ?? [];
   let id = edges[0]?.node?.id;
 
@@ -31,11 +40,11 @@ async function ensureCustomer(shop, { email, firstName, lastName, marketingOptIn
       firstName: firstName || null,
       lastName: lastName || null,
     };
-    const createRes = await runAdminQuery(shop, createMutation, { input });
+    const createRes = await runAdminQuery(shop, createMutation, { input }, { version: API_VERSION });
     id = createRes?.body?.data?.customerCreate?.customer?.id;
     if (!id) {
       const errMsg =
-        createRes?.body?.data?.customerCreate?.userErrors?.map(e => e.message).join(", ") ||
+        createRes?.body?.data?.customerCreate?.userErrors?.map((e) => e.message).join(", ") ||
         "customerCreate failed";
       throw new Error(errMsg);
     }
@@ -51,15 +60,20 @@ async function ensureCustomer(shop, { email, firstName, lastName, marketingOptIn
             userErrors { field message }
           }
         }`;
-      await runAdminQuery(shop, consentMutation, {
-        input: {
-          customerId: id,
-          email,
-          marketingState: "SUBSCRIBED",        // request single opt-in
-          marketingOptInLevel: "SINGLE_OPT_IN",
-          consentUpdatedAt: new Date().toISOString(),
+      await runAdminQuery(
+        shop,
+        consentMutation,
+        {
+          input: {
+            customerId: id,
+            email,
+            marketingState: "SUBSCRIBED",        // request single opt-in
+            marketingOptInLevel: "SINGLE_OPT_IN",
+            consentUpdatedAt: new Date().toISOString(),
+          },
         },
-      });
+        { version: API_VERSION }
+      );
     } catch (e) {
       // Don't block Powerbuy on consent mutation issues
       console.warn("Marketing consent update failed:", e?.message || e);
@@ -71,6 +85,17 @@ async function ensureCustomer(shop, { email, firstName, lastName, marketingOptIn
 
 /** Set a JSON metafield on the customer */
 async function setCustomerMetafield(shop, customerId, namespace, key, valueObj) {
+  if (BYPASS) {
+    console.log("[PB EMAIL BYPASS] setCustomerMetafield", {
+      shop,
+      customerId,
+      namespace,
+      key,
+      valueObj,
+    });
+    return;
+  }
+
   const mutation = `#graphql
     mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
       metafieldsSet(metafields: $metafields) {
@@ -89,11 +114,20 @@ async function setCustomerMetafield(shop, customerId, namespace, key, valueObj) 
       },
     ],
   };
-  return runAdminQuery(shop, mutation, variables);
+  const res = await runAdminQuery(shop, mutation, variables, { version: API_VERSION });
+  const errs = res?.body?.data?.metafieldsSet?.userErrors;
+  if (errs?.length) {
+    throw new Error(errs.map((e) => e.message).join("; "));
+  }
 }
 
 /** Add Shopify tags to a node (customer) */
 async function addTags(shop, id, tags) {
+  if (BYPASS) {
+    console.log("[PB EMAIL BYPASS] addTags", { shop, id, tags });
+    return;
+  }
+
   const mutation = `#graphql
     mutation tagsAdd($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
@@ -101,7 +135,11 @@ async function addTags(shop, id, tags) {
         userErrors { field message }
       }
     }`;
-  return runAdminQuery(shop, mutation, { id, tags });
+  const res = await runAdminQuery(shop, mutation, { id, tags }, { version: API_VERSION });
+  const errs = res?.body?.data?.tagsAdd?.userErrors;
+  if (errs?.length) {
+    throw new Error(errs.map((e) => e.message).join("; "));
+  }
 }
 
 /**
@@ -119,6 +157,25 @@ export async function queuePowerbuyConfirmationEmail({
                                                        offerTitle,
                                                        marketingOptIn,
                                                      }) {
+  const payload = {
+    confirmUrl,
+    powerbuyId,
+    offerTitle,
+    sentAt: new Date().toISOString(),
+  };
+
+  if (BYPASS) {
+    console.log("[PB EMAIL BYPASS] queuePowerbuyConfirmationEmail", {
+      shop,
+      email,
+      firstName,
+      lastName,
+      marketingOptIn,
+      payload,
+    });
+    return;
+  }
+
   const { id } = await ensureCustomer(shop, {
     email,
     firstName,
@@ -126,13 +183,7 @@ export async function queuePowerbuyConfirmationEmail({
     marketingOptIn: !!marketingOptIn,
   });
 
-  await setCustomerMetafield(shop, id, "rsl_powerbuy", "confirm_payload", {
-    confirmUrl,
-    powerbuyId,
-    offerTitle,
-    sentAt: new Date().toISOString(),
-  });
-
+  await setCustomerMetafield(shop, id, "rsl_powerbuy", "confirm_payload", payload);
   await addTags(shop, id, ["rsl_powerbuy_confirm_pending"]);
 }
 
@@ -155,14 +206,7 @@ export async function queuePowerbuyAcceptanceEmail({
                                                      longDescription,
                                                      contactEmail,
                                                    }) {
-  const { id } = await ensureCustomer(shop, {
-    email,
-    firstName,
-    lastName,
-    marketingOptIn: false,
-  });
-
-  await setCustomerMetafield(shop, id, "rsl_powerbuy", "code_payload", {
+  const payload = {
     discountCode,
     productId,
     startsAt: startsAtISO || null,
@@ -172,7 +216,26 @@ export async function queuePowerbuyAcceptanceEmail({
     longDescription: longDescription || "",
     contactEmail: contactEmail || "",
     sentAt: new Date().toISOString(),
+  };
+
+  if (BYPASS) {
+    console.log("[PB EMAIL BYPASS] queuePowerbuyAcceptanceEmail", {
+      shop,
+      email,
+      firstName,
+      lastName,
+      payload,
+    });
+    return;
+  }
+
+  const { id } = await ensureCustomer(shop, {
+    email,
+    firstName,
+    lastName,
+    marketingOptIn: false,
   });
 
+  await setCustomerMetafield(shop, id, "rsl_powerbuy", "code_payload", payload);
   await addTags(shop, id, ["rsl_powerbuy_send_code"]);
 }

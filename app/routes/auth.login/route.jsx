@@ -1,17 +1,16 @@
 // app/routes/auth.login/route.jsx
-import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
-import { beginAuth, addDocumentResponseHeaders } from "~/shopify.server";
+import { shopify } from "~/shopify.server";
 
-// Apply Shopify’s CSP headers on this route too
-export const headers = addDocumentResponseHeaders;
+export async function loader({ request }) {
+  const url = new URL(request.url);
+  const shop = url.searchParams.get("shop");
+  if (!shop) return new Response("Missing ?shop", { status: 400 });
 
-// Keep your Polaris stylesheet link (harmless even though this route just redirects)
-export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
-
-/**
- * Start OAuth for an embedded admin app.
- * Supports both modern (`shopify.authenticate.admin`) and older (`shopify.auth.admin`) shapes.
- */
-export async function loader(args) {
-  return beginAuth(args);
+  // Do NOT pass appUrl here; the SDK can infer it
+  return shopify.auth.login({
+    shop,
+    isOnline: false,
+    request,
+    callbackPath: process.env.SHOPIFY_AUTH_CALLBACK_PATH || "/auth/callback",
+  });
 }

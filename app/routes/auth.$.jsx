@@ -1,9 +1,16 @@
 // app/routes/auth.$.jsx
-import { addDocumentResponseHeaders, callbackAuth } from "~/shopify.server";
+import { useRouteError } from "@remix-run/react";
+import { boundary } from "@shopify/shopify-app-remix/server";
+import { authenticate } from "~/shopify.server";
 
-// Apply Shopify’s CSP headers on this route too
-export const headers = addDocumentResponseHeaders;
+// This single route handles both starting OAuth and the callback.
+export async function loader({ request }) {
+  await authenticate.admin(request);
+  return null;
+}
 
-// This route handles GET/POST from Shopify after OAuth begins
-export const loader = (args) => callbackAuth(args);
-export const action = loader;
+// Recommended: Shopify’s boundary helpers for headers/redirects
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+export const headers = (args) => boundary.headers(args);

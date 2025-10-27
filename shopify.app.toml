@@ -19,7 +19,7 @@ api_version = "2025-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_customers,read_inventory,read_locales,read_locations,read_orders,read_returns,write_customers,write_inventory,write_locales,write_locations,write_orders,write_products,write_returns,write_discounts,write_app_proxy,write_price_rules"
+scopes = "read_customers,read_inventory,read_locales,read_locations,read_orders,read_returns,write_app_proxy,write_customers,write_discounts,write_inventory,write_locales,write_locations,write_orders,write_price_rules,write_products,write_returns"
 
 [auth]
 redirect_urls = [
@@ -30,6 +30,3 @@ redirect_urls = [
 
 [pos]
 embedded = false
-
-[build]
-automatically_update_urls_on_dev = false

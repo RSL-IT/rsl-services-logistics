@@ -1,273 +1,172 @@
 // app/routes/apps.powerbuy.confirm.jsx
+import { prisma } from "../db.server.js";
 import { json } from "@remix-run/node";
-import { prisma } from "../db.server.js"; // relative to /app/routes
+import { queuePowerbuyAcceptanceEmail } from "../services/shopify-email.server.js";
 
-/* --- Config ---------------------------------------------------------------- */
-
-const API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
-const DEV_SHOP =
-  process.env.SHOPIFY_STORE_DOMAIN || process.env.SHOPIFY_SHOP_DOMAIN || "";
-const ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || "";
-const FALLBACK_PRICE_RULE_ID =
-  Number(process.env.POWERBUY_DEFAULT_PRICE_RULE_ID || 0);
-
-/* --- Helpers ---------------------------------------------------------------- */
-
-// Uppercase, checkout-friendly code (no 0/O or 1/I)
-function makeCode({ prefix = "", length = 8 } = {}) {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let out = "";
-  for (let i = 0; i < length; i++) {
-    out += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return (prefix + out).toUpperCase();
-}
-
-function resolveShop(request) {
-  const url = new URL(request.url);
-  const q = url.searchParams.get("shop");
-  const h =
-    request.headers.get("x-shopify-shop-domain") ||
-    request.headers.get("x-shop-domain") ||
-    request.headers.get("x-shopify-shop");
-  const env = DEV_SHOP;
-  const shop = (q || h || env || "").trim();
-  return shop.replace(/^https?:\/\//, "");
-}
-
-async function adminFetch({ shop, token, method, path, body }) {
-  const url = `https://${shop}/admin/api/${API_VERSION}${path}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "X-Shopify-Access-Token": token,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  const text = await res.text();
-  let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { raw: text };
-  }
-
-  if (!res.ok) {
-    const err = new Error(
-      data?.errors
-        ? typeof data.errors === "string"
-          ? data.errors
-          : JSON.stringify(data.errors)
-        : res.statusText
-    );
-    err.status = res.status;
-    err.data = data;
-    throw err;
-  }
-
-  return data;
-}
-
-/* --- Route ------------------------------------------------------------------ */
-
-export async function loader({ request }) {
-  // Confirm via GET ?token=...
-  const url = new URL(request.url);
-  const tokenParam = url.searchParams.get("token");
-
-  if (!ADMIN_TOKEN) {
-    return htmlError(
-      502,
-      "Missing Admin token",
-      "Set SHOPIFY_ADMIN_ACCESS_TOKEN in your environment."
-    );
-  }
-  const shop = resolveShop(request);
-  if (!shop) {
-    return htmlError(
-      400,
-      "Missing shop",
-      "Pass ?shop=rsldev.myshopify.com or set SHOPIFY_STORE_DOMAIN."
-    );
-  }
-  if (!tokenParam) {
-    return htmlError(400, "Missing token", "The confirmation link is invalid.");
-  }
-
-  // Look up the pending request & offering
-  const req = await prisma.tbl_powerbuy_requests.findFirst({
-    where: { token: tokenParam },
-  });
-
-  if (!req) {
-    return htmlError(404, "Invalid token", "We couldn't find that request.");
-  }
-  if (req.confirmed_at) {
-    // Already confirmed — respond idempotently
-    return htmlOk({
-      status: "already_confirmed",
-    });
-  }
-  if (req.token_expires && new Date(req.token_expires).getTime() < Date.now()) {
-    return htmlError(410, "Token expired", "Please start a new request.");
-  }
-
-  // Active offering (by id on the request)
-  const now = new Date();
-  const config = await prisma.tbl_powerbuy_config.findFirst({
-    where: {
-      id: req.powerbuy_id,
-      start_time: { lte: now },
-      end_time: { gte: now },
-    },
-  });
-
-  if (!config) {
-    return htmlError(
-      404,
-      "Offer not active",
-      "This Powerbuy offering is not currently active."
-    );
-  }
-
-  // Determine price rule, expiry & limits from config (with safe fallbacks)
-  const priceRuleId =
-    Number(config.discount_price_rule_id) || FALLBACK_PRICE_RULE_ID;
-  if (!priceRuleId) {
-    return htmlError(
-      500,
-      "No price rule configured",
-      "Set config.discount_price_rule_id or POWERBUY_DEFAULT_PRICE_RULE_ID."
-    );
-  }
-
-  const expiresAt = new Date(config.end_time || Date.now() + 7 * 864e5);
-  const usageLimit =
-    Number(config.usage_limit_default || config.usage_limit) || 500;
-
-  const prefix = (config.code_prefix || "RSL-").toUpperCase();
-  const length = Number(config.code_length || 8);
-
-  // 1) Update the price rule (ends_at / usage_limit)
-  try {
-    await adminFetch({
-      shop,
-      token: ADMIN_TOKEN,
-      method: "PUT",
-      path: `/price_rules/${priceRuleId}.json`,
-      body: {
-        price_rule: {
-          id: priceRuleId,
-          ends_at: expiresAt.toISOString(),
-          usage_limit: usageLimit,
-        },
-      },
-    });
-  } catch (e) {
-    return htmlError(
-      e.status || 502,
-      "Failed to update price rule",
-      e.message || "Unknown Shopify error."
-    );
-  }
-
-  // 2) Create the discount code with retries for uniqueness
-  let lastErr;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const code = makeCode({ prefix, length });
-    try {
-      const created = await adminFetch({
-        shop,
-        token: ADMIN_TOKEN,
-        method: "POST",
-        path: `/price_rules/${priceRuleId}/discount_codes.json`,
-        body: { discount_code: { code } },
-      });
-
-      const dc = created?.discount_code || {};
-      // Mark request as confirmed (don’t assume columns beyond confirmed_at)
-      await prisma.tbl_powerbuy_requests.update({
-        where: { id: req.id },
-        data: { confirmed_at: new Date() },
-      });
-
-      return htmlOk({
-        status: "ok",
-        code: dc.code,
-        discountCodeId: dc.id,
-        priceRuleId,
-        expiresAt: expiresAt.toISOString(),
-        usageLimit,
-      });
-    } catch (e) {
-      // Retry when duplicate code
-      const msg = e?.message || "";
-      const isDup =
-        (e.status === 422 &&
-          /must be unique|already been taken|already exists/i.test(msg)) ||
-        /already.*taken/i.test(JSON.stringify(e?.data || {}));
-      if (isDup) {
-        lastErr = e;
-        continue;
-      }
-      lastErr = e;
-      break;
-    }
-  }
-
-  return htmlError(
-    lastErr?.status || 500,
-    "Couldn’t create the discount",
-    lastErr?.message || "Unknown Shopify error."
+/** Helpers */
+function html(body) {
+  return new Response(
+    `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charSet="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Powerbuy</title>
+    <link rel="stylesheet" href="/assets/styles-C7YjYK5e.css" />
+    <style>
+      body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 2rem; }
+      .card { max-width: 720px; margin: 0 auto; border: 1px solid #eee; border-radius: 12px; padding: 24px; }
+      h1 { margin: 0 0 12px; font-size: 22px; }
+      p { line-height: 1.45; }
+      code { background: #f6f7f8; padding: 2px 6px; border-radius: 6px; }
+      .muted { color: #65737e; font-size: 14px; margin-top: 16px; }
+    </style>
+  </head>
+  <body><div class="card">${body}</div></body>
+</html>`,
+    { headers: { "Content-Type": "text/html; charset=utf-8" } }
   );
 }
 
-/* --- Small HTML helpers (curl still sees status codes) --------------------- */
-
-function htmlOk(obj) {
-  return json(obj, { status: 200 });
+function ensureGid(type, idOrGid) {
+  if (!idOrGid) return null;
+  const s = String(idOrGid);
+  if (s.startsWith("gid://shopify/")) return s;
+  const n = (s.match(/(\d+)/) || [])[1];
+  if (!n) return null;
+  return `gid://shopify/${type}/${n}`;
 }
 
-function htmlError(status, title, message) {
-  const body = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charSet="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Powerbuy — ${escapeHtml(title)}</title>
-<link rel="stylesheet" href="/assets/styles-C7YjYK5e.css" />
-<style>
-  body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 2rem; }
-  .card { max-width: 720px; margin: 0 auto; border: 1px solid #eee; border-radius: 12px; padding: 24px; }
-  h1 { margin: 0 0 12px; font-size: 22px; }
-  p { line-height: 1.45; }
-  code { background: #f6f7f8; padding: 2px 6px; border-radius: 6px; }
-  .muted { color: #65737e; font-size: 14px; margin-top: 16px; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>${escapeHtml(title)}</h1>
-    <p>${escapeHtml(message)}</p>
-  </div>
-</body>
-</html>`;
-  return new Response(body, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8" },
+export async function loader({ request }) {
+  const url = new URL(request.url);
+  const shop =
+    url.searchParams.get("shop") ||
+    request.headers.get("x-shopify-shop-domain") ||
+    process.env.SHOPIFY_STORE_DOMAIN;
+  const token = url.searchParams.get("token");
+
+  if (!shop || !token) {
+    return html(
+      `<h1>Couldn’t confirm</h1><p>Missing <code>shop</code> or <code>token</code>.</p>`
+    );
+  }
+
+  // Find the request + config
+  const req = await prisma.tbl_powerbuy_requests.findUnique({
+    where: { token },
+    include: { powerbuy: true },
   });
+
+  if (!req || !req.powerbuy) {
+    return html(
+      `<h1>Invalid or expired link</h1><p>We couldn’t find a pending request for that token.</p>`
+    );
+  }
+
+  if (new Date(req.token_expires).getTime() < Date.now()) {
+    return html(
+      `<h1>Link expired</h1><p>Please submit the form again to receive a new confirmation link.</p>`
+    );
+  }
+
+  // Idempotency: if already confirmed, do NOT mint another code
+  if (req.confirmed_at) {
+    return html(
+      `<h1>Already confirmed</h1><p>You’ve already confirmed this request. Please check your email for your discount code.</p>`
+    );
+  }
+
+  // Mark confirmed now (so re-clicks don’t double-issue codes)
+  await prisma.tbl_powerbuy_requests.update({
+    where: { token },
+    data: { confirmed_at: new Date() },
+  });
+
+  // Call the generator (same host)
+  let genJson;
+  try {
+    const genRes = await fetch(
+      new URL(
+        `/api/generate-discount-code?shop=${encodeURIComponent(shop)}`,
+        url.origin
+      ),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ powerbuyId: req.powerbuy_id }),
+      }
+    );
+
+    const bodyText = await genRes.text();
+    try {
+      genJson = JSON.parse(bodyText);
+    } catch {
+      throw new Error(`Unexpected response: ${bodyText.slice(0, 500)}`);
+    }
+
+    if (!genRes.ok) {
+      const detail =
+        (genJson && (genJson.detail || genJson.error)) || genRes.statusText;
+      throw new Error(String(detail));
+    }
+  } catch (e) {
+    return html(
+      `<h1>Couldn’t create your code</h1><p>Details: ${
+        e?.message || String(e)
+      }</p><p class="muted">Contact support if this keeps happening.</p>`
+    );
+  }
+
+  // Compose acceptance email payload for Flow
+  const cfg = req.powerbuy;
+  const uses =
+    typeof genJson?.rule?.usageLimit === "number"
+      ? genJson.rule.usageLimit
+      : null;
+
+  // Prefer variant entitlement if present
+  const variantId =
+    genJson?.entitlements?.variantIds?.[0] != null
+      ? ensureGid("ProductVariant", genJson.entitlements.variantIds[0])
+      : null;
+  const productId =
+    !variantId && genJson?.entitlements?.productIds?.[0] != null
+      ? ensureGid("Product", genJson.entitlements.productIds[0])
+      : null;
+
+  try {
+    await queuePowerbuyAcceptanceEmail({
+      shop,
+      email: req.email,
+      firstName: req.name,
+      lastName: "",
+      discountCode: genJson.code,
+      startsAtISO: genJson.startsAt,
+      endsAtISO: genJson.endsAt,
+      uses,
+      productId: variantId || productId || null,
+      shortDescription: cfg.short_description || cfg.title || "Powerbuy",
+      longDescription: cfg.long_description || "",
+      contactEmail: cfg.rsl_contact_email_address || "",
+    });
+  } catch (e) {
+    // Non-fatal: the code exists; tell user to contact support if the email doesn’t arrive
+    return html(
+      `<h1>You’re in!</h1>
+       <p>Your discount code is <code>${genJson.code}</code>.</p>
+       <p>We had trouble queuing your email (<em>${e?.message || e}</em>), but the code is valid right now.</p>
+       <p class="muted">If the email doesn’t arrive, you can still use the code at checkout.</p>`
+    );
+  }
+
+  return html(
+    `<h1>You’re in!</h1>
+     <p>We’ve queued your discount code and sent it to <strong>${req.email}</strong>.</p>
+     <p class="muted">If it doesn’t arrive within a few minutes, check your spam folder or contact us.</p>`
+  );
 }
 
-function escapeHtml(s = "") {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+// Explicit 405 for POST/other methods; this route is confirmed via GET link
+export function action() {
+  return json({ error: "method_not_allowed" }, { status: 405 });
 }
-
-// No action — confirmation is GET-only
-export const action = () =>
-  json({ error: "method_not_allowed" }, { status: 405 });

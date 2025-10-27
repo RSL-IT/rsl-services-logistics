@@ -36,6 +36,9 @@ model Session {
   locale        String?
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
+
+  @@index([shop]) // speeds up lookups by shop
+  @@index([expires]) // helps periodic cleanup of expired sessions
 }
 
 model tblkp_RepairEntryConditionReceived {
