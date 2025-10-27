@@ -4,7 +4,7 @@
   "scripts": {
     "build": "remix vite:build",
     "start": "remix-serve ./build/server/index.js",
-    "docker-start": "npx --yes prisma generate --schema=prisma/schema.prisma && echo \"Starting on ${HOST:-0.0.0.0}:${PORT:-3000}\" && remix-serve ./build/server/index.js",
+    "docker-start": "remix-serve ./build/server/index.js",
     "setup": "prisma generate && prisma migrate deploy",
     "postinstall": "npx --yes prisma generate --schema=prisma/schema.prisma"
   },
