@@ -2,8 +2,10 @@
   "name": "rsl-services",
   "private": true,
   "scripts": {
+    "dev": "remix dev",
     "build": "remix vite:build",
     "start": "remix-serve ./build/server/index.js",
+    "start:prod": "cross-env NODE_ENV=production REMIX_DEV_ORIGIN= REMIX_DEV_SERVER_WS_PORT= remix-serve ./build/server/index.js",
     "docker-start": "remix-serve ./build/server/index.js",
     "setup": "prisma generate && prisma migrate deploy",
     "postinstall": "npx --yes prisma generate --schema=prisma/schema.prisma"
@@ -29,10 +31,11 @@
     "@shopify/shopify-app-remix": "^3.8.5",
     "@shopify/shopify-app-session-storage": "^3.0.20",
     "@shopify/shopify-app-session-storage-prisma": "^6.0.9",
-    "isbot": "^5.1.0",
+    "isbot": "^4.4.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "vite-tsconfig-paths": "^5.0.1"
+    "vite-tsconfig-paths": "^5.0.1",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@flydotio/dockerfile": "^0.7.10",
@@ -43,6 +46,7 @@
     "@types/node": "^22.18.8",
     "@types/react": "^18.2.31",
     "@types/react-dom": "^18.2.14",
+    "cross-env": "^10.1.0",
     "dotenv-cli": "^10.0.0",
     "eslint": "^8.42.0",
     "eslint-config-prettier": "^10.0.1",

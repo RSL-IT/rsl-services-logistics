@@ -3,7 +3,7 @@ import { prisma } from "../db.server.js";
 import { json } from "@remix-run/node";
 import { queuePowerbuyAcceptanceEmail } from "../services/shopify-email.server.js";
 
-/** Helpers */
+/** ---------- small helpers ---------- */
 function html(body) {
   return new Response(
     `<!DOCTYPE html>
@@ -28,6 +28,14 @@ function html(body) {
   );
 }
 
+function wantsJSON(request) {
+  const url = new URL(request.url);
+  const fmt = (url.searchParams.get("format") || "").toLowerCase();
+  if (fmt === "json") return true;
+  const accept = request.headers.get("accept") || "";
+  return accept.includes("application/json");
+}
+
 function ensureGid(type, idOrGid) {
   if (!idOrGid) return null;
   const s = String(idOrGid);
@@ -37,6 +45,7 @@ function ensureGid(type, idOrGid) {
   return `gid://shopify/${type}/${n}`;
 }
 
+/** ---------- GET /apps/powerbuy/confirm ---------- */
 export async function loader({ request }) {
   const url = new URL(request.url);
   const shop =
@@ -44,35 +53,52 @@ export async function loader({ request }) {
     request.headers.get("x-shopify-shop-domain") ||
     process.env.SHOPIFY_STORE_DOMAIN;
   const token = url.searchParams.get("token");
+  const asJSON = wantsJSON(request);
+
+  const send = (title, details, status = 200, extra = {}) =>
+    asJSON
+      ? json({ title, details, ...extra }, { status })
+      : html(
+        `<h1>${title}</h1>${
+          details ? `<p>${details}</p>` : ``
+        }${extra.note ? `<p class="muted">${extra.note}</p>` : ""}`
+      );
 
   if (!shop || !token) {
-    return html(
-      `<h1>Couldn’t confirm</h1><p>Missing <code>shop</code> or <code>token</code>.</p>`
+    return send(
+      "Couldn’t confirm",
+      `Missing <code>shop</code> or <code>token</code>.`,
+      400
     );
   }
 
-  // Find the request + config
+  // Find the request + related config
   const req = await prisma.tbl_powerbuy_requests.findUnique({
-    where: { token },
+    where: { token }, // assumes token is UNIQUE in schema
     include: { powerbuy: true },
   });
 
   if (!req || !req.powerbuy) {
-    return html(
-      `<h1>Invalid or expired link</h1><p>We couldn’t find a pending request for that token.</p>`
+    return send(
+      "Invalid or expired link",
+      "We couldn’t find a pending request for that token.",
+      404
     );
   }
 
-  if (new Date(req.token_expires).getTime() < Date.now()) {
-    return html(
-      `<h1>Link expired</h1><p>Please submit the form again to receive a new confirmation link.</p>`
+  if (req.token_expires && new Date(req.token_expires).getTime() < Date.now()) {
+    return send(
+      "Link expired",
+      "Please submit the form again to receive a new confirmation link.",
+      410
     );
   }
 
   // Idempotency: if already confirmed, do NOT mint another code
   if (req.confirmed_at) {
-    return html(
-      `<h1>Already confirmed</h1><p>You’ve already confirmed this request. Please check your email for your discount code.</p>`
+    return send(
+      "Already confirmed",
+      "You’ve already confirmed this request. Please check your email for your discount code."
     );
   }
 
@@ -82,7 +108,7 @@ export async function loader({ request }) {
     data: { confirmed_at: new Date() },
   });
 
-  // Call the generator (same host)
+  // Call the internal generator via POST; also forward shop by header + query
   let genJson;
   try {
     const genRes = await fetch(
@@ -92,39 +118,48 @@ export async function loader({ request }) {
       ),
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // Some handlers rely on this header to locate the offline session:
+          "x-shopify-shop-domain": shop,
+          "Accept": "application/json",
+        },
         body: JSON.stringify({ powerbuyId: req.powerbuy_id }),
       }
     );
 
     const bodyText = await genRes.text();
+    let parsed = null;
     try {
-      genJson = JSON.parse(bodyText);
+      parsed = JSON.parse(bodyText);
     } catch {
-      throw new Error(`Unexpected response: ${bodyText.slice(0, 500)}`);
+      // Fall back to status text / raw body
     }
 
     if (!genRes.ok) {
       const detail =
-        (genJson && (genJson.detail || genJson.error)) || genRes.statusText;
+        (parsed && (parsed.detail || parsed.error)) ||
+        genRes.statusText ||
+        `Unexpected response: ${bodyText.slice(0, 500)}`;
       throw new Error(String(detail));
     }
+
+    genJson = parsed ?? { raw: bodyText };
   } catch (e) {
-    return html(
-      `<h1>Couldn’t create your code</h1><p>Details: ${
-        e?.message || String(e)
-      }</p><p class="muted">Contact support if this keeps happening.</p>`
+    return send(
+      "Couldn’t create your code",
+      `Details: ${e?.message || String(e)}`,
+      502,
+      { note: "Contact support if this keeps happening." }
     );
   }
 
-  // Compose acceptance email payload for Flow
+  // Compose acceptance email payload
   const cfg = req.powerbuy;
   const uses =
-    typeof genJson?.rule?.usageLimit === "number"
-      ? genJson.rule.usageLimit
-      : null;
+    typeof genJson?.rule?.usageLimit === "number" ? genJson.rule.usageLimit : null;
 
-  // Prefer variant entitlement if present
+  // Prefer variant entitlement if present; else product
   const variantId =
     genJson?.entitlements?.variantIds?.[0] != null
       ? ensureGid("ProductVariant", genJson.entitlements.variantIds[0])
@@ -134,6 +169,7 @@ export async function loader({ request }) {
       ? ensureGid("Product", genJson.entitlements.productIds[0])
       : null;
 
+  // Queue the acceptance email (non-fatal if this step fails)
   try {
     await queuePowerbuyAcceptanceEmail({
       shop,
@@ -150,23 +186,25 @@ export async function loader({ request }) {
       contactEmail: cfg.rsl_contact_email_address || "",
     });
   } catch (e) {
-    // Non-fatal: the code exists; tell user to contact support if the email doesn’t arrive
-    return html(
-      `<h1>You’re in!</h1>
-       <p>Your discount code is <code>${genJson.code}</code>.</p>
-       <p>We had trouble queuing your email (<em>${e?.message || e}</em>), but the code is valid right now.</p>
-       <p class="muted">If the email doesn’t arrive, you can still use the code at checkout.</p>`
+    return send(
+      "You’re in!",
+      `Your discount code is <code>${genJson.code}</code>.<br/>` +
+      `We had trouble queuing your email (<em>${e?.message || e}</em>), ` +
+      `but the code is valid right now.`,
+      200,
+      { note: "If the email doesn’t arrive, you can still use the code at checkout." }
     );
   }
 
-  return html(
-    `<h1>You’re in!</h1>
-     <p>We’ve queued your discount code and sent it to <strong>${req.email}</strong>.</p>
-     <p class="muted">If it doesn’t arrive within a few minutes, check your spam folder or contact us.</p>`
+  return send(
+    "You’re in!",
+    `We’ve queued your discount code and sent it to <strong>${req.email}</strong>.`,
+    200,
+    { note: "If it doesn’t arrive within a few minutes, check your spam folder or contact us." }
   );
 }
 
-// Explicit 405 for POST/other methods; this route is confirmed via GET link
+/** Explicit 405 for POST/other methods; this route is confirmed via GET link */
 export function action() {
   return json({ error: "method_not_allowed" }, { status: 405 });
 }

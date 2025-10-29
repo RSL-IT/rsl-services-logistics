@@ -1,217 +1,236 @@
 // app/routes/apps.powerbuy.requests.jsx
 import { json } from "@remix-run/node";
-import prisma from "../db.server.js";
-import { runAdminQuery } from "../shopify-admin.server.js";
-import {
-  ensureVariantGid,
-  toNumericId,
-  listToNumericIds,
-} from "../utils/shopify-gid.js";
-import { queuePowerbuyConfirmationEmail } from "../services/shopify-email.server.js";
+import { prisma } from "~/db.server";
 
-// --- helpers ---------------------------------------------------------------
+/** ------------------ environment helpers ------------------ */
+const truthy = (v) =>
+  (v ?? "").toString().toLowerCase() === "true" ||
+  (v ?? "").toString() === "1";
 
+const env = {
+  BYPASS_CAPTCHA: truthy(process.env.POWERBUY_BYPASS_CAPTCHA),
+  BYPASS_EMAIL: truthy(process.env.POWERBUY_EMAIL_BYPASS),
+  DEBUG: truthy(process.env.POWERBUY_DEBUG),
+};
+
+/** ------------------ request helpers ------------------ */
 function getClientIp(request) {
-  const xf = request.headers.get("x-forwarded-for");
-  if (xf) return xf.split(",")[0].trim();
-  const fly = request.headers.get("fly-client-ip");
-  if (fly) return fly;
-  return undefined;
+  const h = request.headers;
+  return (
+    h.get("Fly-Client-IP") ||
+    h.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    h.get("x-real-ip") ||
+    ""
+  );
 }
 
-function nowPlusHours(h) {
-  const d = new Date();
-  d.setHours(d.getHours() + h);
-  return d;
+function toNumericId(input) {
+  if (!input) return null;
+  const s = String(input);
+  if (/^\d+$/.test(s)) return Number(s);
+  const m = s.match(/(\d+)$/);
+  return m ? Number(m[1]) : null;
 }
 
-/**
- * Find most recent "active" config for this shop:
- * - allowed_stores contains the shop (or is null)
- * - within time window (start <= now <= end, with nulls allowed)
- */
-async function findActiveConfig(shop) {
-  const now = new Date();
-  return prisma.tbl_powerbuy_config.findFirst({
-    where: {
-      AND: [
-        {
-          OR: [
-            { allowed_stores: null },
-            { allowed_stores: { contains: shop } },
-          ],
-        },
-        {
-          OR: [{ start_time: null }, { start_time: { lte: now } }],
-        },
-        {
-          OR: [{ end_time: null }, { end_time: { gte: now } }],
-        },
-      ],
-    },
-    orderBy: { id: "desc" },
+function ensureVariantGid(idOrGid) {
+  if (!idOrGid) return null;
+  const s = String(idOrGid);
+  if (s.startsWith("gid://")) return s;
+  const num = toNumericId(s);
+  return num ? `gid://shopify/ProductVariant/${num}` : null;
+}
+
+function parseAllowedStores(allowed) {
+  if (!allowed) return [];
+  return allowed
+    .split(/[\s,;]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function inWindow(cfg, now = new Date()) {
+  if (cfg.start_time && now < cfg.start_time) return false;
+  if (cfg.end_time && now > cfg.end_time) return false;
+  return true;
+}
+
+function variantAllowed(cfg, variantNumeric) {
+  // If config lists variants, require a match; otherwise allow any
+  if (cfg.powerbuy_variant_ids && cfg.powerbuy_variant_ids.trim().length) {
+    const nums = cfg.powerbuy_variant_ids
+      .split(/[\s,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => toNumericId(s))
+      .filter((n) => typeof n === "number");
+    return nums.includes(variantNumeric);
+  }
+  return true;
+}
+
+async function findMatchingConfig({ shop, variantNumeric }) {
+  const configs = await prisma.tbl_powerbuy_config.findMany({
+    orderBy: [{ start_time: "desc" }, { id: "desc" }],
   });
+
+  const shopLc = (shop || "").toLowerCase();
+
+  const match = configs.find((cfg) => {
+    if (!inWindow(cfg)) return false;
+    const stores = parseAllowedStores(cfg.allowed_stores);
+    if (stores.length > 0 && !stores.includes(shopLc)) return false;
+    if (!variantAllowed(cfg, variantNumeric)) return false;
+    return true;
+  });
+
+  return match || null;
 }
 
-/** Throw a JSON error with status */
-function boom(detail, status = 400, error = "bad_request") {
-  throw json({ error, detail }, { status });
+function parseDurationToMs(s) {
+  // default 14 days
+  if (!s) return 14 * 24 * 60 * 60 * 1000;
+
+  const m = String(s).trim().toLowerCase().match(/^(\d+)\s*(d|day|days|h|hr|hrs|hour|hours)$/);
+  if (m) {
+    const n = Number(m[1]);
+    const unit = m[2][0]; // 'd' or 'h'
+    return unit === "d" ? n * 24 * 60 * 60 * 1000 : n * 60 * 60 * 1000;
+  }
+
+  // ISO-ish: P14D or PT24H
+  const iso = String(s).trim().toUpperCase();
+  if (/^P\d+D$/.test(iso)) return Number(iso.slice(1, -1)) * 24 * 60 * 60 * 1000;
+  if (/^PT\d+H$/.test(iso)) return Number(iso.slice(2, -1)) * 60 * 60 * 1000;
+
+  return 14 * 24 * 60 * 60 * 1000;
 }
 
-// --- Remix loader/action ---------------------------------------------------
+async function maybeVerifyRecaptcha(token, ip) {
+  if (env.BYPASS_CAPTCHA) return { ok: true, reason: "bypass" };
+  if (!token) return { ok: false, error: "captcha_required" };
 
-export async function loader() {
-  // Method not allowed for GET on this API route
-  return json({ error: "method_not_allowed" }, { status: 405 });
+  const secret = process.env.CAPTCHA_SECRET || process.env.RECAPTCHA_SECRET_KEY;
+  const endpoint =
+    process.env.CAPTCHA_VERIFY_URL ||
+    "https://www.google.com/recaptcha/api/siteverify";
+
+  try {
+    const params = new URLSearchParams({ secret: secret || "", response: token });
+    if (ip) params.set("remoteip", ip);
+
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+
+    const data = await res.json();
+    if (!data?.success) return { ok: false, error: "captcha_failed", detail: data };
+    if (typeof data.score === "number" && data.score < 0.5)
+      return { ok: false, error: "captcha_low_score", detail: data };
+
+    return { ok: true, detail: data };
+  } catch (e) {
+    return { ok: false, error: "captcha_verify_error", detail: String(e) };
+  }
 }
 
+function validateBody(b) {
+  const errors = {};
+  const name = (b?.name || "").toString().trim();
+  const email = (b?.email || "").toString().trim();
+  const variant_id = b?.variant_id || b?.variant || null;
+  const product_id = b?.product_id || null;
+  const captcha_token = b?.captcha_token || b?.captcha || b?.recaptchaToken || null;
+
+  if (!name) errors.name = "Name is required";
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) errors.email = "Valid email is required";
+  if (!variant_id && !product_id) errors.variant_id = "variant_id (or product_id) is required";
+
+  return { errors, parsed: { name, email, variant_id, product_id, captcha_token } };
+}
+
+/** ------------------ Remix action ------------------ */
 export async function action({ request }) {
   if (request.method.toUpperCase() !== "POST") {
     return json({ error: "method_not_allowed" }, { status: 405 });
   }
 
-  // shop is required to use the Admin API and select config
   const url = new URL(request.url);
-  const shop = url.searchParams.get("shop");
-  if (!shop) boom("Missing shop param.", 400, "missing_shop");
+  const shop =
+    url.searchParams.get("shop") ||
+    request.headers.get("x-shopify-shop-domain") ||
+    request.headers.get("shopify-shop-domain") ||
+    "";
+
+  if (!shop) return json({ error: "missing_shop" }, { status: 400 });
 
   let body;
   try {
     body = await request.json();
   } catch {
-    boom("Invalid JSON body.", 400, "invalid_json");
+    return json({ error: "invalid_json" }, { status: 400 });
   }
 
-  const name = String(body?.name ?? "").trim();
-  const email = String(body?.email ?? "").trim().toLowerCase();
-  const rawVariant = body?.variant_id ?? null; // may be numeric or gid
-  const rawProduct = body?.product_id ?? null; // may be numeric or gid
-  const captchaToken = body?.captcha_token ?? null;
-  const marketingOptIn = !!body?.marketing_opt_in;
-
-  if (!name || !email) boom("Missing name or email.", 422, "missing_fields");
-  if (!rawVariant && !rawProduct) {
-    boom("Provide variant_id or product_id.", 422, "missing_fields");
+  const { errors, parsed } = validateBody(body);
+  if (Object.keys(errors).length) {
+    return json({ error: "validation_failed", errors }, { status: 400 });
   }
 
-  // Simple dev bypass for captcha
-  if (process.env.NODE_ENV === "production") {
-    // TODO: add real verification here when you’re ready
-    if (!captchaToken) boom("Captcha is required.", 422, "captcha_required");
+  const clientIp = getClientIp(request);
+
+  // 1) CAPTCHA (unless bypass)
+  const captcha = await maybeVerifyRecaptcha(parsed.captcha_token, clientIp);
+  if (!captcha.ok) {
+    if (env.DEBUG) console.warn("[powerbuy.requests] captcha_fail", captcha);
+    return json({ error: captcha.error, detail: captcha.detail || null }, { status: 400 });
   }
 
-  // Locate an active config for this shop
-  const config = await findActiveConfig(shop);
-  if (!config) boom("No active Powerbuy config for this shop.", 404, "no_active_config");
+  // 2) Normalize variant id -> numeric
+  const variantGid = ensureVariantGid(parsed.variant_id || parsed.product_id);
+  const variantNumeric = toNumericId(variantGid);
+  if (!variantNumeric) return json({ error: "invalid_variant_id" }, { status: 400 });
 
-  // If config restricts to specific variants, enforce that.
-  const allowedVariantNums = listToNumericIds(config.powerbuy_variant_ids ?? "");
-  const hasVariantRestriction = allowedVariantNums.length > 0;
-
-  // Determine numeric product id to store in DB.
-  // If a variant was provided, resolve its parent product via Admin GraphQL.
-  let numericProductId = null;
-  let numericVariantId = null;
-
-  if (rawVariant) {
-    const variantGid = ensureVariantGid(rawVariant);
-    if (!variantGid) boom("variant_id must be a number or a valid Shopify GID.", 422, "invalid_variant_id");
-
-    // Enforce restriction if present
-    numericVariantId = toNumericId(rawVariant);
-    if (hasVariantRestriction && !allowedVariantNums.includes(numericVariantId)) {
-      boom("This variant is not offered in the current Powerbuy.", 422, "variant_not_offered");
-    }
-
-    // Resolve parent product
-    const query = `#graphql
-      query ($id: ID!) {
-        productVariant(id: $id) {
-          id
-          product { id title }
-        }
-      }`;
-    const res = await runAdminQuery(shop, query, { id: variantGid });
-    const productGid = res?.body?.data?.productVariant?.product?.id;
-    if (!productGid) boom("Unable to resolve product for variant.", 422, "variant_lookup_failed");
-    numericProductId = toNumericId(productGid);
-  } else {
-    // Only product provided
-    numericProductId = toNumericId(rawProduct);
-    if (!numericProductId) boom("product_id must be a number or a valid Shopify GID.", 422, "invalid_product_id");
-
-    // If config is variant-scoped, require a variant on request (keeps intent explicit)
-    if (hasVariantRestriction) {
-      boom("This Powerbuy targets specific variants. Please submit variant_id.", 422, "variant_required");
-    }
-
-    // If config specifies a single product, optionally enforce it
-    const configuredProductNum = toNumericId(config.powerbuy_product_id ?? "");
-    if (configuredProductNum && configuredProductNum !== numericProductId) {
-      boom("This product is not offered in the current Powerbuy.", 422, "product_not_offered");
-    }
+  // 3) Find matching campaign config
+  const cfg = await findMatchingConfig({ shop, variantNumeric });
+  if (!cfg) {
+    return json({ error: "no_active_config_for_variant_or_shop" }, { status: 404 });
   }
 
-  // Issue token & expiration (24h, clamped to config end_time if sooner)
-  const token = crypto.randomUUID();
-  let tokenExpires = nowPlusHours(24);
-  if (config.end_time && tokenExpires > config.end_time) tokenExpires = new Date(config.end_time);
+  // 4) Create request record
+  const durationMs = parseDurationToMs(cfg.duration);
+  const now = new Date();
+  const token =
+    (globalThis.crypto && "randomUUID" in globalThis.crypto)
+      ? globalThis.crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 
-  // Upsert request by (email + powerbuy_id)
-  const requestIp = getClientIp(request);
-  const existing = await prisma.tbl_powerbuy_requests.findFirst({
-    where: { email, powerbuy_id: config.id },
+  const created = await prisma.tbl_powerbuy_requests.create({
+    data: {
+      powerbuy_id: cfg.id,
+      name: parsed.name,
+      email: parsed.email.toLowerCase(),
+      product_id: variantGid, // store Variant GID (string column)
+      token,
+      token_expires: new Date(now.getTime() + durationMs),
+      confirmed_at: null,
+      request_ip: clientIp || null,
+    },
+    select: { id: true, token: true, token_expires: true },
   });
 
-  const dataPatch = {
-    name,
-    email,
-    product_id: String(numericProductId), // store numeric only
-    powerbuy_id: config.id,
-    token,
-    token_expires: tokenExpires,
-    request_ip: requestIp ?? null,
+  const response = {
+    ok: true,
+    request_id: created.id,
+    token: created.token,
+    token_expires: created.token_expires,
+    config_id: cfg.id,
   };
 
-  let row;
-  if (existing) {
-    row = await prisma.tbl_powerbuy_requests.update({
-      where: { id: existing.id },
-      data: dataPatch,
-    });
-  } else {
-    row = await prisma.tbl_powerbuy_requests.create({ data: dataPatch });
-  }
+  if (env.DEBUG) console.log("[powerbuy.requests] created", response);
 
-  // Build confirm URL
-  const confirmUrl = new URL("/apps/powerbuy/confirm", request.url);
-  confirmUrl.searchParams.set("token", token);
-  confirmUrl.searchParams.set("shop", shop);
-
-  // Prepare an offer title for the email (fallback to config title or product id)
-  const offerTitle =
-    config.title ||
-    (numericVariantId ? `Variant #${numericVariantId}` : `Product #${numericProductId}`);
-
-  // Queue the Shopify Flow-based confirmation email
-  await queuePowerbuyConfirmationEmail({
-    shop,
-    email,
-    firstName: name.split(" ")[0] ?? "",
-    lastName: name.split(" ").slice(1).join(" ") ?? "",
-    confirmUrl: confirmUrl.toString(),
-    powerbuyId: config.id,
-    offerTitle,
-    marketingOptIn,
-  });
-
-  return json({
-    status: "ok",
-    request_id: row.id,
-    powerbuy_id: config.id,
-    // include for debugging in dev
-    ...(process.env.NODE_ENV !== "production"
-      ? { token, confirm_url: confirmUrl.toString() }
-      : {}),
-  });
+  return json(response, { status: 201 });
 }
+
+// No page here; this route is API-only
+export const loader = () => json({ error: "not_found" }, { status: 404 });

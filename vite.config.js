@@ -1,63 +1,37 @@
 // vite.config.js
-import { vitePlugin as remix } from "@remix-run/dev";
-import { installGlobals } from "@remix-run/node";
-import { defineConfig } from "vite";
-import tsconfigPaths from "vite-tsconfig-paths";
 import path from "node:path";
-
-installGlobals({ nativeFetch: true });
-
-// Replace HOST with SHOPIFY_APP_URL (Shopify CLI quirk)
-if (
-  process.env.HOST &&
-  (!process.env.SHOPIFY_APP_URL ||
-    process.env.SHOPIFY_APP_URL === process.env.HOST)
-) {
-  process.env.SHOPIFY_APP_URL = process.env.HOST;
-  delete process.env.HOST;
-}
-
-const host = new URL(process.env.SHOPIFY_APP_URL || "http://localhost").hostname;
-
-let hmrConfig;
-if (host === "localhost") {
-  hmrConfig = { protocol: "ws", host: "localhost", port: 64999, clientPort: 64999 };
-} else {
-  hmrConfig = { protocol: "wss", host, port: parseInt(process.env.FRONTEND_PORT) || 8002, clientPort: 443 };
-}
+import { defineConfig } from "vite";
+import { vitePlugin as remix } from "@remix-run/dev";
 
 export default defineConfig({
+  plugins: [
+    // Remix + Vite
+    remix(),
+  ],
+
+  // So "~" resolves to your /app folder, and "utils/..." works too.
   resolve: {
     alias: {
-      "~": path.resolve(__dirname, "app"),
-      "~/": path.resolve(__dirname, "app") + "/", // helps some SSR edge cases
+      "~": path.resolve(process.cwd(), "app"),
+      utils: path.resolve(process.cwd(), "app/utils"),
     },
   },
-  server: {
-    allowedHosts: [host],
-    cors: { preflightContinue: true },
-    port: Number(process.env.PORT || 3000),
-    hmr: hmrConfig,
-    fs: { allow: ["app", "node_modules"] },
+
+  // Server-Side Rendering bundling hints
+  ssr: {
+    // Prisma must remain external (don't bundle it)
+    external: ["@prisma/client", "prisma"],
+    // These Shopify ESM packages are safer when processed by Vite during SSR
+    noExternal: [
+      "@shopify/polaris",
+      "@shopify/app-bridge-react",
+      "@shopify/shopify-app-remix",
+    ],
+    target: "node",
   },
-  plugins: [
-    remix({
-      ignoredRouteFiles: ["**/.*"],
-      future: {
-        v3_fetcherPersist: true,
-        v3_relativeSplatPath: true,
-        v3_throwAbortReason: true,
-        v3_lazyRouteDiscovery: true,
-        v3_singleFetch: false,
-        v3_routeConfig: true,
-      },
-    }),
-    tsconfigPaths(),
-  ],
+
+  // Helpful in prod debugging; optional
   build: {
-    assetsInlineLimit: 0,
-  },
-  optimizeDeps: {
-    include: ["@shopify/app-bridge-react", "@shopify/polaris"],
+    sourcemap: false,
   },
 });
