@@ -161,27 +161,6 @@ model tblkp_CsdRefundEligible {
   @@map("csd_refund_eligible")
 }
 
-/**
- * model RepairEntry {
- * id                    Int       @id @default(autoincrement())
- * serviceNumber         DateTime? @map("service_number") @db.Timestamptz(6)
- * dateOfRepairRequest   DateTime? @map("date_of_repair_request") @db.Timestamptz(6)
- * originalOrder         String?   @map("original_order")
- * customerName          String?   @map("customer_name")
- * item                  String?   @map("item")
- * replacementOrder      String?   @map("replacement_order")
- * repairType            String?   @map("repair_type")
- * repairNotes           String?   @map("repair_notes")
- * customerServiceStatus String?   @map("customer_service_status")
- * rslRepairDept         String?   @map("rsl_repair_dept")
- * repairCompleted       Boolean?  @map("repair_completed")
- * repairDeptDesignation String?   @map("repair_dept_designation")
- * createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
- * updatedAt             DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
- * @@map("repair_entry")
- * }
- */
-
 model note {
   id              Int     @id @default(autoincrement())
   user_gid        String? @db.Text
@@ -263,20 +242,16 @@ model tbl_powerbuy_config {
 }
 
 model tbl_powerbuy_codes {
-  id                         Int                 @id @default(autoincrement())
-  powerbuy_id                Int
-  powerbuy                   tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
-  discount_code              String              @db.Text
-  discount_code_gid          String              @db.Text
-  short_description          String?             @db.Text
-  long_description           String              @db.Text
-  confirmation_email_content String?             @db.Text
-  acceptance_email_content   String?             @db.Text
-  rsl_contact_email_address  String?             @db.Text
-  start_time                 DateTime?           @db.Date
-  end_time                   DateTime?           @db.Date
-  number_of_uses             Int?
-  powerbuy_product_id        String?             @db.Text
+  id                        Int                 @id @default(autoincrement())
+  powerbuy_id               Int
+  powerbuy                  tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
+  discount_code             String              @db.Text
+  discount_code_gid         String              @db.Text
+  rsl_contact_email_address String?             @db.Text
+  start_time                DateTime?           @db.Timestamptz(6)
+  end_time                  DateTime?           @db.Timestamptz(6)
+  number_of_uses            Int?
+  powerbuy_product_id       String?             @db.Text
 
   @@index([powerbuy_id])
   @@index([discount_code])

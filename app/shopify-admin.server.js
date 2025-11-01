@@ -97,6 +97,7 @@ export async function runAdminQuery(shop, query, variables = {}) {
  *
  * We emulate that minimal interface by delegating to runAdminQuery().
  */
+
 export async function adminGraphQLClientForShop(shop) {
   const domain = normalizeShopDomain(shop);
   const session = await getOfflineSession(domain);
@@ -142,3 +143,4 @@ export async function adminGraphQLClientForShop(shop) {
     mutate: doGraphQL,
   };
 }
+

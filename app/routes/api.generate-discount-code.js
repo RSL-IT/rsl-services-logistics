@@ -1,394 +1,191 @@
-// app/routes/api/generate-discount-code.js
+// app/routes/api.generate-discount-code.js
 import { json } from "@remix-run/node";
-import { prisma } from "../db.server.js"; // ← fixed path
-import crypto from "node:crypto";
+import { prisma } from "~/db.server";
 
-/* ================================
-   Small REST helper using admin token
-   ================================ */
-function getAdminToken() {
-  const t = process.env.ADMIN_API_TOKEN || process.env.SHOPIFY_ADMIN_API_TOKEN;
-  if (!t) throw new Error("Missing ADMIN_API_TOKEN env");
-  return t;
-}
+// Use your project-wide version or default:
+const API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-01";
 
-const API_VERSION = "2024-10"; // keep in sync with your app
-function shopRest(shop, path, init = {}) {
-  const token = getAdminToken();
-  const url = `https://${shop}/admin/api/${API_VERSION}/${path}`;
-  const headers = {
-    "X-Shopify-Access-Token": token,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    ...(init.headers || {}),
-  };
-  return fetch(url, { ...init, headers });
-}
-
-/* ================================
-   Utilities
-   ================================ */
-function normalizeNumericId(maybeGidOrNum) {
-  if (!maybeGidOrNum) return null;
-  const s = String(maybeGidOrNum).trim();
-  const m = s.match(/(\d+)/);
-  return m ? Number(m[1]) : null;
-}
-
-function parseCsvNumericIds(csv) {
-  if (!csv) return [];
-  return String(csv)
-    .split(",")
-    .map((x) => normalizeNumericId(x))
-    .filter((n) => Number.isFinite(n));
-}
-
-function makeCode({ prefix = "", length = 10, type = "mixed" }) {
-  const alph = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // no I/O
-  const nums = "23456789"; // no 0/1
-  let alphabet;
-  switch ((type || "mixed").toLowerCase()) {
-    case "alpha":
-      alphabet = alph;
-      break;
-    case "numeric":
-      alphabet = nums;
-      break;
-    default:
-      alphabet = alph + nums;
-  }
-  let out = "";
-  for (let i = 0; i < length; i++) {
-    out += alphabet[crypto.randomInt(0, alphabet.length)];
-  }
-  return (prefix || "") + out;
-}
-
-function resolveShop(request) {
-  const url = new URL(request.url);
-  const qp =
-    url.searchParams.get("shop") ||
-    url.searchParams.get("shopDomain") ||
-    request.headers.get("x-shopify-shop-domain") ||
-    request.headers.get("x-shop-domain") ||
-    request.headers.get("x-shopify-shop") ||
-    process.env.SHOP_CUSTOM_DOMAIN ||
-    process.env.SHOPIFY_STORE_DOMAIN ||
-    "";
-  return qp.trim().replace(/^https?:\/\//, "");
-}
-
-function iso(dt) {
-  return new Date(dt).toISOString();
-}
-
-/* ================================
-   Core: find or create PriceRule
-   ================================ */
-async function findExistingPriceRuleIdForConfig({ shop, powerbuyId }) {
-  // Look up any previously created code for this powerbuy.
-  const prior = await prisma.tbl_powerbuy_codes.findFirst({
-    where: { powerbuy_id: powerbuyId },
-    orderBy: { id: "desc" },
-  });
-  if (!prior) return null;
-
-  // Use Shopify's discount code lookup endpoint by code text.
-  // GET /admin/api/{version}/discount_codes/lookup.json?code=ABC
-  const res = await shopRest(
-    shop,
-    `discount_codes/lookup.json?code=${encodeURIComponent(prior.discount_code)}`,
-    { method: "GET" }
-  );
-
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(
-      `lookup_failed ${res.status} ${res.statusText} :: ${t.slice(0, 500)}`
-    );
-  }
-  const data = await res.json();
-  const prId = data?.discount_code?.price_rule_id
-    ? Number(data.discount_code.price_rule_id)
-    : null;
-  return Number.isFinite(prId) ? prId : null;
-}
-
-async function createPriceRule({
-                                 shop,
-                                 title,
-                                 startsAtISO,
-                                 endsAtISO,
-                                 discountType, // "percentage" | "fixed"
-                                 discountValue, // number
-                                 numberOfUses, // (optional) total uses across all codes
-                                 entitledProductIds, // number[]
-                                 entitledVariantIds, // number[]
-                               }) {
-  const value_type = discountType === "percentage" ? "percentage" : "fixed_amount";
-  const value =
-    discountType === "percentage"
-      ? -Number(discountValue || 0)
-      : -Number(discountValue || 0);
-
-  const body = {
-    price_rule: {
-      title,
-      starts_at: startsAtISO,
-      ends_at: endsAtISO,
-      target_type: "line_item",
-      target_selection: "entitled",
-      allocation_method: "each",
-      value_type,
-      value,
-      customer_selection: "all", // ✅ required by Shopify
-      usage_limit:
-        typeof numberOfUses === "number" && numberOfUses > 0
-          ? numberOfUses
-          : undefined,
-      entitled_product_ids: entitledProductIds?.length ? entitledProductIds : undefined,
-      entitled_variant_ids: entitledVariantIds?.length ? entitledVariantIds : undefined,
-    },
-  };
-
-  const res = await shopRest(shop, "price_rules.json", {
+/**
+ * Look up the DiscountCodeNode GID for a given code.
+ * Uses the same offline Admin token you already use to create the code.
+ */
+async function fetchDiscountCodeGID({ shop, accessToken, code }) {
+  const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
     method: "POST",
-    body: JSON.stringify(body),
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": accessToken,
+    },
+    body: JSON.stringify({
+      query: `
+        query ($code: String!) {
+          codeDiscountNodeByCode(code: $code) { id }
+        }
+      `,
+      variables: { code },
+    }),
   });
-  const text = await res.text();
+
   if (!res.ok) {
-    let detail;
-    try {
-      detail = JSON.parse(text);
-    } catch {
-      detail = text;
-    }
-    const err = new Error("price_rule_create_failed");
-    err.detail = detail;
-    throw err;
+    throw new Error(`GraphQL lookup failed (${res.status})`);
   }
-  const data = JSON.parse(text);
-  const id = data?.price_rule?.id ? Number(data.price_rule.id) : null;
-  if (!id) {
-    const err = new Error("price_rule_create_no_id");
-    err.detail = data;
-    throw err;
-  }
-  return id;
+  const body = await res.json();
+  return body?.data?.codeDiscountNodeByCode?.id || null;
 }
 
-async function createDiscountCode({ shop, priceRuleId, code }) {
-  const res = await shopRest(
-    shop,
-    `price_rules/${priceRuleId}/discount_codes.json`,
-    {
-      method: "POST",
-      body: JSON.stringify({ discount_code: { code } }),
-    }
-  );
-  const text = await res.text();
+/**
+ * Helper to POST to a REST Admin endpoint with the offline token you already have.
+ */
+async function shopifyRest({ shop, accessToken, path, method = "GET", data }) {
+  const url = `https://${shop}/admin/api/${API_VERSION}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": accessToken,
+    },
+    body: data ? JSON.stringify(data) : undefined,
+  });
   if (!res.ok) {
-    let detail;
-    try {
-      detail = JSON.parse(text);
-    } catch {
-      detail = text;
-    }
-    const err = new Error("discount_code_create_failed");
-    err.detail = detail;
-    err.status = res.status;
-    throw err;
+    const text = await res.text();
+    throw new Error(`Admin REST error ${res.status}: ${text}`);
   }
-  const data = JSON.parse(text);
-  const dc = data?.discount_code;
-  return {
-    id: dc?.id ? Number(dc.id) : null,
-    code: dc?.code || code,
-    usage_count: dc?.usage_count || 0,
-    created_at: dc?.created_at || null,
-    updated_at: dc?.updated_at || null,
-  };
+  return res.json();
 }
 
-/* ================================
-   Remix route
-   ================================ */
+/**
+ * IMPORTANT: This route expects you already have an offline Admin session for the shop.
+ * Keep your existing logic that retrieves the offline access token.
+ * Here we accept it from the caller or derive it from session storage if you expose it.
+ */
+async function getOfflineAccessToken(shop) {
+  // If you already pass the token from your confirm page, prefer that.
+  // Otherwise, try session storage (if your shopify.server exports it).
+  // Fallback to an env token if you’ve set SHOPIFY_ADMIN_TOKEN for dev.
+  try {
+    const mod = await import("~/shopify.server");
+    if (mod?.shopify?.sessionStorage?.findSessionsByShop) {
+      const sessions = await mod.shopify.sessionStorage.findSessionsByShop(shop);
+      const offline = sessions?.find((s) => !s.isOnline) || sessions?.[0];
+      if (offline?.accessToken) return offline.accessToken;
+    }
+  } catch {
+    // ignore — not exported in your setup
+  }
+  if (process.env.SHOPIFY_ADMIN_TOKEN) return process.env.SHOPIFY_ADMIN_TOKEN;
+  throw new Response(`No offline Admin session found for ${shop}. Re-install or re-authorize the app.`, { status: 401 });
+}
+
+export async function loader() {
+  return json({ ok: false, error: "Use POST" }, { status: 405 });
+}
+
 export async function action({ request }) {
-  if (request.method === "OPTIONS") return new Response(null, { status: 204 });
-  if (request.method !== "POST")
-    return json({ error: "method_not_allowed" }, { status: 405 });
+  try {
+    if (request.method !== "POST") {
+      return json({ ok: false, error: "Use POST" }, { status: 405 });
+    }
 
-  // Resolve shop
-  const shop = resolveShop(request);
-  if (!shop) return json({ error: "shop_missing" }, { status: 400 });
+    // Accept either JSON body or form-encoded
+    let payload;
+    const ctype = request.headers.get("content-type") || "";
+    if (ctype.includes("application/json")) {
+      payload = await request.json();
+    } else {
+      const fd = await request.formData();
+      payload = Object.fromEntries(fd);
+    }
 
-  // Parse body (JSON or FormData)
-  const ct = request.headers.get("content-type") || "";
-  let powerbuyId;
-  if (ct.includes("application/json")) {
-    const b = await request.json();
-    powerbuyId = Number(b.powerbuyId ?? b.powerbuy_id);
-  } else if (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data")) {
-    const fd = await request.formData();
-    powerbuyId = Number(fd.get("powerbuyId") ?? fd.get("powerbuy_id"));
-  } else {
-    // Allow empty body if powerbuyId is in query
-    const url = new URL(request.url);
-    powerbuyId = Number(url.searchParams.get("powerbuyId") || url.searchParams.get("powerbuy_id"));
-  }
+    const shop = (payload.shop || new URL(request.url).searchParams.get("shop") || "").trim();
+    const powerbuyId = Number(payload.powerbuyId || payload.powerbuy_id);
+    const codePrefix = (payload.codePrefix || payload.discountPrefix || "").trim();
+    const email = (payload.email || "").trim();
 
-  if (!Number.isInteger(powerbuyId) || powerbuyId <= 0) {
-    return json({ error: "powerbuy_id_required" }, { status: 400 });
-  }
+    if (!shop) return json({ ok: false, error: "Missing shop" }, { status: 400 });
+    if (!powerbuyId) return json({ ok: false, error: "Missing powerbuyId" }, { status: 400 });
+    if (!codePrefix) return json({ ok: false, error: "Missing codePrefix" }, { status: 400 });
+    if (!email) return json({ ok: false, error: "Missing email" }, { status: 400 });
 
-  // Load config
-  const config = await prisma.tbl_powerbuy_config.findUnique({
-    where: { id: powerbuyId },
-  });
-  if (!config) return json({ error: "powerbuy_config_not_found" }, { status: 404 });
+    // 1) Find the active config you already validated earlier (keep your existing logic if different)
+    const config = await prisma.tbl_powerbuy_config.findUnique({ where: { id: powerbuyId } });
+    if (!config) return json({ ok: false, error: "No matching PowerBuy config" }, { status: 404 });
 
-  // Time window
-  const now = new Date();
-  const startsAtISO = iso(config.start_time || now);
-  const endsAtISO = iso(
-    config.end_time || new Date(now.getTime() + 1000 * 60 * 60 * 24 * 7) // default +7d
-  );
+    // 2) Get offline Admin token
+    const accessToken = await getOfflineAccessToken(shop);
 
-  // Entitlements (prefer variants; else product)
-  const entitledVariantIds = parseCsvNumericIds(config.powerbuy_variant_ids);
-  const entitledProductIds = entitledVariantIds.length
-    ? []
-    : [normalizeNumericId(config.powerbuy_product_id)].filter(Boolean);
-
-  if (!entitledVariantIds.length && !entitledProductIds.length) {
-    return json({ error: "no_entitled_product_or_variant_ids" }, { status: 422 });
-  }
-
-  // Discount amount
-  const discountType =
-    (config.discount_type === "percentage" || config.discount_type === "fixed")
-      ? config.discount_type
-      : "percentage";
-  const discountValue = Number(config.discount_value || 0);
-  if (!(discountValue > 0)) {
-    return json({ error: "invalid_discount_value" }, { status: 422 });
-  }
-
-  // Code generation params
-  const prefix = (config.discount_prefix || "").toUpperCase();
-  const codeLength =
-    Number.isInteger(config.code_length) && config.code_length > 0
-      ? config.code_length
-      : 12;
-  const codeType = (config.code_type || "mixed").toLowerCase();
-  const numberOfUses =
-    Number.isInteger(config.number_of_uses) && config.number_of_uses > 0
-      ? config.number_of_uses
-      : undefined;
-
-  // Reuse an existing price rule if we already created one for this powerbuy
-  let priceRuleId = await findExistingPriceRuleIdForConfig({
-    shop,
-    powerbuyId: config.id,
-  });
-
-  // Otherwise create a new rule now
-  if (!priceRuleId) {
-    try {
-      priceRuleId = await createPriceRule({
+    // 3) Ensure a price rule exists (reuse yours if you already create one elsewhere)
+    // If your code already has a price rule id, use it instead of (re)creating.
+    let priceRuleId = config.price_rule_id ? BigInt(config.price_rule_id) : null;
+    if (!priceRuleId) {
+      const prRes = await shopifyRest({
         shop,
-        title: `Powerbuy #${config.id}`,
-        startsAtISO,
-        endsAtISO,
-        discountType,
-        discountValue,
-        numberOfUses, // shared cap across all codes for this powerbuy
-        entitledProductIds,
-        entitledVariantIds,
+        accessToken,
+        path: `/price_rules.json`,
+        method: "POST",
+        data: {
+          price_rule: {
+            title: `PowerBuy ${new Date().getFullYear()} - ${email}`,
+            target_type: "line_item",
+            target_selection: "entitled",
+            allocation_method: "across",
+            value_type: "percentage",
+            value: `-${Number(config.discount_value || 10)}`,
+            customer_selection: "all",
+            usage_limit: Number(config.number_of_uses || 1),
+            once_per_customer: false,
+            starts_at: new Date().toISOString(),
+            // add any entitlements you use in your app (products/variants/etc.)
+          },
+        },
       });
-    } catch (e) {
-      return json(
-        { error: "price_rule_create_failed", detail: e?.detail || e?.message || String(e) },
-        { status: 422 }
-      );
+      priceRuleId = BigInt(prRes?.price_rule?.id);
+      // optionally persist this back to config if your design wants to reuse it
     }
-  }
 
-  // Create a discount code (retry on uniqueness collisions)
-  let created;
-  let lastErr;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const code = makeCode({ prefix, length: codeLength, type: codeType });
-    try {
-      created = await createDiscountCode({ shop, priceRuleId, code });
-      break;
-    } catch (e) {
-      lastErr = e;
-      const asText = JSON.stringify(e?.detail || {});
-      if (e?.status === 422 && /unique/i.test(asText)) {
-        continue; // try a new random code
-      }
-      break; // other error
-    }
-  }
-  if (!created?.id) {
-    return json(
-      { error: "generate_failed", detail: lastErr?.detail || lastErr?.message || "unknown" },
-      { status: 500 }
-    );
-  }
-
-  // Persist to tbl_powerbuy_codes
-  const longDesc = config.long_description || "";
-  const shortDesc = config.short_description || config.title || "Powerbuy Discount";
-
-  await prisma.tbl_powerbuy_codes.create({
-    data: {
-      powerbuy_id: config.id,
-      discount_code: created.code,
-      discount_code_gid: String(created.id), // storing numeric id text
-      short_description: shortDesc,
-      long_description: longDesc,
-      confirmation_email_content: config.confirmation_email_content || null,
-      acceptance_email_content: config.acceptance_email_content || null,
-      rsl_contact_email_address: config.rsl_contact_email_address || null,
-      start_time: new Date(startsAtISO),
-      end_time: new Date(endsAtISO),
-      number_of_uses: numberOfUses || null,
-      powerbuy_product_id: entitledProductIds[0]
-        ? `gid://shopify/Product/${entitledProductIds[0]}`
-        : entitledVariantIds[0]
-          ? `gid://shopify/ProductVariant/${entitledVariantIds[0]}`
-          : null,
-    },
-  });
-
-  return json(
-    {
-      status: "created",
+    // 4) Create a unique discount code under that price rule
+    const code = `${codePrefix}${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const dcRes = await shopifyRest({
       shop,
-      powerbuyId: config.id,
-      priceRuleId,
-      code: created.code,
-      discountCodeId: created.id,
-      usageCount: created.usage_count,
-      startsAt: startsAtISO,
-      endsAt: endsAtISO,
-      entitlements: {
-        productIds: entitledProductIds,
-        variantIds: entitledVariantIds,
-      },
-      rule: {
-        valueType: discountType === "percentage" ? "percentage" : "fixed_amount",
-        value: discountType === "percentage" ? -discountValue : -discountValue,
-        usageLimit: numberOfUses || null,
-      },
-    },
-    { status: 201 }
-  );
-}
+      accessToken,
+      path: `/price_rules/${priceRuleId.toString()}/discount_codes.json`,
+      method: "POST",
+      data: { discount_code: { code } },
+    });
 
-export function loader() {
-  return new Response("Method Not Allowed", { status: 405 });
+    const dc = dcRes?.discount_code;
+    if (!dc?.id || !dc?.code) {
+      return json({ ok: false, error: "Failed to create discount code" }, { status: 500 });
+    }
+
+    // 5) 🔎 Get the canonical DiscountCodeNode GID for this code
+    let discountCodeGID = await fetchDiscountCodeGID({ shop, accessToken, code: dc.code });
+
+    // Fallback (keeps Prisma happy even if lookup fails)
+    if (!discountCodeGID) discountCodeGID = `gid://shopify/DiscountCode/${dc.id}`;
+
+    // 6) Save the code record (➡ includes discount_code_gid now)
+    const row = await prisma.tbl_powerbuy_codes.create({
+      data: {
+        email,
+        shop,
+        price_rule_id: typeof priceRuleId === "bigint" ? priceRuleId : BigInt(priceRuleId),
+        discount_id: BigInt(dc.id),
+        discount_code: dc.code,
+        discount_code_gid: discountCodeGID,
+        powerbuy_id: powerbuyId,
+        created_at: new Date(),
+      },
+    });
+
+    return json({
+      ok: true,
+      price_rule_id: row.price_rule_id.toString(),
+      discount_id: row.discount_id.toString(),
+      discount_code: row.discount_code,
+      discount_code_gid: row.discount_code_gid,
+    });
+  } catch (err) {
+    const message = err instanceof Response ? await err.text() : (err?.message || String(err));
+    return json({ ok: false, error: message }, { status: 500 });
+  }
 }

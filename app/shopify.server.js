@@ -1,5 +1,12 @@
 // app/shopify.server.js
 import { shopifyApp } from "@shopify/shopify-app-remix/server";
+
+const BASE = process.env.SHOPIFY_APP_URL || "NOT_SET";
+const CALLBACK_PATH = "/auth/callback";
+
+console.log("[boot] SHOPIFY_APP_URL:", BASE);
+console.log("[boot] OAuth callback:", `${BASE}${CALLBACK_PATH}`);
+
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server.js";
 

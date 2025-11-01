@@ -64,6 +64,7 @@ export async function loader({ request }) {
       title: c.title ? String(c.title) : "Powerbuy",
       start: c.start_time,
       end: c.end_time,
+      shops: c.allowed_stores,
       discountPrefix: c.discount_prefix || null,
       codeLength: typeof c.code_length === "number" ? c.code_length : null,
       codeType: c.code_type || null, // 'alpha' | 'numeric' | 'mixed' | null
