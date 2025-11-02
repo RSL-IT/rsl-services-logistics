@@ -1,146 +1,82 @@
 // app/shopify-admin.server.js
-import { prisma } from "./db.server.js";
+// Helpers to use Shopify Admin API (offline) from server routes.
+// Works with @shopify/shopify-app-remix "auth" export in your app.
 
-const API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-01";
+import { auth } from "~/shopify.server";
 
-/** Keep domains like "rslspeakers.myshopify.com" (no scheme, no trailing slash) */
-function normalizeShopDomain(shop) {
-  return String(shop || "")
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/+$/, "");
+/** Pull shop from ?shop=… or x-shopify-shop-domain */
+export function requireShopParam(request) {
+  const url = new URL(request.url);
+  const shop =
+    url.searchParams.get("shop") ||
+    request.headers.get("x-shopify-shop-domain") ||
+    undefined;
+
+  if (!shop) {
+    throw new Response("Missing shop parameter", { status: 400 });
+  }
+  return shop;
 }
 
-/** Get the offline session (preferred) or any usable session for this shop */
+/** Load an offline session for a given shop (error if missing). */
 export async function getOfflineSession(shop) {
-  const domain = normalizeShopDomain(shop);
-  const offlineId = `offline_${domain}`;
+  // Correct API shape: use auth.api.session.getOfflineId(shop)
+  const offlineId = auth.api.session.getOfflineId(shop);
+  const session = await auth.sessionStorage.loadSession(offlineId);
 
-  // Exact offline id first
-  let sess = await prisma.session.findUnique({ where: { id: offlineId } });
-
-  // Fallbacks: any non-online session for the shop, then any session
-  if (!sess) {
-    sess = await prisma.session.findFirst({
-      where: { shop: domain, isOnline: false },
-      orderBy: { expires: "desc" },
-    });
+  if (!session) {
+    // This usually means the app hasn't been installed/authorized offline for this shop yet.
+    throw new Error(
+      `No offline session found for ${shop}. Install/authorize the app for this shop first.`
+    );
   }
-  if (!sess) {
-    sess = await prisma.session.findFirst({
-      where: { shop: domain },
-      orderBy: { expires: "desc" },
-    });
-  }
-
-  return sess || null;
+  return session;
 }
 
-/**
- * Direct Admin GraphQL call using stored offline token.
- * Returns { status, body } (body is parsed JSON).
- */
+/** Get ready-to-use Admin API clients (GraphQL + REST) for a shop (offline). */
+export async function getAdminClients(shop) {
+  const session = await getOfflineSession(shop);
+
+  // Clients come from the same "auth.api.clients" namespace
+  const adminGraphql = new auth.api.clients.Graphql({ session });
+  const adminRest = new auth.api.clients.Rest({ session });
+
+  return { session, adminGraphql, adminRest };
+}
+
+/** Convenience: run a GraphQL query with variables; throws on GraphQL errors. */
 export async function runAdminQuery(shop, query, variables = {}) {
-  const domain = normalizeShopDomain(shop);
-  const session = await getOfflineSession(domain);
+  const { adminGraphql } = await getAdminClients(shop);
 
-  if (!session || !session.accessToken) {
+  // GraphQL client in @shopify/shopify-api v11 exposes .request(query, { variables })
+  let result;
+  if (typeof adminGraphql.request === "function") {
+    result = await adminGraphql.request(query, { variables });
+  } else {
+    // Older shape fallback
+    result = await adminGraphql.query({ data: { query, variables } });
+  }
+
+  // Normalize error handling
+  const errors = result?.errors || result?.body?.errors;
+  if (errors) {
     throw new Error(
-      `No offline Admin session found for ${domain}. Re-install or re-authorize the app.`
+      `Admin GraphQL error: ${JSON.stringify(errors, null, 2)}`
     );
   }
-
-  const endpoint = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "X-Shopify-Access-Token": session.accessToken,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  const body = await res.json().catch(() => ({}));
-
-  if (!res.ok) {
-    const msg =
-      (body && body.errors && JSON.stringify(body.errors)) ||
-      `${res.status} ${res.statusText}`;
-    throw new Error(`Admin GraphQL HTTP error: ${msg}`);
-  }
-  if (body.errors) {
-    throw new Error(`Admin GraphQL errors: ${JSON.stringify(body.errors)}`);
-  }
-
-  // Mutations often return userErrors instead of top-level errors
-  const userErrors =
-    body?.data &&
-    Object.values(body.data)
-      .filter(Boolean)
-      .flatMap((node) => node.userErrors || node.userError || []);
-  if (userErrors && userErrors.length) {
-    throw new Error(
-      `Admin GraphQL userErrors: ${JSON.stringify(userErrors)}`
-    );
-  }
-
-  return { status: res.status, body };
+  return result?.data || result?.body?.data || result;
 }
 
-/**
- * Compatibility shim for existing code:
- * Some files import `adminGraphQLClientForShop()` and call:
- *   const admin = await adminGraphQLClientForShop(shop);
- *   await admin.query({ data: { query, variables }});
- *
- * We emulate that minimal interface by delegating to runAdminQuery().
- */
+/** ---- Aliases kept for older imports elsewhere in your app ---- */
 
+/** Alias requested earlier by other routes */
 export async function adminGraphQLClientForShop(shop) {
-  const domain = normalizeShopDomain(shop);
-  const session = await getOfflineSession(domain);
-  if (!session || !session.accessToken) {
-    throw new Error(
-      `No offline Admin session found for ${domain}. Re-install or re-authorize the app.`
-    );
-  }
-
-  const endpoint = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
-
-  async function doGraphQL({ data }) {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "X-Shopify-Access-Token": session.accessToken,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        query: data?.query,
-        variables: data?.variables || {},
-      }),
-    });
-
-    const body = await res.json().catch(() => ({}));
-
-    if (!res.ok) {
-      const msg =
-        (body && body.errors && JSON.stringify(body.errors)) ||
-        `${res.status} ${res.statusText}`;
-      throw new Error(`Admin GraphQL HTTP error: ${msg}`);
-    }
-    if (body.errors) {
-      throw new Error(`Admin GraphQL errors: ${JSON.stringify(body.errors)}`);
-    }
-    return { status: res.status, body };
-  }
-
-  // Shopify’s GraphQL client exposes .query() (and often .mutate() calls the same path).
-  return {
-    query: doGraphQL,
-    mutate: doGraphQL,
-  };
+  const { adminGraphql } = await getAdminClients(shop);
+  return adminGraphql;
 }
 
+/** If you need the REST client directly */
+export async function adminRestClientForShop(shop) {
+  const { adminRest } = await getAdminClients(shop);
+  return adminRest;
+}

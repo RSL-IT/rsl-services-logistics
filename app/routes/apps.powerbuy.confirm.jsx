@@ -1,297 +1,341 @@
 // app/routes/apps.powerbuy.confirm.jsx
 import { json } from "@remix-run/node";
 import { useLoaderData } from "@remix-run/react";
-import { Page, Card, Box, BlockStack, Text } from "@shopify/polaris";
+import { Page, Card, Text, Box } from "@shopify/polaris";
+
 import { prisma } from "~/db.server";
-import { getOfflineSession } from "~/shopify-admin.server";
+import { sendConfirmEmail } from "~/services/mailer.server";
 
-const API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-01";
+// Use the same version everywhere
+const API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
 
-/* ---------------- helpers ---------------- */
-
+/* -------------------- utilities -------------------- */
 function parseDurationMs(input) {
-  if (!input) return 0;
-  const s = String(input).trim().toLowerCase();
-  const re = /(\d+(?:\.\d+)?)\s*(months?|mos?|month|mo\b|weeks?|w|days?|d|hours?|hrs?|hr|h|minutes?|mins?|min|m(?!o\b)|seconds?|secs?|sec|s)\b/g;
-  let ms = 0, m;
-  const add = (n, unit) => {
-    if (/^mo(nths?)?$|^mos?$/.test(unit))            ms += n * 30 * 24 * 60 * 60 * 1000; // ~30d
-    else if (/^weeks?$|^w$/.test(unit))              ms += n * 7 * 24 * 60 * 60 * 1000;
-    else if (/^days?$|^d$/.test(unit))               ms += n * 24 * 60 * 60 * 1000;
-    else if (/^hours?$|^hrs?$|^hr$|^h$/.test(unit))  ms += n * 60 * 60 * 1000;
-    else if (/^minutes?$|^mins?$|^min$|^m$/.test(unit)) ms += n * 60 * 1000;
-    else if (/^seconds?$|^secs?$|^sec$|^s$/.test(unit)) ms += n * 1000;
-  };
-  while ((m = re.exec(s))) add(Number(m[1]), m[2]);
-  return ms;
+  if (!input || typeof input !== "string") return 24 * 60 * 60 * 1000; // default 24h
+  const s = input.trim().toLowerCase();
+  const m = s.match(
+    /(\d+(?:\.\d+)?)\s*(weeks?|w|days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)/
+  );
+  if (!m) return 24 * 60 * 60 * 1000;
+
+  const num = parseFloat(m[1]);
+  const unit = m[2];
+
+  const SEC = 1000;
+  const MIN = 60 * SEC;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  const WEEK = 7 * DAY;
+
+  if (/^w(eeks?)?$/.test(unit)) return num * WEEK;
+  if (/^d(ays?)?$/.test(unit)) return num * DAY;
+  if (/^h(ours?|rs?)?$/.test(unit)) return num * HOUR;
+  if (/^m(in(utes?)?)?$/.test(unit)) return num * MIN;
+  if (/^s(ec(onds?)?)?$/.test(unit)) return num * SEC;
+  return 24 * 60 * 60 * 1000;
 }
 
-function parseVariantIdsFromConfig(cfg) {
-  const raw = String(cfg?.powerbuy_variant_ids || "").trim();
-  if (!raw) return [];
-  return raw
-    .split(/[,\s;]+/)
-    .map((t) => String(t).trim())
-    .map((id) => {
-      const m = id.match(/(\d{6,})$/);
-      return m ? Number(m[1]) : Number(id);
-    })
-    .filter((n) => Number.isFinite(n));
+function safeInt(x) {
+  if (x == null) return undefined;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : undefined;
 }
 
-async function fetchShopTimezone(shop, accessToken) {
-  const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-    body: JSON.stringify({ query: `query{ shop { ianaTimezone timezoneOffsetMinutes } }` }),
-  });
-  const body = await res.json();
-  if (!res.ok || body.errors) throw new Error("Failed to read shop timezone");
-  return {
-    iana: body?.data?.shop?.ianaTimezone || "UTC",
-    offsetMin: Number(body?.data?.shop?.timezoneOffsetMinutes ?? 0),
-  };
-}
+function makeCode({ prefix = "", len = 16, type = "alpha" }) {
+  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // avoid I/O
+  const D = "23456789"; // avoid 0/1
+  const AD = A + D;
 
-function computeWindowUsingStartPlusDuration({ shopOffsetMin, cfgStart, durationMs }) {
-  const nowUtc = new Date();
-  const nowLocalMs = nowUtc.getTime() + shopOffsetMin * 60 * 1000;
+  let alphabet = A;
+  if (type === "numeric") alphabet = D;
+  else if (type === "mixed") alphabet = AD;
 
-  let startLocalMs;
-  if (cfgStart instanceof Date && !isNaN(cfgStart)) {
-    startLocalMs = cfgStart.getTime();
-  } else {
-    startLocalMs = nowLocalMs;
+  const bodyLen = Math.max(1, len - prefix.length);
+  let str = prefix.toUpperCase();
+  for (let i = 0; i < bodyLen; i++) {
+    str += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
-
-  const endLocalMs = startLocalMs + (Number(durationMs) || 0);
-
-  const starts_at_utc = new Date(startLocalMs - shopOffsetMin * 60 * 1000);
-  const ends_at_utc   = new Date(endLocalMs   - shopOffsetMin * 60 * 1000);
-
-  return {
-    starts_at_utc,
-    ends_at_utc,
-    start_local: new Date(startLocalMs),
-    end_local: new Date(endLocalMs),
-  };
+  return str;
 }
 
-function buildTitle(cfg, email) {
-  const short = String(cfg?.short_description || cfg?.title || "PowerBuy");
-  return `2025 Power Buy (${short}) - ${email}`;
+function asIso(d) {
+  return new Date(d).toISOString();
 }
 
-function makeCode(prefix, len, type = "numeric") {
-  const L = Math.max(6, Math.min(32, Number(len) || 15));
-  const pref = String(prefix || "").toUpperCase();
-  const need = Math.max(0, L - pref.length);
-  const alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-  const digits = "0123456789";
-  const bag = type === "alpha" ? alpha : type === "mixed" ? alpha + digits : digits;
-  let tail = "";
-  for (let i = 0; i < need; i++) tail += bag[Math.floor(Math.random() * bag.length)];
-  return pref + tail;
-}
-
-async function createPriceRuleAndCode({
-                                        shop, accessToken, title,
-                                        discountType, discountValue,
-                                        startsAtUtc, endsAtUtc,
-                                        usageLimit, code, entitledVariantIds
-                                      }) {
-  const value_type = discountType === "fixed" ? "fixed_amount" : "percentage";
-  const value = `-${Number(discountValue || 0)}`;
-
-  const rulePayload = {
-    price_rule: {
-      title,
-      target_type: "line_item",
-      target_selection: entitledVariantIds?.length ? "entitled" : "all",
-      allocation_method: "across",
-      value_type,
-      value,
-      customer_selection: "all",
-      starts_at: startsAtUtc.toISOString(),
-      ends_at: endsAtUtc.toISOString(),
-      ...(usageLimit ? { usage_limit: usageLimit } : {}),
-      ...(entitledVariantIds?.length ? { entitled_variant_ids: entitledVariantIds } : {}),
-      once_per_customer: false,
-    },
-  };
-
-  const base = `https://${shop}/admin/api/${API_VERSION}`;
-  const headers = { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken };
-
-  const prRes = await fetch(`${base}/price_rules.json`, { method: "POST", headers, body: JSON.stringify(rulePayload) });
-  const prText = await prRes.text();
-  if (!prRes.ok) throw new Error(`Price rule create failed (${prRes.status}): ${prText.slice(0, 800)}`);
-  const pr = JSON.parse(prText);
-  const priceRuleId = pr?.price_rule?.id;
-  if (!priceRuleId) throw new Error("No price_rule.id returned");
-
-  const dcRes = await fetch(`${base}/price_rules/${priceRuleId}/discount_codes.json`, {
-    method: "POST", headers, body: JSON.stringify({ discount_code: { code } }),
-  });
-  const dcText = await dcRes.text();
-  if (!dcRes.ok) throw new Error(`Discount code create failed (${dcRes.status}): ${dcText.slice(0, 800)}`);
-  const dc = JSON.parse(dcText);
-  const discountId = dc?.discount_code?.id;
-  if (!discountId) throw new Error("No discount_code.id returned");
-
-  return {
-    priceRuleId,
-    discountCodeId: discountId,
-    discountGid: `gid://shopify/DiscountCodeNode/${discountId}`,
-  };
-}
-
-/* ---------------- loader (GET confirm) ---------------- */
-
-export async function loader({ request }) {
-  const url = new URL(request.url);
-  const token = (url.searchParams.get("token") || "").trim();
-  const shop  = (url.searchParams.get("shop")  || "").trim().toLowerCase();
-
-  if (!token || !shop) return json({ ok: false, error: "Missing token or shop." }, { status: 400 });
-
-  const reqRow = await prisma.tbl_powerbuy_requests.findUnique({
-    where: { token },
-    include: { powerbuy: true },
-  });
-  if (!reqRow) return json({ ok: false, error: "Invalid or unknown token." }, { status: 404 });
-
-  const cfg = reqRow.powerbuy;
-  if (!cfg) return json({ ok: false, error: "PowerBuy configuration not found." }, { status: 400 });
-
-  const allow = String(cfg.allowed_stores || "")
-    .split(/[\s,;]+/)
-    .map((s) => s.trim().toLowerCase())
+/** Parse pb.discount_combines_with (csv of product, order, shipping) -> Shopify flags */
+function parseCombinesWith(csv) {
+  const flags = (csv || "")
+    .toLowerCase()
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
     .filter(Boolean);
-  if (allow.length && !allow.includes(shop)) {
-    return json({ ok: false, error: `Shop ${shop} is not allowed for this PowerBuy.` }, { status: 403 });
-  }
 
-  // Idempotency: claim this token
-  const claimed = await prisma.tbl_powerbuy_requests.updateMany({
-    where: { id: reqRow.id, confirmed_at: null },
-    data: { confirmed_at: new Date(0) },
+  const product = flags.includes("product");
+  const order = flags.includes("order");
+  const shipping = flags.includes("shipping");
+
+  return {
+    product_discounts: product,
+    order_discounts: order,
+    shipping_discounts: shipping,
+  };
+}
+
+/* -------------------- Admin REST via stored offline token -------------------- */
+async function getOfflineAccessToken(shop) {
+  const row = await prisma.session.findFirst({
+    where: { shop, isOnline: false },
+    select: { accessToken: true },
   });
-  if (claimed.count === 0) {
-    return json({ ok: true, alreadyConfirmed: true, message: "This confirmation link was already used." });
+  if (!row?.accessToken) {
+    throw new Error(
+      `Offline Admin token not found for ${shop}. Ensure the app installed an offline session.`
+    );
   }
+  return row.accessToken;
+}
 
-  let revertClaim = true;
+async function adminFetch(shop, token, path, { method = "GET", data } = {}) {
+  const url = `https://${shop}/admin/api/${API_VERSION}/${path}`;
+  const headers = {
+    "X-Shopify-Access-Token": token,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: data ? JSON.stringify(data) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Admin REST ${method} ${path} failed: ${res.status} ${res.statusText} ${text}`.trim()
+    );
+  }
+  return res.json();
+}
+
+/* -------------------- loader -------------------- */
+export const loader = async ({ request }) => {
   try {
-    const offline = await getOfflineSession(shop);
-    if (!offline?.accessToken) {
-      throw new Error(`No offline Admin session found for ${shop}. Re-install or re-authorize the app.`);
+    const url = new URL(request.url);
+    const tokenParam = url.searchParams.get("token")?.trim();
+    const shop =
+      url.searchParams.get("shop")?.trim() ||
+      url.searchParams.get("store")?.trim();
+
+    if (!tokenParam || !shop) {
+      return json({ ok: false, error: "Missing token or shop." }, { status: 400 });
     }
 
-    const { offsetMin } = await fetchShopTimezone(shop, offline.accessToken);
-
-    // START = cfg.start_time (if provided) else "now" in shop local; END = START + DURATION (always)
-    const durationMs = parseDurationMs(cfg.duration || "");
-    if (!durationMs || durationMs <= 0) throw new Error(`Invalid duration "${cfg.duration}"`);
-    const cfgStart = cfg.start_time instanceof Date ? cfg.start_time : null;
-
-    const { starts_at_utc, ends_at_utc } = computeWindowUsingStartPlusDuration({
-      shopOffsetMin: offsetMin,
-      cfgStart,
-      durationMs,
+    // 1) Load request + config
+    const reqRow = await prisma.tbl_powerbuy_requests.findFirst({
+      where: { token: tokenParam },
+      include: { powerbuy: true },
     });
-
-    const nowUtc = new Date();
-    if (starts_at_utc > nowUtc) {
-      return json({ ok: false, error: "This PowerBuy hasn't started yet." }, { status: 403 });
+    if (!reqRow) {
+      return json({ ok: false, error: "Invalid or unknown confirmation token." }, { status: 404 });
     }
 
-    const title = buildTitle(cfg, reqRow.email);
-    const code = makeCode(cfg.discount_prefix || "PB", cfg.code_length || 15, String(cfg.code_type || "numeric"));
-    const entitledVariantIds = parseVariantIdsFromConfig(cfg);
+    if (reqRow.confirmed_at) {
+      // Already confirmed — return the last code we linked (preferred) or last for this powerbuy
+      let code = null;
+      if (reqRow.code_id) {
+        code = await prisma.tbl_powerbuy_codes.findUnique({ where: { id: reqRow.code_id } });
+      }
+      if (!code) {
+        code = await prisma.tbl_powerbuy_codes.findFirst({
+          where: { powerbuy_id: reqRow.powerbuy_id },
+          orderBy: { id: "desc" },
+        });
+      }
+      return json({
+        ok: true,
+        alreadyConfirmed: true,
+        discountCode: code?.discount_code || "(already confirmed)",
+      });
+    }
 
-    const { priceRuleId, discountCodeId, discountGid } = await createPriceRuleAndCode({
+    if (reqRow.token_expires && new Date(reqRow.token_expires).getTime() < Date.now()) {
+      return json({ ok: false, error: "Confirmation link has expired." }, { status: 410 });
+    }
+
+    const pb = reqRow.powerbuy;
+    if (!pb) {
+      return json({ ok: false, error: "PowerBuy config missing." }, { status: 500 });
+    }
+
+    // 2) Timing: start now; end = start + duration (ignore config end_time)
+    const startAt = new Date();
+    const endAt = new Date(startAt.getTime() + parseDurationMs(pb.duration));
+
+    // 3) Admin token
+    const adminToken = await getOfflineAccessToken(shop);
+
+    // 4) Price rule payload (with combines_from csv)
+    const title = `${new Date().getFullYear()} Power Buy (${pb.short_description || "Offer"}) - ${reqRow.email}`;
+
+    const valueType = pb.discount_type === "fixed" ? "fixed_amount" : "percentage";
+    const valueNum = Number(pb.discount_value || 0);
+    if (!Number.isFinite(valueNum) || valueNum <= 0) {
+      throw new Error("Invalid discount_value in config.");
+    }
+    // Shopify expects a negative number string
+    const valueStr = `-${Math.abs(valueNum)}`;
+
+    const combines = parseCombinesWith(pb.discount_combines_with);
+
+    const entitled_variant_ids = [];
+    const variantIdNum = safeInt(reqRow.product_id); // request endpoint saved the variant id here
+    if (variantIdNum) entitled_variant_ids.push(variantIdNum);
+
+    const priceRulePayload = {
+      price_rule: {
+        title,
+        target_type: "line_item",
+        target_selection: entitled_variant_ids.length ? "entitled" : "all",
+        allocation_method: "across",
+        value_type: valueType,
+        value: valueStr,
+        once_per_customer: false,
+        customer_selection: "all",
+        starts_at: asIso(startAt),
+        ends_at: asIso(endAt),
+        usage_limit: safeInt(pb.number_of_uses),
+        combines_with: {
+          product_discounts: !!combines.product_discounts,
+          order_discounts: !!combines.order_discounts,
+          shipping_discounts: !!combines.shipping_discounts,
+        },
+        ...(entitled_variant_ids.length ? { entitled_variant_ids } : {}),
+      },
+    };
+
+    const ruleRes = await adminFetch(shop, adminToken, "price_rules.json", {
+      method: "POST",
+      data: priceRulePayload,
+    });
+    const priceRule = ruleRes?.price_rule;
+    if (!priceRule?.id) throw new Error("Failed to create price rule.");
+
+    // 5) Create discount code
+    const prefix = (pb.discount_prefix || "").trim();
+    const codeLen = safeInt(pb.code_length) || 16;
+    const codeType = pb.code_type || "alpha";
+    const codeStr = makeCode({ prefix, len: codeLen, type: codeType });
+
+    const codeRes = await adminFetch(
       shop,
-      accessToken: offline.accessToken,
-      title,
-      discountType: String(cfg.discount_type || "percentage"),
-      discountValue: Number(cfg.discount_value || 0),
-      startsAtUtc: starts_at_utc,
-      endsAtUtc:   ends_at_utc,
-      usageLimit: cfg.number_of_uses ?? null,
-      code,
-      entitledVariantIds,
-    });
+      adminToken,
+      `price_rules/${priceRule.id}/discount_codes.json`,
+      { method: "POST", data: { discount_code: { code: codeStr } } }
+    );
+    const dc = codeRes?.discount_code;
+    if (!dc?.id) throw new Error("Failed to create discount code.");
 
-    await prisma.tbl_powerbuy_codes.create({
+    // 6) Persist in tbl_powerbuy_codes
+    const codeRow = await prisma.tbl_powerbuy_codes.create({
       data: {
-        powerbuy_id: cfg.id,
-        discount_code: code,
-        discount_code_gid: discountGid,
-        rsl_contact_email_address: cfg.rsl_contact_email_address || null,
-        start_time: starts_at_utc, // timestamptz (UTC)
-        end_time: ends_at_utc,     // timestamptz (UTC)
-        number_of_uses: cfg.number_of_uses ?? null,
-        powerbuy_product_id: cfg.powerbuy_product_id || null,
+        powerbuy_id: pb.id,
+        discount_code: dc.code,
+        discount_code_gid: `gid://shopify/DiscountCode/${dc.id}`, // REST id mapping
+        rsl_contact_email_address: pb.rsl_contact_email_address || null,
+        start_time: startAt,
+        end_time: endAt,
+        number_of_uses: safeInt(pb.number_of_uses) ?? null,
+        powerbuy_product_id: pb.powerbuy_product_id || null,
       },
     });
 
+    // 7) Mark request confirmed + link code_id
     await prisma.tbl_powerbuy_requests.update({
       where: { id: reqRow.id },
-      data: { confirmed_at: new Date() },
+      data: { confirmed_at: new Date(), code_id: codeRow.id },
     });
-    revertClaim = false;
+
+    // 8) Email the code
+    try {
+      await sendConfirmEmail({
+        powerbuyId: pb.id,
+        to: reqRow.email,
+        discountCode: dc.code,
+        startAt,
+        expiresAt: endAt,
+      });
+    } catch (mailErr) {
+      console.error("[PowerBuy][confirm] email error:", mailErr);
+      return json({
+        ok: true,
+        discountCode: dc.code,
+        mailed: false,
+        mailError: String(mailErr?.message || mailErr),
+        ruleId: priceRule.id,
+        codeDbId: codeRow.id,
+      });
+    }
 
     return json({
       ok: true,
-      price_rule_id: priceRuleId,
-      discount_code_id: discountCodeId,
-      discount_code: code,
-      starts_at_utc: starts_at_utc.toISOString(),
-      ends_at_utc: ends_at_utc.toISOString(),
+      discountCode: dc.code,
+      mailed: true,
+      ruleId: priceRule.id,
+      codeDbId: codeRow.id,
     });
-  } catch (e) {
-    if (revertClaim) {
-      try {
-        await prisma.tbl_powerbuy_requests.update({
-          where: { id: reqRow.id },
-          data: { confirmed_at: null },
-        });
-      } catch {}
-    }
-    return json({ ok: false, error: String(e) }, { status: 500 });
+  } catch (err) {
+    console.error("[PowerBuy][confirm] loader failed:", err);
+    return json({ ok: false, error: err?.message || String(err) }, { status: 500 });
   }
-}
+};
 
-/* ---------------- minimal UI ---------------- */
-
+/* -------------------- UI -------------------- */
 export default function ConfirmPage() {
   const data = useLoaderData();
+  const ok = !!data?.ok;
+
   return (
-    <Page title="RSL Speakers • PowerBuy">
+    <Page title="PowerBuy Confirmation">
       <Card>
         <Box padding="400">
-          {data?.ok ? (
-            data.alreadyConfirmed ? (
-              <BlockStack gap="200">
-                <Text variant="bodyLg" as="p">Confirm your email and get your PowerBuy code.</Text>
-                <Text tone="subdued">This link was already confirmed earlier.</Text>
-              </BlockStack>
-            ) : (
-              <BlockStack gap="200">
-                <Text variant="bodyLg" as="p">Confirm your email and get your PowerBuy code.</Text>
-                <Text>Success! Your code is <b>{data.discount_code}</b>.</Text>
-                <Text tone="subdued">
-                  Active window (UTC): {new Date(data.starts_at_utc).toLocaleString()} → {new Date(data.ends_at_utc).toLocaleString()}
+          {ok ? (
+            <>
+              <Text as="h2" variant="headingMd">
+                You’re all set!
+              </Text>
+              <Box paddingBlockStart="300">
+                <Text as="p" variant="bodyMd">
+                  Your discount code is:
                 </Text>
-              </BlockStack>
-            )
+                <Text as="p" variant="headingLg">
+                  {data.discountCode}
+                </Text>
+                {data.mailed === false && data.mailError && (
+                  <Box paddingBlockStart="300">
+                    <Text as="p" tone="critical">
+                      We created your code, but couldn’t send the email: {data.mailError}
+                    </Text>
+                  </Box>
+                )}
+                {data.alreadyConfirmed && (
+                  <Box paddingBlockStart="300">
+                    <Text as="p" tone="subdued">
+                      This request was already confirmed earlier.
+                    </Text>
+                  </Box>
+                )}
+              </Box>
+            </>
           ) : (
-            <BlockStack gap="200">
-              <Text variant="bodyLg" as="p">Confirm your email and get your PowerBuy code.</Text>
-              <Text tone="critical">Failed to create your discount.</Text>
-              <Text tone="subdued">{String(data?.error || "Unknown error")}</Text>
-            </BlockStack>
+            <>
+              <Text as="h2" variant="headingMd">
+                Couldn’t confirm
+              </Text>
+              <Box paddingBlockStart="300">
+                <Text as="p" tone="critical">
+                  {data?.error || "Unexpected error"}
+                </Text>
+              </Box>
+            </>
           )}
         </Box>
       </Card>

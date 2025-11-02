@@ -32,6 +32,7 @@
     "@shopify/shopify-app-session-storage": "^3.0.20",
     "@shopify/shopify-app-session-storage-prisma": "^6.0.9",
     "isbot": "^4.4.0",
+    "nodemailer": "^7.0.10",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "vite-tsconfig-paths": "^5.0.1",

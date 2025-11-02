@@ -222,16 +222,27 @@ model tbl_powerbuy_config {
   code_type                  DiscountCodeType?
   short_description          String?           @db.Text
   long_description           String?           @db.Text
-  confirmation_email_content String?           @db.Text
-  acceptance_email_content   String?           @db.Text
+  request_email_subject      String?           @db.Text
+  request_email_content      String?           @db.Text
+  confirm_email_subject      String?           @db.Text
+  confirm_email_content      String?           @db.Text
   rsl_contact_email_address  String?           @db.Text
   discount_prefix            String?           @db.Text
+  discount_combines_with     String?           @db.Text
   start_time                 DateTime?         @db.Date
   end_time                   DateTime?         @db.Date
   duration                   String?           @db.VarChar()
   number_of_uses             Int?
   powerbuy_product_id        String?           @db.Text
   powerbuy_variant_ids       String?           @db.Text
+  mailer_smtp_host           String?           @db.Text
+  mailer_smtp_port           Int?
+  mailer_smtp_user           String?           @db.Text
+  mailer_smtp_pass           String?           @db.Text
+  mailer_smtp_from_default   String?           @db.Text
+  mailer_from_header         String?           @db.Text
+  use_request_email_override Boolean?          @db.Boolean
+  request_email_override     String?           @db.Text
   // NEW (optional)
   discount_type              DiscountType?
   discount_value             Decimal?          @db.Decimal(10, 2)
@@ -242,34 +253,37 @@ model tbl_powerbuy_config {
 }
 
 model tbl_powerbuy_codes {
-  id                        Int                 @id @default(autoincrement())
+  id                        Int                     @id @default(autoincrement())
   powerbuy_id               Int
-  powerbuy                  tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
-  discount_code             String              @db.Text
-  discount_code_gid         String              @db.Text
-  rsl_contact_email_address String?             @db.Text
-  start_time                DateTime?           @db.Timestamptz(6)
-  end_time                  DateTime?           @db.Timestamptz(6)
+  powerbuy                  tbl_powerbuy_config     @relation(fields: [powerbuy_id], references: [id])
+  discount_code             String                  @db.Text
+  discount_code_gid         String                  @db.Text
+  rsl_contact_email_address String?                 @db.Text
+  start_time                DateTime?               @db.Timestamptz(6)
+  end_time                  DateTime?               @db.Timestamptz(6)
   number_of_uses            Int?
-  powerbuy_product_id       String?             @db.Text
+  powerbuy_product_id       String?                 @db.Text
+  requests                  tbl_powerbuy_requests[]
 
   @@index([powerbuy_id])
   @@index([discount_code])
 }
 
 model tbl_powerbuy_requests {
-  id            Int       @id @default(autoincrement())
-  created_at    DateTime  @default(now())
+  id            Int                 @id @default(autoincrement())
+  created_at    DateTime            @default(now())
   name          String
   email         String
   product_id    String
   powerbuy_id   Int
-  token         String    @unique
+  token         String              @unique
   token_expires DateTime
   confirmed_at  DateTime?
   request_ip    String?
-
-  powerbuy tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
+  code_id       Int?
+  code          tbl_powerbuy_codes? @relation(fields: [code_id], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  powerbuy      tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
 
   @@index([email, powerbuy_id])
+  @@index([code_id]) // optional but handy
 }

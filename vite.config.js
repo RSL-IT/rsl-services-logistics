@@ -19,8 +19,12 @@ export default defineConfig({
 
   // Server-Side Rendering bundling hints
   ssr: {
-    // Prisma must remain external (don't bundle it)
-    external: ["@prisma/client", "prisma"],
+    // Keep server-native deps out of the SSR bundle
+    external: [
+      "@prisma/client",
+      "prisma",
+      "nodemailer", // 👈 important for the mailer
+    ],
     // These Shopify ESM packages are safer when processed by Vite during SSR
     noExternal: [
       "@shopify/polaris",
@@ -33,5 +37,12 @@ export default defineConfig({
   // Helpful in prod debugging; optional
   build: {
     sourcemap: false,
+    // If you ever see bundling tries again, you can also do:
+    // rollupOptions: { external: ["nodemailer"] },
+  },
+
+  // Prevent pre-bundling for nodemailer (not strictly required, but harmless)
+  optimizeDeps: {
+    exclude: ["nodemailer"],
   },
 });
