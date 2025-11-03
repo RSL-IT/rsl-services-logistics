@@ -1,242 +1,293 @@
 // app/routes/apps.powerbuy.confirm.jsx
-import { json } from "@remix-run/node";
-import { useLoaderData } from "@remix-run/react";
-import { Page, Card, Text, Banner, InlineStack } from "@shopify/polaris";
-import { prisma } from "~/db.server";
-import { runAdminQuery } from "~/shopify-admin.server";
+import {json} from "@remix-run/node";
+import {useLoaderData} from "@remix-run/react";
+import {Page, Card, Text, Banner, InlineStack, Box} from "@shopify/polaris";
+import {prisma} from "~/db.server";
+import {runAdminQuery} from "~/shopify-admin.server";
+import {sendConfirmEmail} from "~/services/mailer.server";
 
-// --- Helpers ---
-function isoPlusDays(iso, days) {
-  const d = new Date(iso);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString();
+// ----- helpers -----
+
+function parseCombinesWith(s) {
+  const set = new Set(String(s || "").toLowerCase().split(/[,\s]+/).filter(Boolean));
+  return {
+    orderDiscounts: set.has("order") || set.has("orders") || set.has("orderdiscounts"),
+    productDiscounts: set.has("product") || set.has("products") || set.has("productdiscounts"),
+    shippingDiscounts: set.has("shipping") || set.has("shippingdiscounts"),
+  };
 }
 
-export async function loader({ request }) {
-  const url = new URL(request.url);
-  const token = url.searchParams.get("token");
-  const shop = url.searchParams.get("shop"); // used only for display/logging
+function toVariantGids(csv) {
+  if (!csv) return [];
+  return String(csv)
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((id) => (id.startsWith("gid://") ? id : `gid://shopify/ProductVariant/${id}`));
+}
 
-  if (!token) {
-    return json(
-      { ok: false, error: "Missing token." },
-      { status: 400 }
-    );
-  }
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
 
-  // Pull the pending request (token only; no 'shop' column on this table)
-  const reqRow = await prisma.tbl_powerbuy_requests.findFirst({
-    where: { token },
-    select: {
-      id: true,
-      email: true,
-      product_id: true,     // may be a Product or ProductVariant GID
-      created_at: true,
-      powerbuy_id: true,
-      // NOTE: don't select generated_code (doesn't exist)
-    },
+function durationToEnd(start, duration) {
+  // Accepts things like "7d", "10", "P7D"; fallback 7 days
+  if (!duration) return addDays(start, 7);
+  const raw = String(duration).trim();
+  const matchNum = raw.match(/^(\d+)$/);
+  if (matchNum) return addDays(start, parseInt(matchNum[1], 10));
+  const matchDays = raw.match(/^(\d+)\s*d$/i);
+  if (matchDays) return addDays(start, parseInt(matchDays[1], 10));
+  // crude ISO PnD
+  const matchIso = raw.match(/^P(\d+)D$/i);
+  if (matchIso) return addDays(start, parseInt(matchIso[1], 10));
+  return addDays(start, 7);
+}
+
+function makeCode(prefix, length = 6) {
+  const L = Math.max(1, Math.min(12, Number(length) || 6));
+  let n = "";
+  while (n.length < L) n += Math.floor(Math.random() * 10);
+  return `${String(prefix || "RSLPB").toUpperCase()}${n}`;
+}
+
+function applyTitleTokens(template, {pb, customerEmail}) {
+  const src = String(template ?? "").trim();
+  if (!src) return `PowerBuy - ${customerEmail || ""}`;
+  return src.replace(/\[([^\]]+)\]/g, (_m, keyRaw) => {
+    const key = String(keyRaw || "").trim().toLowerCase();
+    switch (key) {
+      case "short_description":
+        return pb?.short_description ?? "";
+      case "customer_email":
+        return customerEmail ?? "";
+      default:
+        return ""; // unknown tokens drop out
+    }
   });
+}
 
-  if (!reqRow) {
-    return json(
-      { ok: false, error: "Invalid or expired token." },
-      { status: 404 }
-    );
-  }
+// ----- GraphQL -----
 
-  // Build discount input
-  const nowIso = new Date().toISOString();
-  const endsIso = isoPlusDays(nowIso, 7); // 7-day window as discussed
-
-  const { email, product_id: pid, powerbuy_id } = reqRow;
-
-  // Decide how to target items. If it's a variant GID, attach to productVariants; if it's a product GID, attach to products.
-  let itemsInput;
-  if (pid && pid.includes("/ProductVariant/")) {
-    itemsInput = {
-      products: {
-        productVariantsToAdd: [pid],
-      },
-    };
-  } else if (pid && pid.includes("/Product/")) {
-    itemsInput = {
-      products: {
-        productsToAdd: [pid],
-      },
-    };
-  } else {
-    // Fallback: apply to all items (not ideal, but better than failing)
-    itemsInput = { all: true };
-  }
-
-  // Code prefix + random suffix (same style you’ve been using)
-  const codePrefix = "RSLPB25A";
-  const suffix = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
-  const code = `${codePrefix}${suffix}`;
-
-  // Title example: keep your existing pattern
-  const title = `RSL Power Buy (${powerbuy_id ?? "N/A"}) - ${email}`;
-
-  // IMPORTANT: use the older, widely-available shape (no `context`, no `appliesOncePerOrder`)
-  const variables = {
-    basicCodeDiscount: {
-      title,
-      code,
-      startsAt: nowIso,
-      endsAt: endsIso,
-      usageLimit: 12,
-      combinesWith: {
-        orderDiscounts: false,
-        productDiscounts: false,
-        shippingDiscounts: true,
-      },
-      customerSelection: {
-        all: true,
-      },
-      customerGets: {
-        items: itemsInput,
-        value: {
-          discountAmount: {
-            amount: "5",
-            appliesOnEachItem: false,
-          },
-        },
-      },
-    },
-  };
-
-  const mutation = `
-    mutation CreateBasicCode($basicCodeDiscount: DiscountCodeBasicInput!) {
-      discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-        codeDiscountNode {
-          id
-          codeDiscount {
-            ... on DiscountCodeBasic {
-              title
-              startsAt
-              endsAt
-              combinesWith {
-                orderDiscounts
-                productDiscounts
-                shippingDiscounts
-              }
-              codes(first: 1) {
-                edges { node { code } }
-              }
-            }
-          }
-        }
-        userErrors {
-          field
-          message
-          code
+const CREATE_MUTATION = `
+mutation CreateDiscount($basicCodeDiscount: DiscountCodeBasicInput!) {
+  discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+    codeDiscountNode {
+      id
+      codeDiscount {
+        __typename
+        ... on DiscountCodeBasic {
+          title
+          startsAt
+          endsAt
+          combinesWith { orderDiscounts productDiscounts shippingDiscounts }
+          codes(first: 1) { edges { node { code } } }
         }
       }
     }
-  `;
-
-  // Run the Admin GraphQL call using the env-safe helper
-  const resp = await runAdminQuery(request, mutation, variables);
-
-  // Hard errors (GraphQL-level)
-  if (resp.errors?.length) {
-    return json(
-      {
-        ok: false,
-        error: "Shopify GraphQL errors",
-        details: resp.errors,
-      },
-      { status: 500 }
-    );
+    userErrors { field message code }
   }
+}
+`;
 
-  const payload = resp.data?.discountCodeBasicCreate;
-  const userErrors = payload?.userErrors ?? [];
-  if (userErrors.length) {
+// ----- loader (server) -----
+
+export const loader = async ({request}) => {
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token")?.trim();
+  const shop = url.searchParams.get("shop")?.trim();
+
+  if (!token || !shop) {
     return json(
-      {
-        ok: false,
-        error: "Shopify GraphQL userErrors",
-        userErrors,
-      },
+      { ok: false, reason: "Missing token or shop" },
       { status: 400 }
     );
   }
 
-  const nodeId = payload?.codeDiscountNode?.id;
-  const codeFromShopify =
-    payload?.codeDiscountNode?.codeDiscount?.codes?.edges?.[0]?.node?.code;
+  // 1) Lookup request by token
+  const req = await prisma.tbl_powerbuy_requests.findFirst({
+    where: { token },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      product_id: true,
+      powerbuy_id: true,
+      confirmed_at: true,
+    },
+  });
 
-  if (!nodeId || !codeFromShopify) {
+  if (!req) {
+    return json({ ok: false, reason: "Invalid token" }, { status: 400 });
+  }
+  if (req.confirmed_at) {
+    return json({ ok: false, reason: "Already confirmed" }, { status: 400 });
+  }
+
+  // 2) Get config row
+  const pb = await prisma.tbl_powerbuy_config.findUnique({
+    where: { id: req.powerbuy_id },
+    select: {
+      id: true,
+      title: true,
+      discount_prefix: true,
+      discount_type: true,         // 'fixed' | 'percentage'
+      discount_value: true,        // Decimal
+      discount_combines_with: true,
+      duration: true,              // e.g. '7d'
+      number_of_uses: true,        // usage limit for the code
+      powerbuy_variant_ids: true,  // comma-separated variant IDs
+      short_description: true,
+    },
+  });
+
+  if (!pb) {
+    return json({ ok: false, reason: "PowerBuy config not found" }, { status: 400 });
+  }
+
+  // 3) Build discount input
+  const now = new Date();
+  const endsAt = durationToEnd(now, pb.duration);
+  const combines = parseCombinesWith(pb.discount_combines_with);
+  const variantGids = toVariantGids(pb.powerbuy_variant_ids);
+  const codeString = makeCode(pb.discount_prefix, /*length*/ 6);
+
+  // Discount value mapping
+  let valueInput;
+  const val = pb.discount_value ? String(pb.discount_value) : "0";
+  if ((pb.discount_type || "fixed") === "percentage") {
+    valueInput = { discountPercentage: { percentage: val } };
+  } else {
+    // fixed amount; "once per order" achieved by appliesOnEachItem: false
+    valueInput = { discountAmount: { amount: val || "0", appliesOnEachItem: false } };
+  }
+
+  // Title with tokens
+  const title = applyTitleTokens(pb.title, { pb, customerEmail: req.email });
+
+  const basicCodeDiscount = {
+    title,
+    code: codeString,
+    startsAt: now.toISOString(),
+    endsAt: endsAt.toISOString(),
+    usageLimit: pb.number_of_uses ?? 1,
+    appliesOncePerCustomer: true, // "use only once" per customer
+    combinesWith: combines,
+    customerSelection: { all: true }, // avoid BLANK error
+    customerGets: {
+      items: variantGids.length
+        ? { products: { productVariantsToAdd: variantGids } }
+        : { all: true }, // fallback if no variants configured
+      value: valueInput,
+    },
+  };
+
+  // 4) Create discount in Admin GraphQL
+  const gql = await runAdminQuery(shop, CREATE_MUTATION, {
+    basicCodeDiscount,
+  });
+
+  const gData = gql?.data?.discountCodeBasicCreate;
+  const gErrors = gql?.errors;
+  if (gErrors?.length) {
     return json(
-      { ok: false, error: "Shopify did not return a discount node id/code" },
+      { ok: false, reason: "Shopify GraphQL errors", details: gErrors },
+      { status: 500 }
+    );
+  }
+  if (!gData) {
+    return json(
+      { ok: false, reason: "No data from Shopify", raw: gql },
+      { status: 500 }
+    );
+  }
+  if (gData.userErrors?.length) {
+    return json(
+      { ok: false, reason: "Shopify GraphQL userErrors", details: gData.userErrors },
+      { status: 400 }
+    );
+  }
+
+  const nodeId = gData.codeDiscountNode?.id || null;
+  const codeFromShopify =
+    gData.codeDiscountNode?.codeDiscount?.codes?.edges?.[0]?.node?.code || basicCodeDiscount.code;
+
+  if (!nodeId) {
+    return json(
+      { ok: false, reason: "Shopify did not return a discount node id", raw: gData },
       { status: 500 }
     );
   }
 
-  // Mark request as confirmed (don’t try to write non-existent fields)
-  await prisma.tbl_powerbuy_requests.update({
-    where: { id: reqRow.id },
+  // 5) Persist code + link request
+  const codeRow = await prisma.tbl_powerbuy_codes.create({
     data: {
-      confirmed_at: new Date(),
-      // If you later add a place to store the code or node ID, update here.
-      // e.g., code_id: ..., or create tbl_powerbuy_codes & connect it.
+      powerbuy_id: pb.id,
+      discount_code: codeFromShopify,
+      discount_code_gid: nodeId,
+      start_time: now,
+      end_time: endsAt,
+      powerbuy_product_id: pb.powerbuy_product_id ?? null,
     },
+    select: { id: true },
+  });
+
+  await prisma.tbl_powerbuy_requests.update({
+    where: { id: req.id },
+    data: { confirmed_at: new Date(), code_id: codeRow.id },
+  });
+
+  // 6) EMAIL: use your mailer as-is
+  await sendConfirmEmail({
+    powerbuyId: pb.id,
+    to: req.email,
+    discountCode: codeFromShopify,
+    startAt: now,
+    expiresAt: endsAt,
   });
 
   return json({
     ok: true,
-    shop,
-    nodeId,
     code: codeFromShopify,
-    title: payload.codeDiscountNode.codeDiscount.title,
-    startsAt: payload.codeDiscountNode.codeDiscount.startsAt,
-    endsAt: payload.codeDiscountNode.codeDiscount.endsAt,
+    title,
+    startsAt: now.toISOString(),
+    endsAt: endsAt.toISOString(),
+    nodeId,
   });
-}
+};
 
-export default function ConfirmPage() {
+// ----- component (client) -----
+
+export default function PowerBuyConfirm() {
   const data = useLoaderData();
 
   return (
     <Page title="PowerBuy Confirmation">
-      <Card>
-        {!data?.ok ? (
-          <Banner tone="critical" title="Couldn’t confirm">
-            <p>{data?.error || "Unexpected error."}</p>
-            {Array.isArray(data?.details) && (
-              <div style={{ marginTop: 8 }}>
+      {!data?.ok ? (
+        <Banner tone="critical" title="Couldn’t confirm">
+          <p>{data?.reason || "Unknown error"}</p>
+        </Banner>
+      ) : (
+        <Card>
+          <InlineStack align="start" gap="400">
+            <Box>
+              <Text as="h2" variant="headingMd">Success!</Text>
+              <Text as="p">Your discount code is:</Text>
+              <Text as="p" variant="headingLg" tone="success" emphasis="strong">
+                {data.code}
+              </Text>
+              <Box paddingBlockStart="200">
                 <Text as="p" tone="subdued">
-                  See logs for full details.
+                  Valid from {new Date(data.startsAt).toLocaleString()} to{" "}
+                  {new Date(data.endsAt).toLocaleString()}
                 </Text>
-              </div>
-            )}
-            {Array.isArray(data?.userErrors) && data.userErrors.length > 0 && (
-              <div style={{ marginTop: 8 }}>
-                {data.userErrors.map((e, i) => (
-                  <Text as="p" key={i}>
-                    {JSON.stringify(e)}
-                  </Text>
-                ))}
-              </div>
-            )}
-          </Banner>
-        ) : (
-          <Banner tone="success" title="Discount code created">
-            <InlineStack gap="400" align="start">
-              <Text as="p">
-                <strong>Code:</strong> {data.code}
-              </Text>
-              <Text as="p">
-                <strong>Starts:</strong> {new Date(data.startsAt).toLocaleString()}
-              </Text>
-              <Text as="p">
-                <strong>Ends:</strong> {new Date(data.endsAt).toLocaleString()}
-              </Text>
-            </InlineStack>
-          </Banner>
-        )}
-      </Card>
+              </Box>
+            </Box>
+          </InlineStack>
+        </Card>
+      )}
     </Page>
   );
 }
