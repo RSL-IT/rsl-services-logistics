@@ -1,10 +1,25 @@
 // app/shopify-admin.server.js
-// Helpers to use Shopify Admin API (offline) from server routes.
-// Works with @shopify/shopify-app-remix "auth" export in your app.
+// Robust helpers for Shopify Admin API from public/unauthenticated routes.
+//
+// Key features:
+// - Accepts EITHER a shop string or a Request object in all helpers.
+// - Uses your app's exported "auth"/"shopify" object if present.
+// - Falls back to Prisma Session table (offline token) if app session storage isn't available.
+// - GraphQL runs via Shopify client when available, else via fetch + X-Shopify-Access-Token.
+// - Keeps legacy aliases used elsewhere in your app.
 
-import { auth } from "~/shopify.server";
+import * as shopifyModule from "~/shopify.server";
+import { prisma } from "~/db.server";
 
-/** Pull shop from ?shop=… or x-shopify-shop-domain */
+const app =
+  shopifyModule?.auth ??
+  shopifyModule?.shopify ??
+  shopifyModule?.default ??
+  null;
+
+const ADMIN_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
+
+/** Get `shop` from ?shop=… or x-shopify-shop-domain header (Request only). */
 export function requireShopParam(request) {
   const url = new URL(request.url);
   const shop =
@@ -18,65 +33,152 @@ export function requireShopParam(request) {
   return shop;
 }
 
-/** Load an offline session for a given shop (error if missing). */
-export async function getOfflineSession(shop) {
-  // Correct API shape: use auth.api.session.getOfflineId(shop)
-  const offlineId = auth.api.session.getOfflineId(shop);
-  const session = await auth.sessionStorage.loadSession(offlineId);
+/** Type guard for a Request-like object (Remix/undici/node-fetch). */
+function isRequestLike(v) {
+  return (
+    v &&
+    typeof v === "object" &&
+    typeof v.url === "string" &&
+    v.headers &&
+    typeof v.headers.get === "function"
+  );
+}
 
-  if (!session) {
-    // This usually means the app hasn't been installed/authorized offline for this shop yet.
+/** Normalize input to a shop domain string. Accepts shop string OR Request. */
+function resolveShop(shopOrRequest) {
+  if (typeof shopOrRequest === "string") return shopOrRequest;
+  if (isRequestLike(shopOrRequest)) return requireShopParam(shopOrRequest);
+  // Also accept objects like { shop: "example.myshopify.com" }
+  if (
+    shopOrRequest &&
+    typeof shopOrRequest === "object" &&
+    typeof shopOrRequest.shop === "string"
+  ) {
+    return shopOrRequest.shop;
+  }
+  throw new Error(
+    "Invalid shop identifier. Pass a shop string, a Request, or an object with { shop }."
+  );
+}
+
+/** Load an offline session/token for the shop (with fallbacks). */
+export async function getOfflineSession(shopOrRequest) {
+  const shop = resolveShop(shopOrRequest);
+
+  // 1) Preferred: app's session storage (if available)
+  if (app?.sessionStorage) {
+    // Try direct offline id (newer APIs)
+    let session = null;
+    if (app?.api?.session?.getOfflineId) {
+      try {
+        const offlineId = app.api.session.getOfflineId(shop);
+        session = await app.sessionStorage.loadSession(offlineId);
+      } catch {
+        // ignore and fall through
+      }
+    }
+    // Fallback: enumerate sessions by shop and pick an offline one
+    if (!session && app.sessionStorage.findSessionsByShop) {
+      try {
+        const list = await app.sessionStorage.findSessionsByShop(shop);
+        session = (list || []).find((s) => !s.isOnline) || null;
+      } catch {
+        // ignore and fall through
+      }
+    }
+    if (session?.accessToken) {
+      return { shop, accessToken: session.accessToken, raw: session };
+    }
+  }
+
+  // 2) Prisma Session table fallback (your schema defines model Session)
+  const prismaSession = await prisma.session.findFirst({
+    where: { shop, isOnline: false },
+    orderBy: [{ expires: "desc" }],
+  });
+
+  if (prismaSession?.accessToken) {
+    return { shop, accessToken: prismaSession.accessToken, raw: prismaSession };
+  }
+
+  throw new Error(
+    `No offline session found for ${shop}. Install/authorize the app for this shop first.`
+  );
+}
+
+/** Return Admin clients when available via app API (optional). */
+export async function getAdminClients(shopOrRequest) {
+  const session = await getOfflineSession(shopOrRequest);
+
+  // If Shopify clients exist, construct them from the session we found.
+  if (app?.api?.clients?.Graphql && app?.api?.clients?.Rest) {
+    const baseSession = session.raw ?? { shop: session.shop, accessToken: session.accessToken };
+    const adminGraphql = new app.api.clients.Graphql({ session: baseSession });
+    const adminRest = new app.api.clients.Rest({ session: baseSession });
+    return { session, adminGraphql, adminRest };
+  }
+
+  // Otherwise return a minimal object; runAdminQuery will use fetch fallback.
+  return { session, adminGraphql: null, adminRest: null };
+}
+
+/**
+ * Run an Admin GraphQL operation.
+ * Accepts shop string OR Request; returns { data, errors }.
+ */
+export async function runAdminQuery(shopOrRequest, query, variables = {}) {
+  const { session, adminGraphql } = await getAdminClients(shopOrRequest);
+
+  // Prefer Shopify GraphQL client if present
+  if (adminGraphql) {
+    if (typeof adminGraphql.request === "function") {
+      const resp = await adminGraphql.request(query, { variables });
+      return {
+        data: resp?.data ?? resp?.body?.data ?? null,
+        errors: resp?.errors ?? resp?.body?.errors ?? null,
+      };
+    } else {
+      // Older API shape
+      const legacy = await adminGraphql.query({ data: { query, variables } });
+      return {
+        data: legacy?.data ?? legacy?.body?.data ?? null,
+        errors: legacy?.errors ?? legacy?.body?.errors ?? null,
+      };
+    }
+  }
+
+  // Fallback: direct fetch with offline token
+  const endpoint = `https://${session.shop}/admin/api/${ADMIN_API_VERSION}/graphql.json`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "X-Shopify-Access-Token": session.accessToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const json = await res.json().catch(() => ({}));
+  return { data: json?.data ?? null, errors: json?.errors ?? null };
+}
+
+/** ---- Legacy aliases kept for other routes ---- */
+export async function adminGraphQLClientForShop(shopOrRequest) {
+  const { adminGraphql } = await getAdminClients(shopOrRequest);
+  if (!adminGraphql) {
     throw new Error(
-      `No offline session found for ${shop}. Install/authorize the app for this shop first.`
+      "GraphQL client not available in this environment; use runAdminQuery(shopOrRequest, query, variables) instead."
     );
   }
-  return session;
-}
-
-/** Get ready-to-use Admin API clients (GraphQL + REST) for a shop (offline). */
-export async function getAdminClients(shop) {
-  const session = await getOfflineSession(shop);
-
-  // Clients come from the same "auth.api.clients" namespace
-  const adminGraphql = new auth.api.clients.Graphql({ session });
-  const adminRest = new auth.api.clients.Rest({ session });
-
-  return { session, adminGraphql, adminRest };
-}
-
-/** Convenience: run a GraphQL query with variables; throws on GraphQL errors. */
-export async function runAdminQuery(shop, query, variables = {}) {
-  const { adminGraphql } = await getAdminClients(shop);
-
-  // GraphQL client in @shopify/shopify-api v11 exposes .request(query, { variables })
-  let result;
-  if (typeof adminGraphql.request === "function") {
-    result = await adminGraphql.request(query, { variables });
-  } else {
-    // Older shape fallback
-    result = await adminGraphql.query({ data: { query, variables } });
-  }
-
-  // Normalize error handling
-  const errors = result?.errors || result?.body?.errors;
-  if (errors) {
-    throw new Error(
-      `Admin GraphQL error: ${JSON.stringify(errors, null, 2)}`
-    );
-  }
-  return result?.data || result?.body?.data || result;
-}
-
-/** ---- Aliases kept for older imports elsewhere in your app ---- */
-
-/** Alias requested earlier by other routes */
-export async function adminGraphQLClientForShop(shop) {
-  const { adminGraphql } = await getAdminClients(shop);
   return adminGraphql;
 }
 
-/** If you need the REST client directly */
-export async function adminRestClientForShop(shop) {
-  const { adminRest } = await getAdminClients(shop);
+export async function adminRestClientForShop(shopOrRequest) {
+  const { adminRest } = await getAdminClients(shopOrRequest);
+  if (!adminRest) {
+    throw new Error(
+      "REST client not available in this environment; use fetch with X-Shopify-Access-Token instead."
+    );
+  }
   return adminRest;
 }
