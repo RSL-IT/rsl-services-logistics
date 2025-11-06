@@ -1,11 +1,10 @@
 app = 'rsl-services-app'
 primary_region = 'ord'
 
-# No build config needed here; Dockerfile handles it
 [build]
+# Dockerfile handles the build
 
 [env]
-# Keep runtime-only env here; secrets go in `fly secrets`
 PORT = '3000'
 HOST = '0.0.0.0'
 NODE_ENV = "production"
@@ -13,7 +12,6 @@ SHOPIFY_APP_URL = "https://rsl-services-app.fly.dev"
 SHOPIFY_AUTH_CALLBACK_PATH = "/auth/callback"
 
 [processes]
-# Call your start script directly so env/secrets reach the app
 app = 'npm run docker-start'
 
 [[mounts]]
@@ -26,18 +24,16 @@ auto_extend_size_limit = '10GB'
 [http_service]
 internal_port = 3000
 force_https = true
-auto_stop_machines = 'stop'
+auto_stop_machines = true        # ← changed from 'stop' to true
 auto_start_machines = true
 min_machines_running = 1
 processes = ['app']
 
-# Optional but helpful: request-based concurrency limits
 [http_service.concurrency]
 type = "requests"
 soft_limit = 20
 hard_limit = 25
 
-# Actively check the /health route over HTTP
 [[http_service.http_checks]]
 interval = '10s'
 timeout = '2s'
@@ -52,4 +48,5 @@ cpu_kind = 'shared'
 cpus = 1
 
 [deploy]
-release_command = "npx prisma migrate deploy"
+# If your image already runs `prisma generate` during build, you can drop the second command.
+release_command = "npx prisma migrate deploy && npx prisma generate"

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@flydotio/litestream": "^1.0.1",
+    "@js-temporal/polyfill": "^0.5.1",
     "@prisma/client": "^6.18.0",
     "@prisma/extension-accelerate": "^2.0.2",
     "@remix-run/dev": "^2.16.1",

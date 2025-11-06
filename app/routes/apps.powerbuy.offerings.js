@@ -2,6 +2,7 @@
 // -> GET /apps/powerbuy/offerings  (JSON)
 import { json } from "@remix-run/node";
 import { prisma } from "../db.server.js"; // one level up from routes/
+import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 
 /** Ensure a Shopify GID from a numeric id or an existing gid string */
 function ensureGid(resource, value) {
@@ -28,6 +29,7 @@ function splitIds(list) {
 
 export async function loader({ request }) {
   // Preflight support
+  await verifyProxyIfPresent(request);
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
 
   const now = new Date();

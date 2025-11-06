@@ -2,6 +2,7 @@
 import { json } from "@remix-run/node";
 import { prisma } from "~/db.server";
 import { sendRequestEmail } from "~/services/mailer.server";
+import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 
 // ---------- small helpers ----------
 
@@ -22,6 +23,7 @@ async function readBody(request) {
   for (const [k, v] of fd.entries()) {
     obj[k] = typeof v === "string" ? v : String(v);
   }
+
   return obj;
 }
 
@@ -92,6 +94,7 @@ export const loader = async () => replyUsePost;
 
 // ---------- action (POST) ----------
 export const action = async ({ request }) => {
+  await verifyProxyIfPresent(request);
   const started = Date.now();
   const url = new URL(request.url);
 
@@ -116,11 +119,10 @@ export const action = async ({ request }) => {
     const email = (body.email || "").trim();
     const product_id = (body.product_id || "").trim();
 
-    if (!name || !email || !product_id) {
+    if (!name || !email) {
       const missing = [
         !name && "name",
-        !email && "email",
-        !product_id && "product_id",
+        !email && "email"
       ]
         .filter(Boolean)
         .join(", ");

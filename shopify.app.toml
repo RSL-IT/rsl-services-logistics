@@ -1,6 +1,8 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "be8e8039e18f100d31437e7c4dcfe1b0"
+# Original client_id for rsldev: "be8e8039e18f100d31437e7c4dcfe1b0"
+client_id="15a3f2c79fdfe2fce41943e259188754"
+
 name = "RSL Services"
 application_url = "https://rsl-services-app.fly.dev"
 embedded = true
