@@ -4,6 +4,8 @@ import { useLoaderData } from "@remix-run/react";
 import { Page, Card, Text, Banner, InlineStack, Box } from "@shopify/polaris";
 import { prisma } from "~/db.server";
 import { runAdminQuery } from "~/shopify-admin.server";
+import { shopTimeZone } from "~/shopify-admin.server";
+import { makeAddDurationUTCForShop } from "~/utils/duration-parser.server";
 import { sendConfirmEmail } from "~/services/mailer.server";
 import { replaceTokens, TOKEN_REGISTRY } from "~/utils/tokens.server";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
@@ -91,6 +93,7 @@ mutation CreateDiscount($basicCodeDiscount: DiscountCodeBasicInput!) {
 // -----------------------------
 export const loader = async ({ request }) => {
   await verifyProxyIfPresent(request);
+  const tz = await shopTimeZone(request); // e.g., "America/Los_Angeles"
   const url = new URL(request.url);
   const token = url.searchParams.get("token")?.trim();
   const shop = url.searchParams.get("shop")?.trim();
@@ -137,8 +140,13 @@ export const loader = async ({ request }) => {
   if (!pb) return json({ ok: false, reason: "PowerBuy config not found" }, { status: 400 });
 
   // 3) Build discount payload
+  const addDurationUTC = makeAddDurationUTCForShop(tz);
+  //const endsAt = durationToEnd(now, pb.duration);
+  const endsAtIso = addDurationUTC(pb.duration);   // ISO string in UTC
+  const endsAtDate = new Date(endsAtIso);
+
   const now = new Date();
-  const endsAt = durationToEnd(now, pb.duration);
+  const endsAt = endsAtIso;
   const combines = parseCombinesWith(pb.discount_combines_with);
   const variantGids = toVariantGids(pb.powerbuy_variant_ids);
   const codeString = makeCode(pb.discount_prefix, /*length*/ 6);
@@ -157,7 +165,7 @@ export const loader = async ({ request }) => {
     title,
     code: codeString,
     startsAt: now.toISOString(),
-    endsAt: endsAt.toISOString(),
+    endsAt: endsAtIso,
     usageLimit: pb.number_of_uses ?? 1,
     appliesOncePerCustomer: true, // "use only once" per customer
     combinesWith: combines,
@@ -210,7 +218,7 @@ export const loader = async ({ request }) => {
       discount_code: codeFromShopify,
       discount_code_gid: nodeId,
       start_time: now,
-      end_time: endsAt,
+      end_time: endsAtDate,
       powerbuy_product_id: pb.powerbuy_product_id ?? null,
     },
     select: { id: true },
@@ -227,7 +235,7 @@ export const loader = async ({ request }) => {
     to: req.email,
     discountCode: codeFromShopify,
     startAt: now,
-    expiresAt: endsAt,
+    expiresAt: endsAtDate,
   });
 
   return json({
@@ -235,7 +243,7 @@ export const loader = async ({ request }) => {
     code: codeFromShopify,
     title,
     startsAt: now.toISOString(),
-    endsAt: endsAt.toISOString(),
+    endsAt: endsAtIso,
     nodeId,
   });
 };

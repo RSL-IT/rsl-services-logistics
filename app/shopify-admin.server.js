@@ -162,6 +162,10 @@ export async function runAdminQuery(shopOrRequest, query, variables = {}) {
   return { data: json?.data ?? null, errors: json?.errors ?? null };
 }
 
+/** One-liner to get the shop's IANA timezone (e.g., "America/Los_Angeles"). */
+export const shopTimeZone = (shopOrRequest) =>
+  runAdminQuery(shopOrRequest, `query { shop { ianaTimezone } }`).then(r => r.data?.shop?.ianaTimezone);
+
 /** ---- Legacy aliases kept for other routes ---- */
 export async function adminGraphQLClientForShop(shopOrRequest) {
   const { adminGraphql } = await getAdminClients(shopOrRequest);
