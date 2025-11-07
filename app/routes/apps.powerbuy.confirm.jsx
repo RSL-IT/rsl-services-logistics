@@ -257,9 +257,19 @@ export default function PowerBuyConfirm() {
   return (
     <Page title="PowerBuy Confirmation">
       {!data?.ok ? (
+/*
         <Banner tone="critical" title="Couldn’t confirm">
           <p>{data?.reason || "Unknown error"}</p>
         </Banner>
+ */
+        <Card>
+          <InlineStack align="start" gap="400">
+            <Box>
+              <Text as="h2" variant="headingMd">You can only use the Powerbuy link once!</Text>
+              <Text as="p">Check your email for your code.</Text>
+            </Box>
+          </InlineStack>
+        </Card>
       ) : (
         <Card>
           <InlineStack align="start" gap="400">
