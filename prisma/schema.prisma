@@ -224,8 +224,10 @@ model tbl_powerbuy_config {
   long_description           String?           @db.Text
   request_email_subject      String?           @db.Text
   request_email_content      String?           @db.Text
+  request_email_template_url String?           @db.Text
   confirm_email_subject      String?           @db.Text
   confirm_email_content      String?           @db.Text
+  confirm_email_template_url String?           @db.Text
   rsl_contact_email_address  String?           @db.Text
   discount_prefix            String?           @db.Text
   discount_combines_with     String?           @db.Text
