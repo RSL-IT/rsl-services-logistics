@@ -10,7 +10,10 @@ var HAS_TEMPORAL = !!(T && T.TimeZone && typeof T.TimeZone.from === "function");
 // -------- Optional sanity print --------
 var SANITY_PRINT = true;
 if (SANITY_PRINT) {
-  var env = (typeof process !== "undefined" && process.env && process.env.NODE_ENV) ? process.env.NODE_ENV : "unknown";
+  var env =
+    typeof process !== "undefined" && process.env && process.env.NODE_ENV
+      ? process.env.NODE_ENV
+      : "unknown";
   console.log("[duration-parser] Temporal OK?", HAS_TEMPORAL, "| Node env:", env);
 }
 // --------------------------------------
@@ -24,7 +27,7 @@ export function makeAddDurationUTCForShop(shopTimeZone) {
   if (!shopTimeZone || typeof shopTimeZone !== "string") {
     throw new Error("shopTimeZone (IANA string) is required");
   }
-
+  //console.log("[duration-parser] Temporal timezone: ", shopTimeZone);
   if (HAS_TEMPORAL) {
     // Validate zone immediately (throws if invalid).
     T.TimeZone.from(shopTimeZone);
@@ -32,7 +35,7 @@ export function makeAddDurationUTCForShop(shopTimeZone) {
     return function addDurationUTC(duration, start) {
       var zdtStart = resolveStartInShopZone_Temporal(start, shopTimeZone); // ZonedDateTime
       var dur = parseDurationToBag(duration);                              // {days,hours,minutes,seconds,milliseconds}
-      var zdtEnd = zdtStart.add(dur);                                      // DST-safe arithmetic
+      var zdtEnd = zdtStart.add(dur);
       return zdtEnd.toInstant().toString();                                // UTC ISO string
     };
   }
@@ -54,7 +57,9 @@ export function makeAddDurationUTCForShop(shopTimeZone) {
       (dur.milliseconds || 0);
 
     var end = new Date(startDate.getTime() + ms);
-    return new Date(end.getTime() - end.getTimezoneOffset() * 60000).toISOString().replace(".000Z", "Z");
+    return new Date(end.getTime() - end.getTimezoneOffset() * 60000)
+      .toISOString()
+      .replace(".000Z", "Z");
   };
 }
 
@@ -76,16 +81,29 @@ function resolveStartInShopZone_Temporal(start, tz) {
 
   if (typeof start === "string") {
     var s = normalizeStartString(start);
-    var hasOffset = /[zZ]|[+-]\d{2}:\d{2}$/.test(s);
-    if (hasOffset) {
-      // Absolute string with offset/zone; then display in shop zone (same instant).
+
+    // Does the string already include a bracketed time zone?
+    // e.g. "2025-11-14T10:00-05:00[America/New_York]"
+    var hasBracketZone = /\[[A-Za-z0-9_\/+-]+\]$/.test(s);
+
+    // Does it have only an offset / Z (e.g. "...Z" or "...+05:00")?
+    var hasOffsetOrZ = /[zZ]|[+-]\d{2}:\d{2}$/.test(s);
+
+    if (hasBracketZone) {
+      // Full ZonedDateTime string; just coerce to the shop zone
       return T.ZonedDateTime.from(s).withTimeZone(timeZone);
-    } else {
-      // Interpret as local wall time in shop zone.
-      var cleaned = s.indexOf("T") >= 0 ? s : s.replace(" ", "T");
-      var pdt = T.PlainDateTime.from(cleaned);
-      return timeZone.getZonedDateTimeFor(pdt);
     }
+
+    if (hasOffsetOrZ) {
+      // Instant-like string (e.g. "2025-11-14T22:09:48Z");
+      // interpret as an Instant, then project into the shop zone.
+      return T.Instant.from(s).toZonedDateTimeISO(timeZone);
+    }
+
+    // No offset/zone: interpret as local wall time in shop zone.
+    var cleaned = s.indexOf("T") >= 0 ? s : s.replace(" ", "T");
+    var pdt = T.PlainDateTime.from(cleaned);
+    return timeZone.getZonedDateTimeFor(pdt);
   }
 
   throw new Error("Unsupported start value");
@@ -147,17 +165,19 @@ function parseDurationToBag(input) {
 
   // Accepts things like:
   // "4 days, 10 hours", "3 days 2 hours and 15 minutes", "five and a half minutes", "10 seconds"
-  var it = s.matchAll(/([a-z0-9.\s-]+?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/g);
+  var it = s.matchAll(
+    /([a-z0-9.\s-]+?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/g
+  );
   var any = false;
 
   for (var mIt = it.next(); !mIt.done; mIt = it.next()) {
     any = true;
     var match = mIt.value;
     var rawVal = match[1].trim().replace(/-+/g, " "); // "three and a half"
-    var unitRaw = match[2].toLowerCase();             // e.g., "days"
-    var unit = normalizeUnit(unitRaw);                // -> "day" | "hour" | "minute" | "second" | "d" | "h" | "m" | "s" | "hr" | "hrs" | "min" | "mins" | "sec" | "secs"
-    var value = parseValueString(rawVal);
+    var unitRaw = match[2].toLowerCase(); // e.g., "days"
+    var unit = normalizeUnit(unitRaw); // -> "day" | "hour" | "minute" | "second" | ...
 
+    var value = parseValueString(rawVal);
     applyUnit(acc, unit, value);
   }
 
@@ -257,13 +277,40 @@ function parseValueString(txt) {
 
 function wordsToNumber(words) {
   var small = {
-    zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9,
-    ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16,
-    seventeen:17, eighteen:18, nineteen:19
+    zero: 0,
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    sixteen: 16,
+    seventeen: 17,
+    eighteen: 18,
+    nineteen: 19,
   };
-  var tens = { twenty:20, thirty:30, forty:40, fifty:50, sixty:60, seventy:70, eighty:80, ninety:90 };
+  var tens = {
+    twenty: 20,
+    thirty: 30,
+    forty: 40,
+    fifty: 50,
+    sixty: 60,
+    seventy: 70,
+    eighty: 80,
+    ninety: 90,
+  };
 
-  var total = 0, current = 0;
+  var total = 0,
+    current = 0;
   var tokens = words.replace(/-/g, " ").split(/\s+/).filter(Boolean);
   for (var i = 0; i < tokens.length; i++) {
     var tok = tokens[i].toLowerCase();

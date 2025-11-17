@@ -49,6 +49,14 @@ async function createSmtpTransportFromDb(pb) {
     auth: { user, pass },
   });
 }
+function shopifyHandlize(str) {
+  return str
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents
+    .toLowerCase()
+    .replace(/['"()\[\]]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
 function resolveFromHeader(pb) {
   // Prefer explicit header; fall back to contact email; then a safe default
@@ -195,7 +203,7 @@ async function getTemplateStringFromUrl(url) {
  * DB plain text is preserved with line breaks.
  * Tokens:
  *  - HTML:    {{name}} (escaped), {{confirmUrl}} (NOT escaped)
- *  - PLAIN:   {{name}}, {{confirmUrl}} (both inserted literally into text)
+ *  - PLAIN:   {{name}}, {{confirmUrl}} {{shortDescription }} (all inserted literally into text)
  */
 export async function sendRequestEmail({ powerbuyId, to, name, confirmUrl }) {
   const pb = await getPowerbuy(powerbuyId);
@@ -203,6 +211,7 @@ export async function sendRequestEmail({ powerbuyId, to, name, confirmUrl }) {
   const from = resolveFromHeader(pb);
   const subject = pb.request_email_subject ?? "Confirm your PowerBuy request";
   const recipient = resolveRecipient(pb, to);
+  const shortDescription = pb.short_description;
 
   let html = null;
   let text = null;
@@ -218,7 +227,7 @@ export async function sendRequestEmail({ powerbuyId, to, name, confirmUrl }) {
   }
 
   if (tpl) {
-    const tokens = { name: name ?? "", confirmUrl: confirmUrl ?? "" };
+    const tokens = { name: name ?? "", confirmUrl: confirmUrl ?? "", shortDescription: shortDescription ?? "" };
 
     if (looksLikeHtml(tpl)) {
       // HTML template (URL or DB): replace tokens then force \n → <br>
@@ -268,6 +277,7 @@ export async function sendConfirmEmail({
                                          startAt,
                                          startsAt,
                                          expiresAt,
+                                         shortDescription,
                                        }) {
   const pb = await getPowerbuy(powerbuyId);
   const transport = await createSmtpTransportFromDb(pb);
@@ -298,6 +308,7 @@ export async function sendConfirmEmail({
       startAt: String(startStr ?? ""),
       startsAt: String(startStr ?? ""),
       expiresAt: String(expStr ?? ""),
+      shortDescription: String(shortDescription ?? ""),
     };
 
     if (looksLikeHtml(tpl)) {
@@ -307,6 +318,8 @@ export async function sendConfirmEmail({
         startAt: escapeHtml(tokens.startAt),
         startsAt: escapeHtml(tokens.startsAt),
         expiresAt: escapeHtml(tokens.expiresAt),
+        shortDescription: String(tokens.shortDescription),
+        shortDescriptionURL: String(shopifyHandlize(tokens.shortDescription)),
       });
       html = replaced.replace(/\r?\n/g, "<br>\n");
       const textRaw = replaceTokensPlain(tpl, tokens);

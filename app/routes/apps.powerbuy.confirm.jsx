@@ -78,6 +78,7 @@ export async function loader({ request }) {
   const tsNow = new Date(); // define once
 
   const tz = await shopTimeZone(request); // e.g., "America/Los_Angeles"
+  console.log("confirm-loader: tz: ", tz);
   const url = new URL(request.url);
   const token = url.searchParams.get("token")?.trim();
   const shop = url.searchParams.get("shop")?.trim();
@@ -162,11 +163,11 @@ export async function loader({ request }) {
       id: true,
       title: true,
       discount_prefix: true,
-      discount_type: true,        // 'fixed' | 'percentage'
-      discount_value: true,       // Decimal
+      discount_type: true, // 'fixed' | 'percentage'
+      discount_value: true, // Decimal
       discount_combines_with: true,
-      duration: true,             // e.g. '7d', '1 days', 'P7D'
-      number_of_uses: true,       // usage limit
+      duration: true, // e.g. '7d', '1 days', 'P7D'
+      number_of_uses: true, // usage limit
       powerbuy_variant_ids: true, // comma-separated variant IDs
       short_description: true,
       powerbuy_product_id: true,
@@ -178,7 +179,7 @@ export async function loader({ request }) {
 
   // 3) Build discount payload
   const startsAtDate = tsNow.toISOString();
-
+  console.log("DEBUG startsAtDate=", startsAtDate);
   // Duration handling (compute end in shop TZ, return ISO)
   const addDurationUTC = makeAddDurationUTCForShop(tz);
   const durationStr = (pb.duration || "2d").trim();
@@ -187,7 +188,7 @@ export async function loader({ request }) {
 
   const combines = parseCombinesWith(pb.discount_combines_with);
   const variantGids = toVariantGids(pb.powerbuy_variant_ids);
-  const codeString = makeCode(pb.discount_prefix, (pb.code_length-pb.discount_prefix.length));
+  const codeString = makeCode(pb.discount_prefix, pb.code_length - pb.discount_prefix.length);
 
   const rawVal = pb.discount_value ? String(pb.discount_value) : "0";
   const valueInput =
@@ -264,13 +265,28 @@ export async function loader({ request }) {
     data: { confirmed_at: new Date(), code_id: codeRow.id },
   });
 
-  // 6) Mail
+  // 6) Mail — format dates in the *shop* timezone for display
+  const emailDateFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
+  const startsAtDisplay = emailDateFormatter.format(new Date(startsAtDate));
+  const expiresAtDisplay = emailDateFormatter.format(endsAtDate);
+
   await sendConfirmEmail({
     powerbuyId: pb.id,
     to: req.email,
     discountCode: codeFromShopify,
-    startsAt: startsAtDate,
-    expiresAt: endsAtDate,
+    // These are now *already formatted* in the shop's timezone
+    startsAt: startsAtDisplay,
+    expiresAt: expiresAtDisplay,
+    shortDescription: pb.short_description,
   });
 
   return json({
@@ -339,111 +355,18 @@ export default function PowerBuyConfirm() {
   const ends = data?.endsAt ? new Date(data.endsAt) : null;
   const startsText = starts ? starts.toLocaleString() : "";
   const endsText = ends ? ends.toLocaleString() : "";
+  const shortDescription = data?.short_description ? " " + data.short_description : "";
 
   return (
     <main style={wrapper}>
-      <h1 style={h1}>RSL PowerBuy Confirmation – Success!</h1>
-      {data.alreadyConfirmed && (
-        <div style={notice}>
-          You’ve already confirmed this Power Buy. We’re showing your original code again
-          for convenience—no new email was sent.
-        </div>
-      )}
-      <h2 style={sectionH}>Your shareable Power Buy code</h2>
-      <div style={codeBox}>{data.code}</div>
-      <div style={muted}>(use this at checkout)</div>
-
-      <h2 style={sectionH}>Your Power Buy is valid from:</h2>
-      <p>
-        <strong>{startsText} to {endsText}</strong>
-      </p>
-      {!data.alreadyConfirmed && (
-        <p>(We've also sent this code to your email address for safe keeping.)</p>
-      )}
+      <h1 style={h1}>RSL PowerBuy Validation – Success!</h1>
       <p>&nbsp;</p>
-      <h2 style={sectionH}>Start Your Power Buy</h2>
-      <ol>
-        <li style={bullet}>
-          <strong>Terms & Conditions:</strong> Be sure to read the Power Buy Terms & Conditions below.
-        </li>
-        <li style={bullet}>
-          <strong>Share your code:</strong> Invite friends, family, or fellow audio
-          enthusiasts to join your Power Buy group! Share this code on your favorite
-          forums and social media!
-        </li>
-        <li style={bullet}>
-          <strong>Use your code at checkout:</strong> Enter the code at checkout for as
-          many Speedwoofers as you’d like!
-        </li>
-        <li style={bullet}>
-          <strong>Redeem your savings:</strong> Power Buy savings will be provided in the
-          form of a refund to the original payment method after all group member orders
-          ship!
-        </li>
-      </ol>
+      <h2 style={sectionH}>Your email address has been validated.</h2>
       <p>
-        <strong>Note</strong>: All Power Buy sales are final to unlock these once-a-year prices. RSL’s trial
-        period does not apply.
+        You will shortly receive an email with your instructions, your PowerBuy code, and the link
+        you’ll use to purchase your Speedwoofer{shortDescription}(s).
       </p>
-      <h2 style={sectionH}>Terms and Conditions</h2>
-      <ul>
-        <li style={bullet}>
-          <strong>To provide these specialized prices, Power Buy purchases are final sale, and not
-            eligible for return.</strong>
-        </li>
-        <li style={bullet}>
-          Power Buy credits will be issued in the form of a refund within 3–5 business
-          days after all orders within the Power Buy are fulfilled.
-        </li>
-        <li style={bullet}>
-          To qualify for credits, a minimum quantity of the same model must be purchased
-          using the unique Power Buy code within the 24 hour window.
-        </li>
-        <li style={bullet}>Minimum Purchase requirements are as follows:
-          <ul>
-            <li style={bullet}>Minimum 4 Speedwoofer 12S’s - Receive $136 credit per unit ($749 each)</li>
-            <li style={bullet}>Minimum 4 Speedwoofer 10S MKII’s - Receive $70 credit per unit ($429 each)</li>
-            <li style={bullet}>Minimum 4 Speedwoofer 10E’s - Receive $20 credit per unit ($319 each)</li>
-          </ul>
-        </li>
-        <li style={bullet}>
-          If 8+ units are purchased within the same Power Buy group, additional bonus
-          credit applies!
-          <ul>
-            <li style={bullet}>12S quantity 8-12: additional $50 credit per unit ($699 each)</li>
-            <li style={bullet}>10S MKII quantity 8-12: additional $30 credit per unit ($399 each)</li>
-            <li style={bullet}>10E quantity 8-12: additional $30 credit per unit ($289 each)</li>
-          </ul>
-        </li>
-        <li style={bullet}>
-          Power Buy codes apply to up to 12 users, one time use per user. No limit to the
-          number of units per user.
-        </li>
-        <li style={bullet}>
-          Each Power Buy code is specific to the Speedwoofer model chosen by the
-          initiator.  It does not apply to other Speedwoofer models.
-        </li>
-        <li style={bullet}>
-          Order cancellations must be submitted prior to shipping and are subject to a
-          3.5% fee; cancellations may jeopardize eligibility of other members.
-        </li>
-        <li style={bullet}>
-          All Power Buy Speedwoofers are factory new with RSL’s full warranty; not
-          applicable to open-box.
-        </li>
-        <li style={bullet}>Free US shipping (contiguous 48 states).</li>
-        <li style={bullet}>Highly discounted shipping is available for customers outside of the US.</li>
-        <li style={bullet}>
-          We reserve the right to change/modify terms at any time. Valid while supplies
-          last.
-        </li>
-        <li style={bullet}>
-          This Power Buy event is a limited allocation of Speedwoofers and is valid while supplies last.
-        </li>
-        <li style={bullet}>
-          Power Buy promotion does not combine with any other savings or discounts.
-        </li>
-      </ul>
+      <p>(You may now close this browser tab/window.) </p>
     </main>
   );
 }
