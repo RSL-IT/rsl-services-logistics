@@ -1,9 +1,14 @@
 // app/routes/apps.powerbuy.codes.jsx
 // Lists PowerBuy discount codes via app proxy, using Shopify's `discountNodes`.
-// Behavior controlled by ?status=… query param:
-//   - status=all      → all matching codes (any status)
-//   - status=inactive → only non-ACTIVE codes
-//   - default         → only ACTIVE codes in current time window
+//
+// All filtering is server-side, controlled by query params:
+//   - q:        free-text search (partial match on code + title)
+//   - active:   "1" (show active) or omitted (hide active)
+//   - inactive: "1" (show inactive) or omitted (hide inactive)
+//   - sort:     "code" | "title" | "status" | "slots" | "expires"
+//   - dir:      "asc" | "desc"
+//
+// Default behavior if no status params are present: show both Active and Inactive.
 
 import { json } from "@remix-run/node";
 import { useLoaderData } from "@remix-run/react";
@@ -36,6 +41,28 @@ function formatExpires(iso) {
   });
 }
 
+function getSortIcon(column, sortKey, sortDir) {
+  if (sortKey !== column) return "⇅"; // neutral
+  return sortDir === "asc" ? "▲" : "▼";
+}
+
+function buildSortHref(column, currentSortKey, currentSortDir, opts) {
+  const { search, showActive, showInactive } = opts || {};
+  const params = new URLSearchParams();
+
+  if (search) params.set("q", search);
+  if (showActive) params.set("active", "1");
+  if (showInactive) params.set("inactive", "1");
+
+  const nextDir =
+    currentSortKey === column && currentSortDir === "asc" ? "desc" : "asc";
+
+  params.set("sort", column);
+  params.set("dir", nextDir);
+
+  return "?" + params.toString();
+}
+
 // -----------------------------
 // Loader (server-only)
 // -----------------------------
@@ -50,11 +77,38 @@ export async function loader({ request }) {
     process.env.SHOPIFY_SHOP_DOMAIN ||
     "rsldev.myshopify.com";
 
-  const statusFilterRaw = url.searchParams.get("status");
-  const statusFilter = statusFilterRaw
-    ? statusFilterRaw.toLowerCase()
-    : null; // "all" | "inactive" | null
-  console.log("[PB codes] statusFilter:", statusFilter);
+  const search = (url.searchParams.get("q") || "").trim();
+
+  const hasStatusParams =
+    url.searchParams.has("active") || url.searchParams.has("inactive");
+
+  let showActive;
+  let showInactive;
+
+  if (!hasStatusParams) {
+    // Default: both checked (all statuses)
+    showActive = true;
+    showInactive = true;
+  } else {
+    showActive = url.searchParams.get("active") === "1";
+    showInactive = url.searchParams.get("inactive") === "1";
+
+    // If user somehow unchecks both, fall back to both true
+    if (!showActive && !showInactive) {
+      showActive = true;
+      showInactive = true;
+    }
+  }
+
+  const sortKeyRaw = (url.searchParams.get("sort") || "expires").toLowerCase();
+  const sortKey = ["code", "title", "status", "slots", "expires"].includes(
+    sortKeyRaw
+  )
+    ? sortKeyRaw
+    : "expires";
+
+  const sortDirRaw = (url.searchParams.get("dir") || "asc").toLowerCase();
+  const sortDir = sortDirRaw === "desc" ? "desc" : "asc";
 
   // 1) Load PowerBuy configs (prefixes + purchase URLs + titles)
   const configs = await prisma.tbl_powerbuy_config.findMany({
@@ -73,7 +127,16 @@ export async function loader({ request }) {
 
   if (!prefixes.length) {
     console.log("[PB codes] No tbl_powerbuy_config rows with discount_prefix.");
-    return json({ shop, discounts: [], statusFilter });
+    return json({
+      shop,
+      rows: [],
+      totalCount: 0,
+      search,
+      showActive,
+      showInactive,
+      sortKey,
+      sortDir,
+    });
   }
 
   const configByPrefix = new Map();
@@ -83,41 +146,32 @@ export async function loader({ request }) {
     configByPrefix.set(p, cfg);
   }
 
-  // 2) Build title fragment from the FIRST config with a non-empty title
-  let titleFragment = null;
+  // 2) Build title fragments from EACH config title (up to and including '(')
+  const titleFragments = [];
   for (const cfg of configs) {
     const fullTitle = (cfg.title || "").trim();
     if (!fullTitle) continue;
     const idx = fullTitle.indexOf("(");
-    if (idx !== -1) {
-      titleFragment = fullTitle.slice(0, idx + 1).trim(); // include "("
-    } else {
-      titleFragment = fullTitle;
+    const frag =
+      idx !== -1 ? fullTitle.slice(0, idx + 1).trim() : fullTitle;
+    if (!frag) continue;
+    if (!titleFragments.includes(frag)) {
+      titleFragments.push(frag);
     }
-    if (titleFragment) break;
   }
 
-  if (!titleFragment) {
+  if (!titleFragments.length) {
     // Fallback if no title is set in configs
-    titleFragment = "RSL Power Buy";
+    titleFragments.push("RSL Power Buy");
   }
 
-  // Build search query:
-  // - default: status:active AND title:<fragment>*
-  // - status=all or inactive: only title:<fragment>* (we filter status in JS)
-  let SEARCH_QUERY;
-  if (statusFilter === "all" || statusFilter === "inactive") {
-    SEARCH_QUERY = `title:${titleFragment}*`;
-  } else {
-    SEARCH_QUERY = `status:active AND title:${titleFragment}*`;
-  }
-  console.log("[PB codes] Computed SEARCH_QUERY:", SEARCH_QUERY);
+  console.log("[PB codes] Title fragments:", titleFragments);
 
-  // 3) Single Shopify Admin GraphQL call using discountNodes
-
+  // 3) Shopify Admin GraphQL query using discountNodes
+  //    We call this ONCE PER TITLE FRAGMENT (no "OR" in the search query).
   const GQL = `#graphql
-    query ActivePowerBuyDiscounts($first: Int!, $query: String!) {
-      discountNodes(first: $first, query: $query) {
+    query PowerBuyDiscounts($first: Int!, $query: String!, $after: String) {
+      discountNodes(first: $first, query: $query, after: $after) {
         edges {
           node {
             id
@@ -148,26 +202,68 @@ export async function loader({ request }) {
     }
   `;
 
-  let raw;
-  try {
-    raw = await runAdminQuery(shop, GQL, {
-      first: 50,
-      query: SEARCH_QUERY,
-    });
-  } catch (err) {
-    console.error("[PB codes] Error calling runAdminQuery:", err);
-    throw err;
+  const allEdges = [];
+  const seenIds = new Set();
+
+  // Safety caps
+  const FIRST_PER_PAGE = 50;
+  const MAX_PAGES_PER_FRAGMENT = 5;
+
+  for (const fragment of titleFragments) {
+    const SEARCH_QUERY = `title:${fragment}*`;
+    console.log("[PB codes] Using SEARCH_QUERY:", SEARCH_QUERY);
+
+    let hasNextPage = true;
+    let afterCursor = null;
+    let page = 1;
+
+    while (hasNextPage && page <= MAX_PAGES_PER_FRAGMENT) {
+      let raw;
+      try {
+        raw = await runAdminQuery(shop, GQL, {
+          first: FIRST_PER_PAGE,
+          query: SEARCH_QUERY,
+          after: afterCursor,
+        });
+      } catch (err) {
+        console.error(
+          `[PB codes] Error calling runAdminQuery for fragment "${fragment}" on page ${page}:`,
+          err
+        );
+        break;
+      }
+
+      const root = raw && raw.data ? raw.data : raw;
+      const block = root?.discountNodes;
+      const edges = block?.edges ?? [];
+
+      console.log(
+        `[PB codes] fragment "${fragment}", page ${page}, edges:`,
+        edges.length
+      );
+
+      for (const edge of edges) {
+        const id = edge?.node?.id;
+        if (id && !seenIds.has(id)) {
+          seenIds.add(id);
+          allEdges.push(edge);
+        }
+      }
+
+      hasNextPage = block?.pageInfo?.hasNextPage ?? false;
+      afterCursor = block?.pageInfo?.endCursor ?? null;
+      page += 1;
+    }
   }
 
-  const root = raw && raw.data ? raw.data : raw;
-  const edges = root?.discountNodes?.edges ?? [];
-  console.log("[PB codes] discountNodes edges count:", edges.length);
+  console.log("[PB codes] Total discountNodes edges collected:", allEdges.length);
 
-  edges.forEach((edge, index) => {
+  // Debug log for each node
+  allEdges.forEach((edge, index) => {
     const disc = edge?.node?.discount;
     const codes =
       disc?.codes?.nodes?.map((n) => n?.code).filter(Boolean) ?? [];
-    console.log(`[PB codes] discountNode #${index}`, {
+    console.log(`[PB codes] merged discountNode #${index}`, {
       id: edge?.node?.id,
       typename: disc?.__typename,
       status: disc?.status,
@@ -180,32 +276,13 @@ export async function loader({ request }) {
     });
   });
 
-  // 4) Filter by PowerBuy prefixes + status/time window
+  // 4) Map to our PowerBuy-specific discount list (no filters yet)
+  const baseDiscounts = [];
 
-  const now = new Date();
-  const discounts = [];
-
-  for (const edge of edges) {
+  for (const edge of allEdges) {
     const node = edge?.node;
     const disc = node?.discount;
     if (!disc || disc.__typename !== "DiscountCodeBasic") continue;
-
-    const startsAt = disc.startsAt ? new Date(disc.startsAt) : null;
-    const endsAt = disc.endsAt ? new Date(disc.endsAt) : null;
-
-    // Status / time filtering by mode
-    if (statusFilter === "inactive") {
-      // Only non-active discounts
-      if (!disc.status || disc.status === "ACTIVE") continue;
-      // No time window filtering here
-    } else if (statusFilter === "all") {
-      // Show all statuses, no time window filter
-    } else {
-      // Default: active-only, in current time window
-      if (disc.status && disc.status !== "ACTIVE") continue;
-      if (startsAt && startsAt > now) continue;
-      if (endsAt && endsAt <= now) continue;
-    }
 
     const codeNodes = disc.codes?.nodes ?? [];
     for (const cNode of codeNodes) {
@@ -231,49 +308,123 @@ export async function loader({ request }) {
       const purchaseSlug = cfg
         ? slugify(cfg.short_description || "")
         : "";
-      const purchasePath = purchaseSlug
-        ? `/powerbuy-${purchaseSlug}`
-        : null;
 
-      discounts.push({
+      // Add admin code in link
+      const adminPath = `https://7e8ac2-2.myshopify.com/admin/orders?query=tag:${code}`
+      /*
+      // For Reference:
+      tag=RSLPB2512S318452+AND+-financial_status:partially_refunded
+      */
+      baseDiscounts.push({
         id: node.id,
         code,
         title: disc.title,
-        status: disc.status,
+        status: disc.status, // e.g. "ACTIVE", "DISABLED", etc.
         used,
         usageLimit,
         usesRemaining,
         endsAt: disc.endsAt,
-        purchasePath,
+        adminPath,
       });
     }
   }
 
-  // Sort by expiry (soonest first)
-  discounts.sort((a, b) => {
-    const aEnd = a.endsAt ? Date.parse(a.endsAt) : Infinity;
-    const bEnd = b.endsAt ? Date.parse(b.endsAt) : Infinity;
-    return aEnd - bEnd;
+  const totalCount = baseDiscounts.length;
+
+  // 5) Apply status + search filters + sort
+
+  let rows = baseDiscounts.filter((d) => {
+    const isActive =
+      (d.status || "").toUpperCase() === "ACTIVE";
+    if (isActive && !showActive) return false;
+    if (!isActive && !showInactive) return false;
+    return true;
   });
 
-  console.log("[PB codes] Final discounts after filtering:", discounts);
+  // NEW: partial match only on code + title
+  const q = search.toLowerCase();
+  if (q) {
+    rows = rows.filter((d) => {
+      const codeMatch = d.code.toLowerCase().includes(q);
+      const titleMatch = (d.title || "").toLowerCase().includes(q);
+      return codeMatch || titleMatch;
+    });
+  }
 
-  return json({ shop, discounts, statusFilter });
+  const dir = sortDir === "desc" ? -1 : 1;
+
+  rows.sort((a, b) => {
+    const norm = (v) => (v == null ? "" : String(v).toLowerCase());
+
+    switch (sortKey) {
+      case "code": {
+        const av = norm(a.code);
+        const bv = norm(b.code);
+        return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+      }
+      case "title": {
+        const av = norm(a.title);
+        const bv = norm(b.title);
+        return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+      }
+      case "status": {
+        const av = norm(a.status);
+        const bv = norm(b.status);
+        return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+      }
+      case "slots": {
+        const aSlots =
+          a.usageLimit == null || a.usesRemaining == null
+            ? -1
+            : a.usesRemaining;
+        const bSlots =
+          b.usageLimit == null || b.usesRemaining == null
+            ? -1
+            : b.usesRemaining;
+        if (aSlots === bSlots) return 0;
+        return aSlots < bSlots ? -1 * dir : 1 * dir;
+      }
+      case "expires":
+      default: {
+        const aEnd = a.endsAt ? Date.parse(a.endsAt) : Infinity;
+        const bEnd = b.endsAt ? Date.parse(b.endsAt) : Infinity;
+        if (aEnd === bEnd) return 0;
+        return aEnd < bEnd ? -1 * dir : 1 * dir;
+      }
+    }
+  });
+
+  console.log("[PB codes] Final rows after filtering & sorting:", rows);
+
+  return json({
+    shop,
+    rows,
+    totalCount,
+    search,
+    showActive,
+    showInactive,
+    sortKey,
+    sortDir,
+  });
 }
 
 // -----------------------------
-// React component
+// React component (server-rendered HTML)
 // -----------------------------
 
 export default function PowerBuyCodesPage() {
-  const { shop, discounts, statusFilter } = useLoaderData();
+  const {
+    shop,
+    rows,
+    totalCount,
+    search,
+    showActive,
+    showInactive,
+    sortKey,
+    sortDir,
+  } = useLoaderData();
 
-  const filterLabel =
-    statusFilter === "all"
-      ? "All (any status)"
-      : statusFilter === "inactive"
-        ? "Inactive only"
-        : "Active only";
+  const sortOpts = { search, showActive, showInactive };
 
   return (
     <main
@@ -288,14 +439,116 @@ export default function PowerBuyCodesPage() {
       <h1 style={{ fontSize: "24px", marginBottom: "4px" }}>
         Power Buy Discount Codes
       </h1>
-      <p style={{ fontSize: "12px", color: "#666", marginBottom: "4px" }}>
+      <p style={{ fontSize: "12px", color: "#666", marginBottom: "12px" }}>
         Shop: {shop}
       </p>
-      <p style={{ fontSize: "12px", color: "#666", marginBottom: "16px" }}>
-        Filter: {filterLabel}
-      </p>
 
-      {discounts.length === 0 ? (
+      {/* Search + status checkboxes + info */}
+      <form
+        method="get"
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "8px",
+          alignItems: "center",
+          marginBottom: "16px",
+        }}
+      >
+        {/* Preserve sort params when submitting search/filter */}
+        <input type="hidden" name="sort" value={sortKey} />
+        <input type="hidden" name="dir" value={sortDir} />
+
+        {/* Search box */}
+        <input
+          type="text"
+          name="q"
+          placeholder="Search by code or title…"
+          defaultValue={search}
+          style={{
+            flex: "1 1 260px",
+            padding: "6px 8px",
+            fontSize: "14px",
+            borderRadius: "4px",
+            border: "1px solid #ccc",
+          }}
+        />
+
+        {/* Search button */}
+        <button
+          type="submit"
+          style={{
+            padding: "6px 12px",
+            fontSize: "13px",
+            borderRadius: "4px",
+            border: "1px solid #ccc",
+            backgroundColor: "#f5f5f5",
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Search / Filter
+        </button>
+
+        {/* Status checkboxes */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ fontSize: "12px", color: "#444" }}>Status:</span>
+          <label
+            style={{
+              fontSize: "12px",
+              color: "#444",
+              display: "flex",
+              alignItems: "center",
+              gap: "4px",
+            }}
+          >
+            <input
+              type="checkbox"
+              name="active"
+              value="1"
+              defaultChecked={showActive}
+            />
+            Active
+          </label>
+          <label
+            style={{
+              fontSize: "12px",
+              color: "#444",
+              display: "flex",
+              alignItems: "center",
+              gap: "4px",
+            }}
+          >
+            <input
+              type="checkbox"
+              name="inactive"
+              value="1"
+              defaultChecked={showInactive}
+            />
+            Inactive
+          </label>
+        </div>
+
+        {/* Count summary */}
+        <span
+          style={{
+            fontSize: "12px",
+            color: "#666",
+            marginLeft: "auto",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Showing {rows.length} of {totalCount}
+        </span>
+      </form>
+
+      {rows.length === 0 ? (
         <p style={{ color: "#555" }}>No Power Buy discounts found.</p>
       ) : (
         <div
@@ -314,6 +567,7 @@ export default function PowerBuyCodesPage() {
           >
             <thead style={{ backgroundColor: "#f7f7f7" }}>
             <tr>
+              {/* Code */}
               <th
                 style={{
                   textAlign: "left",
@@ -321,8 +575,69 @@ export default function PowerBuyCodesPage() {
                   borderBottom: "1px solid #ddd",
                 }}
               >
-                Code
+                <a
+                  href={buildSortHref(
+                    "code",
+                    sortKey,
+                    sortDir,
+                    sortOpts
+                  )}
+                  style={{
+                    color: "inherit",
+                    textDecoration: "none",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                  }}
+                >
+                  <span>Code</span>
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      opacity: sortKey === "code" ? 1 : 0.4,
+                    }}
+                  >
+                      {getSortIcon("code", sortKey, sortDir)}
+                    </span>
+                </a>
               </th>
+
+              {/* Title */}
+              <th
+                style={{
+                  textAlign: "left",
+                  padding: "10px 12px",
+                  borderBottom: "1px solid #ddd"
+                }}
+              >
+                <a
+                  href={buildSortHref(
+                    "title",
+                    sortKey,
+                    sortDir,
+                    sortOpts
+                  )}
+                  style={{
+                    color: "inherit",
+                    textDecoration: "none",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                  }}
+                >
+                  <span>Title</span>
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      opacity: sortKey === "title" ? 1 : 0.4,
+                    }}
+                  >
+                      {getSortIcon("title", sortKey, sortDir)}
+                    </span>
+                </a>
+              </th>
+
+              {/* Status */}
               <th
                 style={{
                   textAlign: "left",
@@ -330,17 +645,34 @@ export default function PowerBuyCodesPage() {
                   borderBottom: "1px solid #ddd",
                 }}
               >
-                Title
+                <a
+                  href={buildSortHref(
+                    "status",
+                    sortKey,
+                    sortDir,
+                    sortOpts
+                  )}
+                  style={{
+                    color: "inherit",
+                    textDecoration: "none",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                  }}
+                >
+                  <span>Status</span>
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      opacity: sortKey === "status" ? 1 : 0.4,
+                    }}
+                  >
+                      {getSortIcon("status", sortKey, sortDir)}
+                    </span>
+                </a>
               </th>
-              <th
-                style={{
-                  textAlign: "left",
-                  padding: "10px 12px",
-                  borderBottom: "1px solid #ddd",
-                }}
-              >
-                Status
-              </th>
+
+              {/* Slots Available */}
               <th
                 style={{
                   textAlign: "right",
@@ -348,8 +680,36 @@ export default function PowerBuyCodesPage() {
                   borderBottom: "1px solid #ddd",
                 }}
               >
-                Slots Available
+                <a
+                  href={buildSortHref(
+                    "slots",
+                    sortKey,
+                    sortDir,
+                    sortOpts
+                  )}
+                  style={{
+                    color: "inherit",
+                    textDecoration: "none",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    justifyContent: "flex-end",
+                    width: "100%",
+                  }}
+                >
+                  <span>Slots Available</span>
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      opacity: sortKey === "slots" ? 1 : 0.4,
+                    }}
+                  >
+                      {getSortIcon("slots", sortKey, sortDir)}
+                    </span>
+                </a>
               </th>
+
+              {/* Expires */}
               <th
                 style={{
                   textAlign: "left",
@@ -357,12 +717,36 @@ export default function PowerBuyCodesPage() {
                   borderBottom: "1px solid #ddd",
                 }}
               >
-                Expires
+                <a
+                  href={buildSortHref(
+                    "expires",
+                    sortKey,
+                    sortDir,
+                    sortOpts
+                  )}
+                  style={{
+                    color: "inherit",
+                    textDecoration: "none",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "4px",
+                  }}
+                >
+                  <span>Expires</span>
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      opacity: sortKey === "expires" ? 1 : 0.4,
+                    }}
+                  >
+                      {getSortIcon("expires", sortKey, sortDir)}
+                    </span>
+                </a>
               </th>
             </tr>
             </thead>
             <tbody>
-            {discounts.map((d) => (
+            {rows.map((d) => (
               <tr key={`${d.id}:${d.code}`}>
                 <td
                   style={{
@@ -371,10 +755,14 @@ export default function PowerBuyCodesPage() {
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {d.purchasePath ? (
+                  {d.adminPath ? (
                     <a
-                      href={d.purchasePath}
-                      style={{ color: "#0b5cff", textDecoration: "none" }}
+
+                      href={d.adminPath}
+                      style={{
+                        color: "#0b5cff",
+                        textDecoration: "none",
+                      }}
                       target="_blank"
                       rel="noopener noreferrer"
                     >
@@ -435,12 +823,14 @@ export default function PowerBuyCodesPage() {
           lineHeight: 1.4,
         }}
       >
-        SEARCH_QUERY is built from the first{" "}
-        <code>tbl_powerbuy_config.title</code> (characters up to and including
-        the first <code>(</code>) as{" "}
-        <code>title:&lt;fragment&gt;*</code>. Status filtering is controlled by
-        the <code>?status</code> query parameter and matched to configs via{" "}
-        <code>tbl_powerbuy_config.discount_prefix</code>.
+        Discounts are loaded by matching each{" "}
+        <code>tbl_powerbuy_config.title</code> (up to and including the first{" "}
+        <code>(</code>) via <code>title:&lt;fragment&gt;*</code>, one query per
+        fragment (no <code>OR</code> in the search string). The search box
+        performs a partial, case-insensitive match against the discount{" "}
+        <strong>code</strong> and <strong>title</strong>. Status filters
+        (Active/Inactive) and column sorts are all applied on the server using
+        query parameters.
       </p>
     </main>
   );
