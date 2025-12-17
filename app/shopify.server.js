@@ -1,51 +1,72 @@
 // app/shopify.server.js
 import { shopifyApp } from "@shopify/shopify-app-remix/server";
-
-const BASE = process.env.SHOPIFY_APP_URL || "NOT_SET";
-const CALLBACK_PATH = "/auth/callback";
-
-console.log("[boot] SHOPIFY_APP_URL:", BASE);
-console.log("[boot] OAuth callback:", `${BASE}${CALLBACK_PATH}`);
-
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server.js";
 
-// Basic env validation (kept minimal so it doesn't crash during typegen)
-const required = ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "SHOPIFY_APP_URL"];
-for (const k of required) {
-  if (!process.env[k]) {
-    // Don't throw during import in dev; the library will throw when used.
-    console.warn(`[shopify.server] Missing ${k} in environment`);
-  }
+// ─────────────────────────────────────────────
+// Validate environment
+// ─────────────────────────────────────────────
+
+const APP_URL = process.env.SHOPIFY_APP_URL;
+const API_KEY = process.env.SHOPIFY_API_KEY;
+const API_SECRET = process.env.SHOPIFY_API_SECRET;
+
+if (!API_KEY) {
+  throw new Error("SHOPIFY_API_KEY must be set");
+}
+if (!API_SECRET) {
+  throw new Error("SHOPIFY_API_SECRET must be set");
+}
+if (!APP_URL) {
+  throw new Error("SHOPIFY_APP_URL must be set (e.g. https://rsl-services-app.fly.dev)");
 }
 
+// Must be a full URL with protocol so sanitizeRedirectUrl doesn’t explode
+try {
+  const parsed = new URL(APP_URL);
+  if (!/^https:?$/.test(parsed.protocol)) {
+    throw new Error();
+  }
+} catch {
+  throw new Error(
+    `SHOPIFY_APP_URL is invalid. It must be a full https URL, e.g. "https://rsl-services-app.fly.dev". ` +
+    `Current value: "${APP_URL}"`
+  );
+}
+
+console.log("[boot] SHOPIFY_APP_URL:", APP_URL);
+console.log("[boot] OAuth callback:", `${APP_URL}/auth/callback`);
+
+// ─────────────────────────────────────────────
+// Shopify app configuration
+// ─────────────────────────────────────────────
+
 const shopify = shopifyApp({
-  apiKey: process.env.SHOPIFY_API_KEY,
-  apiSecretKey: process.env.SHOPIFY_API_SECRET,
-  appUrl: process.env.SHOPIFY_APP_URL,
-  // Comma-separated list in .env (e.g. read_products,write_products)
+  apiKey: API_KEY,
+  apiSecretKey: API_SECRET,
+  appUrl: APP_URL,              // must match the value in Partners > App setup
+  authPathPrefix: "/auth",      // so /auth, /auth/login, /auth/callback, /auth/exit-iframe all work
   scopes: (process.env.SCOPES || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
 
-  // Persist sessions in your Prisma DB
   sessionStorage: new PrismaSessionStorage(prisma),
 
-  // Keep defaults; routes assume /auth/… for OAuth
-  authPathPrefix: "/auth",
-
-  // Mirror the log line you’re seeing; leave disabled unless you switch to managed install
   future: {
+    // leave this as false for now – not related to your current error
     unstable_newEmbeddedAuthStrategy: false,
   },
 });
 
 // Stable, shared exports used across your app
 export { shopify };
-export const auth = shopify.auth; // has .begin/.callback
-export const authenticate = shopify.authenticate; // e.g. authenticate.admin
+export const auth = shopify.auth;
+export const authenticate = shopify.authenticate;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 
-// Compatibility helper for any legacy imports you still have around
+// Compatibility helper for any legacy imports
 export const getShopify = () => shopify;
+
+// Default export for convenience
+export default shopify;

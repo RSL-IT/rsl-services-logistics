@@ -1,4 +1,4 @@
-app = 'rsl-services-app'
+app = 'rsl-services-logistics'
 primary_region = 'ord'
 
 [build]
@@ -8,7 +8,7 @@ primary_region = 'ord'
 PORT = '3000'
 HOST = '0.0.0.0'
 NODE_ENV = "production"
-SHOPIFY_APP_URL = "https://rsl-services-app.fly.dev"
+SHOPIFY_APP_URL = "https://rsl-services-logistics.fly.dev"
 SHOPIFY_AUTH_CALLBACK_PATH = "/auth/callback"
 
 [processes]

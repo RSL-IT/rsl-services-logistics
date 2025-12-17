@@ -1,15 +1,15 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 # Original client_id for rsldev: "be8e8039e18f100d31437e7c4dcfe1b0"
-client_id="15a3f2c79fdfe2fce41943e259188754"
+client_id="2395c3c88218a921f255ce0e3de32342"
 
-name = "RSL Services"
-application_url = "https://rsl-services-app.fly.dev"
+name = "RSL Services - Logistics"
+application_url = "https://rsl-services-logistics.fly.dev"
 embedded = true
-handle = "rsl-services-app"
+handle = "rsl-services-logistics"
 
 [webhooks]
-api_version = "2025-04"
+api_version = "2025-10"
 
   [[webhooks.subscriptions]]
   topics = [ "app/scopes_update" ]
@@ -25,9 +25,9 @@ scopes = "read_customers,read_inventory,read_locales,read_locations,read_orders,
 
 [auth]
 redirect_urls = [
-  "https://rsl-services-app.fly.dev/auth/callback",
-  "https://rsl-services-app.fly.dev/auth/shopify/callback",
-  "https://rsl-services-app.fly.dev/api/auth/callback"
+  "https://rsl-services-logistics.fly.dev/auth/callback",
+  "https://rsl-services-logistics.fly.dev/auth/shopify/callback",
+  "https://rsl-services-logistics.fly.dev/api/auth/callback"
 ]
 
 [pos]
