@@ -50,12 +50,15 @@ model tbl_shipment {
   containerSize             String?
   portOfOrigin              String?
   destinationPort           String?
+  deliveryAddress           String?
   etaDate                   DateTime?
   cargoReadyDate            DateTime?
   estimatedDeliveryToOrigin DateTime?
   supplierPi                String?
   quantity                  BigInt?
+  bookingAgent              String?
   bookingNumber             String?
+  vesselName                String?
   status                    String?
   notes                     String?
 
@@ -63,13 +66,15 @@ model tbl_shipment {
   updatedAt DateTime @updatedAt
 
   // --- Relations ---
-  company    tlkp_company?         @relation(fields: [companyId], references: [shortName])
-  container  tlkp_container?       @relation(fields: [containerSize], references: [shortName])
-  originPort tlkp_originPort?      @relation(fields: [portOfOrigin], references: [shortName])
-  destPort   tlkp_destinationPort? @relation(fields: [destinationPort], references: [shortName])
+  company               tlkp_company?         @relation(fields: [companyId], references: [shortName])
+  container             tlkp_container?       @relation(fields: [containerSize], references: [shortName])
+  originPort            tlkp_originPort?      @relation(fields: [portOfOrigin], references: [shortName])
+  destPort              tlkp_destinationPort? @relation(fields: [destinationPort], references: [shortName])
+  bookingAgentLookup    tlkp_bookingAgent?    @relation(fields: [bookingAgent], references: [shortName])
+  deliveryAddressLookup tlkp_deliveryAddress? @relation(fields: [deliveryAddress], references: [shortName])
 
   // Products on this shipment
-  shipmentLines tbljn_shipment_company_rslModel[]
+  shipmentProducts tbljn_shipment_company_rslModel[]
 
   // Purchase orders associated with this shipment
   purchaseOrders tbljn_shipment_purchaseOrder[]
@@ -94,7 +99,42 @@ model tbl_logisticsUser {
   company tlkp_company? @relation(fields: [companyID], references: [shortName])
 
   // Many-to-many permissions via join table
-  permissionLinks tbljn_logisticsUser_permission[]
+  permissionLinks    tbljn_logisticsUser_permission[]
+  purchaseOrderNotes tbl_purchaseOrderNotes[]
+}
+
+/**
+ * Purchase Order history notes (notes-only; notes may optionally carry a PDF URL when a PDF is uploaded)
+ */
+model tbl_purchaseOrderNotes {
+  id Int @id @default(autoincrement())
+
+  // Which PO this note belongs to (business key)
+  purchaseOrderGID String
+
+  // Author (nullable allows system notes; SetNull if user is deleted)
+  userId Int?
+
+  createdAt DateTime @default(now())
+
+  // Note content (also used as "Reason for Update")
+  content String @db.Text
+
+  // If this note corresponds to a PDF upload, store the uploaded PDF URL for historical versions
+  pdfUrl String? @db.Text
+
+  // Optional: helps UI show filename
+  pdfFileName String? @db.VarChar(255)
+
+  // Optional metadata (can also infer pdf update via pdfUrl != null)
+  eventType String? @db.VarChar(30) // e.g. "NOTE" | "PDF_UPDATE"
+
+  purchaseOrder tbl_purchaseOrder  @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID], onDelete: Cascade, onUpdate: Cascade)
+  logisticsUser tbl_logisticsUser? @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([purchaseOrderGID])
+  @@index([userId])
+  @@index([createdAt])
 }
 
 /**
@@ -157,29 +197,55 @@ model tbljn_shipment_purchaseOrder {
 
   // We’ll join by business keys, not numeric IDs:
   // - shipmentID references tbl_shipment.containerNumber
-  // - purchaseOrderGID references tlkp_purchaseOrder.purchaseOrderGID
+  // - purchaseOrderGID references tbl_purchaseOrder.purchaseOrderGID
   shipmentID       String
   purchaseOrderGID String
 
-  shipment      tbl_shipment       @relation(fields: [shipmentID], references: [containerNumber])
-  purchaseOrder tlkp_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID])
+  shipment      tbl_shipment      @relation(fields: [shipmentID], references: [containerNumber])
+  purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID])
 
   @@index([shipmentID])
   @@index([purchaseOrderGID])
 }
 
-/**
- * Lookups
- */
+model tbljn_purchaseOrder_company {
+  id               Int    @id @default(autoincrement())
+  purchaseOrderGID String
+  companyID        String
 
-model tlkp_purchaseOrder {
+  purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID], onDelete: Cascade, onUpdate: Cascade)
+  company       tlkp_company      @relation(fields: [companyID], references: [shortName], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([purchaseOrderGID, companyID])
+  @@index([purchaseOrderGID])
+  @@index([companyID])
+}
+
+/**
+ * Purchase Orders (main data table)
+ */
+model tbl_purchaseOrder {
   id               Int    @id @default(autoincrement())
   shortName        String @unique
   purchaseOrderGID String @unique
 
-  // NEW: shipments using this PO
+  // Current / latest PDF URL (Shopify CDN)
+  purchaseOrderPdfUrl String?
+
+  // timestamps for detail page
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   shipmentLinks tbljn_shipment_purchaseOrder[]
+  companyLinks  tbljn_purchaseOrder_company[]
+
+  // history notes
+  notes tbl_purchaseOrderNotes[]
 }
+
+/**
+ * Lookups
+ */
 
 model tlkp_rslModel {
   id          Int    @id @default(autoincrement())
@@ -188,8 +254,8 @@ model tlkp_rslModel {
   SKU         String @unique
 
   // Back-relations
-  companyLinks  tbljn_company_rslModel[]
-  shipmentLines tbljn_shipment_company_rslModel[]
+  companyLinks     tbljn_company_rslModel[]
+  shipmentProducts tbljn_shipment_company_rslModel[]
 }
 
 model tlkp_company {
@@ -207,17 +273,19 @@ model tlkp_company {
   primaryEmail     String?
   supplierCurrency String?
 
-  // Back-relations
-  shipments      tbl_shipment[]
-  logisticsUsers tbl_logisticsUser[]
-  products       tbljn_company_rslModel[]
-  shipmentLines  tbljn_shipment_company_rslModel[]
+  shipments        tbl_shipment[]
+  logisticsUsers   tbl_logisticsUser[]
+  products         tbljn_company_rslModel[]
+  shipmentProducts tbljn_shipment_company_rslModel[]
+
+  purchaseOrders tbljn_purchaseOrder_company[]
 }
 
 model tlkp_bookingAgent {
-  id          Int     @id @default(autoincrement())
-  shortName   String  @unique
-  displayName String?
+  id           Int            @id @default(autoincrement())
+  shortName    String         @unique
+  displayName  String?
+  tbl_shipment tbl_shipment[]
 }
 
 model tlkp_container {
@@ -245,9 +313,10 @@ model tlkp_destinationPort {
 }
 
 model tlkp_deliveryAddress {
-  id          Int     @id @default(autoincrement())
-  shortName   String  @unique
-  displayName String?
+  id           Int            @id @default(autoincrement())
+  shortName    String         @unique
+  displayName  String?
+  tbl_shipment tbl_shipment[]
 }
 
 model tlkp_permission {

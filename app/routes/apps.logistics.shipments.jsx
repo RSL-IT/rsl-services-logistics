@@ -7,7 +7,6 @@ function parseDateLike(value) {
   const v = String(value ?? "").trim();
   if (!v) return null;
 
-  // YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
     const d = new Date(`${v}T00:00:00.000Z`);
     return Number.isNaN(d.getTime()) ? null : d;
@@ -31,10 +30,19 @@ function cleanStrOrNull(v) {
   return s ? s : null;
 }
 
-/**
- * Quantity is BigInt in DB, UI uses string.
- * Integer-only; commas/spaces allowed.
- */
+function uniqStrings(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const v of arr || []) {
+    const s = String(v || "").trim();
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 function parseBigIntLike(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
@@ -49,7 +57,25 @@ function parseBigIntLike(value) {
   }
 }
 
+function pickPurchaseOrdersInfo(s) {
+  const links = Array.isArray(s?.purchaseOrders) ? s.purchaseOrders : [];
+  const gids = links
+    .map((l) => l?.purchaseOrder?.purchaseOrderGID)
+    .filter(Boolean)
+    .map((x) => String(x));
+  const names = links
+    .map((l) => l?.purchaseOrder?.shortName)
+    .filter(Boolean)
+    .map((x) => String(x));
+
+  return {
+    purchaseOrderGIDs: uniqStrings(gids),
+    purchaseOrderShortNames: uniqStrings(names),
+  };
+}
+
 function mapDbShipmentToUi(s) {
+  const po = pickPurchaseOrdersInfo(s);
   return {
     id: String(s.id),
     supplierId: s.companyId,
@@ -61,7 +87,6 @@ function mapDbShipmentToUi(s) {
     portOfOrigin: s.portOfOrigin ?? "",
     destinationPort: s.destinationPort ?? "",
 
-    // NEW fields
     cargoReadyDate: toYyyyMmDd(s.cargoReadyDate),
     estimatedDeliveryToOrigin: toYyyyMmDd(s.estimatedDeliveryToOrigin),
     supplierPi: s.supplierPi ?? "",
@@ -69,7 +94,13 @@ function mapDbShipmentToUi(s) {
     bookingNumber: s.bookingNumber ?? "",
     notes: s.notes ?? "",
 
-    // Existing UI fields
+    purchaseOrderGIDs: po.purchaseOrderGIDs,
+    purchaseOrderShortNames: po.purchaseOrderShortNames,
+
+    // backward-compatible first item
+    purchaseOrderGID: po.purchaseOrderGIDs[0] || "",
+    purchaseOrderShortName: po.purchaseOrderShortNames[0] || "",
+
     etd: "",
     actualDepartureDate: "",
     eta: toYyyyMmDd(s.etaDate),
@@ -80,10 +111,45 @@ function mapDbShipmentToUi(s) {
   };
 }
 
+async function loadShipmentWithPo(id) {
+  return logisticsDb.tbl_shipment.findUnique({
+    where: { id },
+    include: {
+      purchaseOrders: { include: { purchaseOrder: true } },
+    },
+  });
+}
+
+async function validatePurchaseOrdersExist(tx, purchaseOrderGIDs) {
+  if (!purchaseOrderGIDs.length) return;
+
+  const found = await tx.tbl_purchaseOrder.findMany({
+    where: { purchaseOrderGID: { in: purchaseOrderGIDs } },
+    select: { purchaseOrderGID: true },
+  });
+
+  const foundSet = new Set(found.map((x) => String(x.purchaseOrderGID)));
+  const missing = purchaseOrderGIDs.filter((gid) => !foundSet.has(gid));
+  if (missing.length) {
+    const err = new Error("PO_NOT_FOUND");
+    err.missing = missing;
+    throw err;
+  }
+}
+
+function normalizePurchaseOrderGIDsFromPayload(shipment) {
+  // Preferred: purchaseOrderGIDs: string[]
+  if (shipment && Array.isArray(shipment.purchaseOrderGIDs)) {
+    return uniqStrings(shipment.purchaseOrderGIDs);
+  }
+  // Back-compat: purchaseOrderGID: string
+  const single = cleanStrOrNull(shipment?.purchaseOrderGID);
+  return single ? [single] : [];
+}
+
 export async function action({ request }) {
   const debug = { stage: "start", proxyVerified: false };
 
-  // Best-effort proxy verification
   try {
     await verifyProxyIfPresent(request);
     debug.proxyVerified = true;
@@ -137,22 +203,20 @@ export async function action({ request }) {
       const status = cleanStrOrNull(shipment.status);
 
       const etaDate = parseDateLike(shipment.eta);
-
-      // NEW date fields
       const cargoReadyDate = parseDateLike(shipment.cargoReadyDate);
       const estimatedDeliveryToOrigin = parseDateLike(shipment.estimatedDeliveryToOrigin);
 
-      // NEW strings
       const supplierPi = cleanStrOrNull(shipment.supplierPi);
       const bookingNumber = cleanStrOrNull(shipment.bookingNumber);
       const notes = cleanStrOrNull(shipment.notes);
 
-      // NEW BigInt
       const qtyParsed = parseBigIntLike(shipment.quantity);
       if (qtyParsed && typeof qtyParsed === "object" && qtyParsed.error) {
         return json({ success: false, error: qtyParsed.error, debug }, { status: 200 });
       }
-      const quantity = qtyParsed; // BigInt | null
+      const quantity = qtyParsed;
+
+      const purchaseOrderGIDs = normalizePurchaseOrderGIDsFromPayload(shipment);
 
       if (!supplierId || !containerNumber) {
         return json(
@@ -161,7 +225,6 @@ export async function action({ request }) {
         );
       }
 
-      // companyName is required on tbl_shipment
       const company = await logisticsDb.tlkp_company.findUnique({
         where: { shortName: supplierId },
         select: { shortName: true, displayName: true },
@@ -170,38 +233,63 @@ export async function action({ request }) {
       const companyName =
         (company?.displayName && String(company.displayName).trim()) || supplierId;
 
-      let created;
+      let createdId;
+
       try {
-        created = await logisticsDb.tbl_shipment.create({
-          data: {
-            companyId: supplierId,
-            companyName,
-            containerNumber,
-            containerSize,
-            portOfOrigin,
-            destinationPort,
-            etaDate,
+        createdId = await logisticsDb.$transaction(async (tx) => {
+          await validatePurchaseOrdersExist(tx, purchaseOrderGIDs);
 
-            // NEW fields
-            cargoReadyDate,
-            estimatedDeliveryToOrigin,
-            supplierPi,
-            quantity,
-            bookingNumber,
-            notes,
+          const created = await tx.tbl_shipment.create({
+            data: {
+              companyId: supplierId,
+              companyName,
+              containerNumber,
+              containerSize,
+              portOfOrigin,
+              destinationPort,
+              etaDate,
 
-            status,
-          },
+              cargoReadyDate,
+              estimatedDeliveryToOrigin,
+              supplierPi,
+              quantity,
+              bookingNumber,
+              notes,
+
+              status,
+            },
+          });
+
+          if (purchaseOrderGIDs.length) {
+            await tx.tbljn_shipment_purchaseOrder.createMany({
+              data: purchaseOrderGIDs.map((purchaseOrderGID) => ({
+                shipmentID: containerNumber,
+                purchaseOrderGID,
+              })),
+            });
+          }
+
+          return created.id;
         });
       } catch (err) {
         console.error("[logistics shipments] create error:", err);
+
+        if (String(err?.message || "") === "PO_NOT_FOUND") {
+          const missing = Array.isArray(err.missing) ? err.missing.join(", ") : "";
+          return json(
+            { success: false, error: `Purchase Order not found: ${missing || "unknown"}.`, debug },
+            { status: 200 }
+          );
+        }
+
         return json(
           { success: false, error: "Container # already exists (must be unique).", debug },
           { status: 200 }
         );
       }
 
-      return json({ success: true, shipment: mapDbShipmentToUi(created), debug }, { status: 200 });
+      const full = await loadShipmentWithPo(createdId);
+      return json({ success: true, shipment: mapDbShipmentToUi(full || {}), debug }, { status: 200 });
     }
 
     // UPDATE
@@ -232,36 +320,37 @@ export async function action({ request }) {
       const portOfOrigin = cleanStrOrNull(shipment.portOfOrigin);
       const destinationPort = cleanStrOrNull(shipment.destinationPort);
       const status = cleanStrOrNull(shipment.status);
-      const etaDate = parseDateLike(shipment.eta);
 
-      // NEW date fields
+      const etaDate = parseDateLike(shipment.eta);
       const cargoReadyDate = parseDateLike(shipment.cargoReadyDate);
       const estimatedDeliveryToOrigin = parseDateLike(shipment.estimatedDeliveryToOrigin);
 
-      // NEW strings
       const supplierPi = cleanStrOrNull(shipment.supplierPi);
       const bookingNumber = cleanStrOrNull(shipment.bookingNumber);
       const notes = cleanStrOrNull(shipment.notes);
 
-      // NEW BigInt (PRESERVE EXISTING IF BLANK)
+      // Quantity: preserve existing if blank/omitted
       const quantityRaw = shipment.quantity;
       const quantityProvided =
         quantityRaw !== undefined &&
         quantityRaw !== null &&
         String(quantityRaw).trim() !== "";
 
-      let quantity; // BigInt | null | undefined
+      let quantity;
       if (quantityProvided) {
         const qtyParsed = parseBigIntLike(quantityRaw);
         if (qtyParsed && typeof qtyParsed === "object" && qtyParsed.error) {
           return json({ success: false, error: qtyParsed.error, debug }, { status: 200 });
         }
-        quantity = qtyParsed; // BigInt | null (null only if parseBigIntLike returned null, but provided => should be BigInt)
+        quantity = qtyParsed;
       } else {
-        quantity = undefined; // do not update the DB column
+        quantity = undefined; // do not update DB
       }
 
-      // IMPORTANT: do not update containerNumber here
+      // Purchase orders: preserve unless purchaseOrderGIDs is explicitly present
+      const poFieldPresent = shipment && Object.prototype.hasOwnProperty.call(shipment, "purchaseOrderGIDs");
+      const nextPurchaseOrderGIDs = poFieldPresent ? normalizePurchaseOrderGIDsFromPayload(shipment) : null;
+
       const data = {
         companyId: supplierId,
         companyName,
@@ -283,12 +372,44 @@ export async function action({ request }) {
         data.quantity = quantity;
       }
 
-      const updated = await logisticsDb.tbl_shipment.update({
-        where: { id },
-        data,
-      });
+      try {
+        await logisticsDb.$transaction(async (tx) => {
+          await tx.tbl_shipment.update({ where: { id }, data });
 
-      return json({ success: true, shipment: mapDbShipmentToUi(updated), debug }, { status: 200 });
+          if (poFieldPresent) {
+            const gids = nextPurchaseOrderGIDs || [];
+            await validatePurchaseOrdersExist(tx, gids);
+
+            await tx.tbljn_shipment_purchaseOrder.deleteMany({
+              where: { shipmentID: existing.containerNumber },
+            });
+
+            if (gids.length) {
+              await tx.tbljn_shipment_purchaseOrder.createMany({
+                data: gids.map((purchaseOrderGID) => ({
+                  shipmentID: existing.containerNumber,
+                  purchaseOrderGID,
+                })),
+              });
+            }
+          }
+        });
+      } catch (err) {
+        console.error("[logistics shipments] update error:", err);
+
+        if (String(err?.message || "") === "PO_NOT_FOUND") {
+          const missing = Array.isArray(err.missing) ? err.missing.join(", ") : "";
+          return json(
+            { success: false, error: `Purchase Order not found: ${missing || "unknown"}.`, debug },
+            { status: 200 }
+          );
+        }
+
+        return json({ success: false, error: "Server error while updating shipment.", debug }, { status: 200 });
+      }
+
+      const full = await loadShipmentWithPo(id);
+      return json({ success: true, shipment: mapDbShipmentToUi(full || {}), debug }, { status: 200 });
     }
 
     // DELETE
@@ -320,9 +441,6 @@ export async function action({ request }) {
     return json({ success: false, error: "Unknown intent.", debug }, { status: 200 });
   } catch (err) {
     console.error("[logistics shipments] unexpected error:", err, debug);
-    return json(
-      { success: false, error: "Server error while saving shipment.", debug },
-      { status: 200 }
-    );
+    return json({ success: false, error: "Server error while saving shipment.", debug }, { status: 200 });
   }
 }

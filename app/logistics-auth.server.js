@@ -1,64 +1,51 @@
-// app/logistics-auth.server.js
 import { redirect, json } from "@remix-run/node";
 import { createCookieSessionStorage } from "@remix-run/node";
 import bcrypt from "bcryptjs";
-import logisticsPrisma from "./logistics-db.server";
-
-const sessionSecret = process.env.LOGISTICS_SESSION_SECRET;
-if (!sessionSecret) {
-  throw new Error("LOGISTICS_SESSION_SECRET must be set");
-}
+import { logisticsDb } from "~/logistics-db.server";
 
 const LOGISTICS_SESSION_KEY = "logisticsUserId";
 
-// Scope logistics cookie to logistics paths only so it doesn't bleed into other areas
+const isProd = process.env.NODE_ENV === "production";
+
 const logisticsSessionStorage = createCookieSessionStorage({
   cookie: {
     name: "__rsl_logistics",
     httpOnly: true,
-    sameSite: "lax",
-    path: "/apps/logistics",
-    secure: process.env.NODE_ENV === "production",
-    secrets: [sessionSecret],
+    // In Shopify embedded contexts the portal is often loaded in an iframe.
+    // Third-party cookies generally require SameSite=None; Secure.
+    sameSite: isProd ? "none" : "lax",
+    path: "/",
+    secure: isProd, // REQUIRED when sameSite: 'none'
+    secrets: [process.env.SESSION_SECRET || "dev-secret"],
   },
 });
 
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
-
-/**
- * Ensure redirect targets are safe string paths.
- * - Must be a string
- * - Must start with "/"
- * - Fallback to "/apps/logistics" otherwise
- */
-function sanitizeRedirectTo(redirectTo) {
-  if (typeof redirectTo !== "string") {
-    return "/apps/logistics";
-  }
-  const trimmed = redirectTo.trim();
-  if (!trimmed.startsWith("/")) {
-    return "/apps/logistics";
-  }
-  return trimmed;
+export async function getLogisticsSession(request) {
+  return logisticsSessionStorage.getSession(request.headers.get("Cookie"));
 }
 
-// ─────────────────────────────────────────────
-// User lookup & password verification
-// ─────────────────────────────────────────────
+export async function getLogisticsUser(request) {
+  const session = await getLogisticsSession(request);
+  const userId = session.get(LOGISTICS_SESSION_KEY);
 
-export async function getLogisticsUserByEmail(email) {
-  return logisticsPrisma.tbl_logisticsUser.findFirst({
-    where: {
-      email,
-      isActive: true,
-    },
+  if (!userId) return null;
+
+  return logisticsDb.tbl_logisticsUser.findUnique({
+    where: { id: Number(userId) },
   });
 }
 
+export async function requireLogisticsUser(request) {
+  const user = await getLogisticsUser(request);
+  if (!user) throw redirect("/apps/logistics/portal");
+  return user;
+}
+
 export async function verifyLogisticsLogin(email, password) {
-  const user = await getLogisticsUserByEmail(email);
+  const user = await logisticsDb.tbl_logisticsUser.findFirst({
+    where: { email, isActive: true },
+  });
+
   if (!user || !user.password) return null;
 
   const isValid = await bcrypt.compare(password, user.password);
@@ -67,71 +54,47 @@ export async function verifyLogisticsLogin(email, password) {
   return user;
 }
 
-// ─────────────────────────────────────────────
-// Session helpers
-// ─────────────────────────────────────────────
-
-export async function getLogisticsUser(request) {
-  const session = await logisticsSessionStorage.getSession(
-    request.headers.get("Cookie")
-  );
-  const userId = session.get(LOGISTICS_SESSION_KEY);
-  if (!userId) return null;
-
-  return logisticsPrisma.tbl_logisticsUser.findUnique({
-    where: { id: userId },
-  });
-}
-
-/**
- * Require a logged-in logistics user.
- * If not present, redirect to the logistics login page,
- * preserving the original path + query as ?redirectTo=...
- */
-export async function requireLogisticsUser(request) {
-  const user = await getLogisticsUser(request);
-  if (!user) {
-    const url = new URL(request.url);
-    const redirectTo = url.pathname + url.search;
-    const safeRedirectTo = encodeURIComponent(
-      sanitizeRedirectTo(redirectTo)
-    );
-
-    throw redirect(
-      `/apps/logistics/login?redirectTo=${safeRedirectTo}`
-    );
-  }
-  return user;
-}
-
-/**
- * Create a logistics session and redirect.
- * Any non-string / bad redirectTo will safely fall back to "/apps/logistics".
- */
-export async function createLogisticsSession(userId, redirectTo) {
+// For redirect flows (kept for compatibility)
+export async function createLogisticsSession(userId) {
   const session = await logisticsSessionStorage.getSession();
   session.set(LOGISTICS_SESSION_KEY, userId);
 
-  const safeRedirectTo = sanitizeRedirectTo(redirectTo);
-
-  return redirect(safeRedirectTo, {
+  return redirect("/apps/logistics/portal", {
     headers: {
       "Set-Cookie": await logisticsSessionStorage.commitSession(session),
     },
   });
 }
 
-/**
- * Destroy logistics session and send user back to the logistics login page.
- */
-export async function logoutLogisticsUser(request) {
+// For JSON endpoints (login action)
+export async function commitLogisticsUserSession(request, userId) {
   const session = await logisticsSessionStorage.getSession(
-    request.headers.get("Cookie")
+    request.headers.get("Cookie"),
   );
+  session.set(LOGISTICS_SESSION_KEY, userId);
 
-  return redirect("/apps/logistics/login", {
+  return logisticsSessionStorage.commitSession(session);
+}
+
+// For JSON endpoints (logout action)
+export async function destroyLogisticsUserSession(request) {
+  const session = await logisticsSessionStorage.getSession(
+    request.headers.get("Cookie"),
+  );
+  return logisticsSessionStorage.destroySession(session);
+}
+
+export async function logoutLogisticsUser(request) {
+  const session = await getLogisticsSession(request);
+  return redirect("/apps/logistics/portal", {
     headers: {
       "Set-Cookie": await logisticsSessionStorage.destroySession(session),
     },
   });
+}
+
+export async function ensureLogisticsUserOrJson(request) {
+  const user = await getLogisticsUser(request);
+  if (!user) return json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  return user;
 }

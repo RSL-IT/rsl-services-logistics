@@ -3,6 +3,7 @@ import { json } from "@remix-run/node";
 import { useLoaderData } from "@remix-run/react";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
+import { getLogisticsUser } from "~/logistics-auth.server";
 import LogisticsApp from "~/logistics-ui/LogisticsApp";
 
 function normalizeUserTypeForUi(dbUserType) {
@@ -24,10 +25,49 @@ function mapDbPermissionSetToUi(dbShortNamesSet) {
   };
 }
 
+function toIsoOrEmpty(d) {
+  if (!d) return "";
+  try {
+    return new Date(d).toISOString().slice(0, 10);
+  } catch {
+    return "";
+  }
+}
+
+function uniqStrings(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const v of arr || []) {
+    const s = String(v || "").trim();
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function pickPurchaseOrdersInfo(s) {
+  const links = Array.isArray(s?.purchaseOrders) ? s.purchaseOrders : [];
+  const gids = links
+    .map((l) => l?.purchaseOrder?.purchaseOrderGID)
+    .filter(Boolean)
+    .map((x) => String(x));
+  const names = links
+    .map((l) => l?.purchaseOrder?.shortName)
+    .filter(Boolean)
+    .map((x) => String(x));
+
+  return {
+    purchaseOrderGIDs: uniqStrings(gids),
+    purchaseOrderShortNames: uniqStrings(names),
+  };
+}
+
 export async function loader({ request }) {
   const debug = { proxyVerified: false };
 
-  // Best-effort proxy verification
+  // 1) Best-effort proxy verification
   try {
     await verifyProxyIfPresent(request);
     debug.proxyVerified = true;
@@ -41,12 +81,20 @@ export async function loader({ request }) {
     }
   }
 
+  // 2) Session user (if any)
+  const sessionUser = await getLogisticsUser(request);
+  const sessionUserId = sessionUser?.id ?? null;
+
+  // 3) Fetch shipments + users + lookups
   let shipments = [];
   let users = [];
   let companies = [];
   let containers = [];
   let originPorts = [];
   let destinationPorts = [];
+  let bookingAgents = [];
+  let deliveryAddresses = [];
+  let purchaseOrders = [];
 
   try {
     const [
@@ -56,12 +104,19 @@ export async function loader({ request }) {
       containerRows,
       originRows,
       destRows,
+      bookingAgentRows,
+      deliveryAddressRows,
+      purchaseOrderRows,
     ] = await Promise.all([
-      logisticsDb.tbl_shipment.findMany({ orderBy: { etaDate: "asc" } }),
+      logisticsDb.tbl_shipment.findMany({
+        orderBy: { etaDate: "asc" },
+        include: { purchaseOrders: { include: { purchaseOrder: true } } },
+      }),
       logisticsDb.tbl_logisticsUser.findMany({
         orderBy: { id: "asc" },
         include: { permissionLinks: { include: { permission: true } } },
       }),
+      // Supplier dropdown source in this schema is tlkp_company (shortName/displayName)
       logisticsDb.tlkp_company.findMany({
         select: { shortName: true, displayName: true },
         orderBy: { shortName: "asc" },
@@ -78,33 +133,55 @@ export async function loader({ request }) {
         select: { shortName: true, displayName: true },
         orderBy: { shortName: "asc" },
       }),
+      logisticsDb.tlkp_bookingAgent.findMany({
+        select: { shortName: true, displayName: true },
+        orderBy: { shortName: "asc" },
+      }),
+      logisticsDb.tlkp_deliveryAddress.findMany({
+        select: { shortName: true, displayName: true },
+        orderBy: { shortName: "asc" },
+      }),
+      logisticsDb.tbl_purchaseOrder.findMany({
+        select: { purchaseOrderGID: true, shortName: true },
+        orderBy: { shortName: "asc" },
+      }),
     ]);
 
-    companies = companyRows ?? [];
-    containers = containerRows ?? [];
-    originPorts = originRows ?? [];
-    destinationPorts = destRows ?? [];
+    shipments = shipmentRows.map((s) => {
+      const po = pickPurchaseOrdersInfo(s);
+      return {
+        id: String(s.id),
+        supplierId: s.companyId,
+        supplierName: s.companyName,
+        products: [],
 
-    shipments = shipmentRows.map((s) => ({
-      id: String(s.id),
-      supplierId: s.companyId,
-      supplierName: s.companyName,
-      products: [],
+        containerNumber: s.containerNumber,
+        containerSize: s.containerSize ?? "",
+        portOfOrigin: s.portOfOrigin ?? "",
+        destinationPort: s.destinationPort ?? "",
 
-      containerNumber: s.containerNumber,
-      containerSize: s.containerSize ?? "",
-      portOfOrigin: s.portOfOrigin ?? "",
-      destinationPort: s.destinationPort ?? "",
+        cargoReadyDate: toIsoOrEmpty(s.cargoReadyDate),
+        etd: "",
+        actualDepartureDate: "",
+        eta: toIsoOrEmpty(s.etaDate),
+        sealNumber: "",
+        hblNumber: "",
+        estimatedDeliveryDate: "",
+        status: s.status ?? "",
 
-      cargoReadyDate: "",
-      etd: "",
-      actualDepartureDate: "",
-      eta: s.etaDate ? s.etaDate.toISOString().slice(0, 10) : "",
-      sealNumber: "",
-      hblNumber: "",
-      estimatedDeliveryDate: "",
-      status: s.status ?? "",
-    }));
+        estimatedDeliveryToOrigin: toIsoOrEmpty(s.estimatedDeliveryToOrigin),
+        supplierPi: s.supplierPi ?? "",
+        quantity: s.quantity != null ? String(s.quantity) : "",
+        bookingAgent: s.bookingAgent ?? "",
+        bookingNumber: s.bookingNumber ?? "",
+        vesselName: s.vesselName ?? "",
+        deliveryAddress: s.deliveryAddress ?? "",
+        notes: s.notes ?? "",
+
+        purchaseOrderGIDs: po.purchaseOrderGIDs,
+        purchaseOrderShortNames: po.purchaseOrderShortNames,
+      };
+    });
 
     users = userRows.map((u) => {
       const userType = normalizeUserTypeForUi(u.userType);
@@ -112,9 +189,7 @@ export async function loader({ request }) {
       const supplierId = role === "supplier" ? u.companyID ?? null : null;
 
       const dbPerms = new Set(
-        (u.permissionLinks || [])
-          .map((x) => x.permission?.shortName)
-          .filter(Boolean)
+        (u.permissionLinks || []).map((x) => x.permission?.shortName).filter(Boolean)
       );
 
       return {
@@ -124,24 +199,42 @@ export async function loader({ request }) {
         userType,
         isActive: u.isActive !== false,
         permissions: mapDbPermissionSetToUi(dbPerms),
-
         name: u.displayName || u.email,
         role,
         supplierId,
         companyName: u.companyID || "",
       };
     });
+
+    companies = companyRows.map((c) => ({ shortName: c.shortName, displayName: c.displayName }));
+    containers = containerRows.map((c) => ({ shortName: c.shortName, displayName: c.displayName }));
+    originPorts = originRows.map((p) => ({ shortName: p.shortName, displayName: p.displayName }));
+    destinationPorts = destRows.map((p) => ({ shortName: p.shortName, displayName: p.displayName }));
+    bookingAgents = bookingAgentRows.map((b) => ({ shortName: b.shortName, displayName: b.displayName }));
+    deliveryAddresses = deliveryAddressRows.map((d) => ({ shortName: d.shortName, displayName: d.displayName }));
+    purchaseOrders = purchaseOrderRows.map((po) => ({
+      purchaseOrderGID: po.purchaseOrderGID,
+      shortName: po.shortName,
+    }));
   } catch (err) {
     console.error("[logistics portal] DB error:", err);
   }
 
+  const currentUser = sessionUserId
+    ? users.find((u) => String(u.id) === String(sessionUserId)) || null
+    : null;
+
   return json({
     initialShipments: shipments,
     initialUsers: users,
-    initialCompanies: companies,
-    initialContainers: containers,
-    initialOriginPorts: originPorts,
-    initialDestinationPorts: destinationPorts,
+    companies,
+    containers,
+    originPorts,
+    destinationPorts,
+    bookingAgents,
+    deliveryAddresses,
+    purchaseOrders,
+    currentUser,
     debug,
   });
 }
@@ -150,21 +243,38 @@ export default function LogisticsPortalRoute() {
   const {
     initialShipments,
     initialUsers,
-    initialCompanies,
-    initialContainers,
-    initialOriginPorts,
-    initialDestinationPorts,
+    companies,
+    containers,
+    originPorts,
+    destinationPorts,
+    bookingAgents,
+    deliveryAddresses,
+    purchaseOrders,
+    currentUser,
   } = useLoaderData();
 
-  // IMPORTANT: return only the app content so Remix root provides CSS/JS
   return (
-    <LogisticsApp
-      initialShipments={initialShipments}
-      initialUsers={initialUsers}
-      initialCompanies={initialCompanies}
-      initialContainers={initialContainers}
-      initialOriginPorts={initialOriginPorts}
-      initialDestinationPorts={initialDestinationPorts}
-    />
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <title>RSL Logistics Portal</title>
+      </head>
+      <body>
+        <div id="logistics-root">
+          <LogisticsApp
+            initialShipments={initialShipments}
+            initialUsers={initialUsers}
+            companies={companies}
+            containers={containers}
+            originPorts={originPorts}
+            destinationPorts={destinationPorts}
+            bookingAgents={bookingAgents}
+            deliveryAddresses={deliveryAddresses}
+            purchaseOrders={purchaseOrders}
+            currentUser={currentUser}
+          />
+        </div>
+      </body>
+    </html>
   );
 }

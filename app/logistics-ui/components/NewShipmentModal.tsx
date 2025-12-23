@@ -1,569 +1,441 @@
 // app/logistics-ui/components/NewShipmentModal.tsx
-import React, { useMemo, useState, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  X,
-  Factory,
+  Modal,
+  BlockStack,
+  InlineStack,
+  Text,
+  TextField,
+  Select,
+  Checkbox,
+  Button,
+  Banner,
   Box,
-  Anchor,
-  MapPin,
-  CalendarDays,
-  Truck,
-  FileText,
-  Hash,
-} from "lucide-react";
-import type { Shipment } from "../LogisticsApp";
+  Divider,
+} from "@shopify/polaris";
 
-export type CompanyOption = { shortName: string; displayName?: string | null };
-export type LookupOption = { shortName: string; displayName?: string | null };
-
-export type UIShipment = Shipment & {
-  cargoReadyDate?: string; // YYYY-MM-DD
-  estimatedDeliveryToOrigin?: string; // YYYY-MM-DD
-  supplierPi?: string;
-  quantity?: string; // BigInt in DB; keep as string in UI
-  bookingNumber?: string;
-  notes?: string;
+type LookupOption = {
+  shortName: string;
+  displayName?: string | null;
 };
+
+type PurchaseOrderOption = {
+  // Preferred key (matches tbl_purchaseOrder.purchaseOrderGID)
+  purchaseOrderGID?: string;
+  // Optional back-compat if caller passes numeric IDs
+  id?: number | string;
+  shortName: string;
+};
+
+type ShipmentDraft = {
+  supplierId: string;
+  containerNumber: string;
+
+  // Lookups
+  containerSize: string;
+  portOfOrigin: string;
+  destinationPort: string;
+
+  // New fields requested
+  bookingAgent: string; // shortName
+  bookingNumber: string;
+  vesselName: string;
+  deliveryAddress: string; // shortName
+
+  // Dates
+  cargoReadyDate: string; // YYYY-MM-DD
+  etd: string; // YYYY-MM-DD
+  eta: string; // YYYY-MM-DD
+
+  // Existing DB-ish fields
+  supplierPi: string;
+  quantity: string; // keep as string in UI, parse to int on save
+  estimatedDeliveryToOrigin: string; // YYYY-MM-DD
+  status: string;
+  notes: string;
+
+  // POs
+  purchaseOrderGIDs: string[];
+};
+
+function toYyyyMmDd(v: unknown): string {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toISOString().slice(0, 10);
+}
+
+function safeIntString(s: string): string {
+  const v = String(s ?? "").trim();
+  if (!v) return "";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "";
+  const i = Math.trunc(n);
+  if (i < 0) return "";
+  return String(i);
+}
 
 interface NewShipmentModalProps {
-  shipment: UIShipment;
-
-  companies?: CompanyOption[];
-  containers?: LookupOption[];
-
-  // IMPORTANT: these should be fetched from tlkp_originPort and tlkp_destinationPort
-  originPorts?: LookupOption[];
-  destinationPorts?: LookupOption[];
-
+  open: boolean;
   onClose: () => void;
-  onCreate: (shipment: UIShipment) => void;
 
-  isSaving?: boolean;
-  error?: string | null;
+  // called with the shipment returned by the server
+  onCreated: (createdShipment: any) => void;
+
+  // Lookups
+  // Supplier source (requested: tlkp_supplier). In this repo schema it's tlkp_company.
+  // Accept both names so callers don't have to be perfectly consistent.
+  suppliers?: LookupOption[];
+  companies?: LookupOption[]; // back-compat
+
+  containers: LookupOption[];
+  originPorts: LookupOption[];
+  destinationPorts: LookupOption[];
+  bookingAgents: LookupOption[];
+  deliveryAddresses: LookupOption[];
+  purchaseOrders: PurchaseOrderOption[];
+
+  // Optional preselects
+  initialSupplierId?: string;
 }
 
-function sortCompaniesSpecial(companies: CompanyOption[]) {
-  const list = companies.slice();
-  const norm = (v: any) => String(v || "").trim().toLowerCase();
+export function NewShipmentModal({
+                                   open,
+                                   onClose,
+                                   onCreated,
+                                   suppliers,
+                                   companies,
+                                   containers,
+                                   originPorts,
+                                   destinationPorts,
+                                   bookingAgents,
+                                   deliveryAddresses,
+                                   purchaseOrders,
+                                   initialSupplierId,
+                                 }: NewShipmentModalProps) {
+  const supplierOptions =
+    Array.isArray(suppliers) && suppliers.length > 0 ? suppliers : Array.isArray(companies) ? companies : [];
 
-  list.sort((a, b) => {
-    const aKey = norm(a.shortName);
-    const bKey = norm(b.shortName);
+  const defaultSupplierId = useMemo(() => {
+    const first = supplierOptions?.[0]?.shortName ?? "";
+    return String(initialSupplierId ?? first).trim();
+  }, [supplierOptions, initialSupplierId]);
 
-    const aIsRsl = aKey === "rsl";
-    const bIsRsl = bKey === "rsl";
-    if (aIsRsl && !bIsRsl) return -1;
-    if (bIsRsl && !aIsRsl) return 1;
+  const defaults: ShipmentDraft = useMemo(
+    () => ({
+      supplierId: defaultSupplierId,
+      containerNumber: "",
 
-    const aIsOther = aKey === "other";
-    const bIsOther = bKey === "other";
-    if (aIsOther && !bIsOther) return 1;
-    if (bIsOther && !aIsOther) return -1;
+      containerSize: containers?.[0]?.shortName ?? "",
+      portOfOrigin: originPorts?.[0]?.shortName ?? "",
+      destinationPort: destinationPorts?.[0]?.shortName ?? "",
 
-    return aKey.localeCompare(bKey);
-  });
+      bookingAgent: bookingAgents?.[0]?.shortName ?? "",
+      bookingNumber: "",
+      vesselName: "",
+      deliveryAddress: deliveryAddresses?.[0]?.shortName ?? "",
 
-  return list;
-}
+      cargoReadyDate: "",
+      etd: "",
+      eta: "",
 
-function labelOpt(o: { shortName: string; displayName?: string | null }) {
-  const d = String(o.displayName ?? "").trim();
-  return d ? `${o.shortName} — ${d}` : o.shortName;
-}
+      supplierPi: "",
+      quantity: "",
+      estimatedDeliveryToOrigin: "",
 
-function sortLookupByLabel(list: LookupOption[]) {
-  return (list || []).slice().sort((a, b) => {
-    const al = labelOpt(a).toLowerCase();
-    const bl = labelOpt(b).toLowerCase();
-    return al.localeCompare(bl);
-  });
-}
+      status: "Pending",
+      notes: "",
 
-const overlayStyle: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.45)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 50,
-  padding: 16,
-};
-
-const modalStyle: React.CSSProperties = {
-  width: "100%",
-  maxWidth: 980,
-  background: "#fff",
-  borderRadius: 16,
-  overflow: "hidden",
-  boxShadow: "0 30px 80px rgba(15,23,42,0.25)",
-  display: "flex",
-  flexDirection: "column",
-  maxHeight: "90vh",
-};
-
-const headerStyle: React.CSSProperties = {
-  background: "#2563eb",
-  color: "#fff",
-  padding: "14px 18px",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-};
-
-const bodyStyle: React.CSSProperties = { padding: 18, overflowY: "auto" };
-
-const sectionTitleStyle: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 650,
-  color: "#0f172a",
-  marginBottom: 10,
-};
-
-const gridStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-  gap: 12,
-};
-
-const fieldLabelStyle: React.CSSProperties = {
-  fontSize: 12,
-  fontWeight: 600,
-  color: "#64748b",
-  marginBottom: 6,
-};
-
-const inputWrapStyle: React.CSSProperties = { position: "relative" };
-
-const iconStyle: React.CSSProperties = {
-  position: "absolute",
-  left: 10,
-  top: "50%",
-  transform: "translateY(-50%)",
-  color: "#94a3b8",
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "10px 10px 10px 34px",
-  borderRadius: 10,
-  border: "1px solid #d1d5db",
-  fontSize: 13,
-  outline: "none",
-};
-
-const selectStyle: React.CSSProperties = {
-  ...inputStyle,
-  background: "#fff",
-};
-
-const textareaStyle: React.CSSProperties = {
-  width: "100%",
-  borderRadius: 10,
-  border: "1px solid #d1d5db",
-  fontSize: 13,
-  outline: "none",
-  padding: 10,
-  minHeight: 90,
-  resize: "vertical",
-};
-
-const footerStyle: React.CSSProperties = {
-  borderTop: "1px solid #e5e7eb",
-  background: "#f8fafc",
-  padding: "12px 18px",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-};
-
-const btnStyle: React.CSSProperties = {
-  borderRadius: 10,
-  padding: "10px 14px",
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
-  border: "1px solid transparent",
-};
-
-const errorBoxStyle: React.CSSProperties = {
-  background: "#fef2f2",
-  border: "1px solid #fecaca",
-  color: "#991b1b",
-  borderRadius: 12,
-  padding: "10px 12px",
-  fontSize: 12,
-  marginBottom: 12,
-};
-
-export default function NewShipmentModal({
-                                           shipment,
-                                           companies = [],
-                                           containers = [],
-                                           originPorts = [],
-                                           destinationPorts = [],
-                                           onClose,
-                                           onCreate,
-                                           isSaving = false,
-                                           error = null,
-                                         }: NewShipmentModalProps) {
-  const [form, setForm] = useState<UIShipment>(shipment);
-
-  useEffect(() => setForm(shipment), [shipment]);
-
-  const orderedCompanies = useMemo(
-    () => sortCompaniesSpecial(Array.isArray(companies) ? companies : []),
-    [companies]
+      purchaseOrderGIDs: [],
+    }),
+    [defaultSupplierId, containers, originPorts, destinationPorts, bookingAgents, deliveryAddresses]
   );
 
-  // IMPORTANT: originPorts is the tlkp_originPort list
-  const orderedOriginPorts = useMemo(
-    () => sortLookupByLabel(Array.isArray(originPorts) ? originPorts : []),
-    [originPorts]
+  const [form, setForm] = useState<ShipmentDraft>(defaults);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reset only when the modal transitions from closed -> open.
+  const prevOpenRef = useRef<boolean>(open);
+  useEffect(() => {
+    const wasOpen = prevOpenRef.current;
+    if (open && !wasOpen) {
+      setError(null);
+      setBusy(false);
+      setForm(defaults);
+    }
+    prevOpenRef.current = open;
+  }, [open, defaults]);
+
+  const supplierChoices = [{ label: "Select…", value: "" }].concat(
+    (supplierOptions || []).map((c) => ({
+      label: c.displayName ? `${c.displayName} (${c.shortName})` : c.shortName,
+      value: c.shortName,
+    }))
   );
 
-  const orderedDestinationPorts = useMemo(
-    () => sortLookupByLabel(Array.isArray(destinationPorts) ? destinationPorts : []),
-    [destinationPorts]
-  );
+  const lookupChoices = (items: LookupOption[]) =>
+    [{ label: "Select…", value: "" }].concat(
+      (items || []).map((x) => ({
+        label: x.displayName ? `${x.displayName} (${x.shortName})` : x.shortName,
+        value: x.shortName,
+      }))
+    );
 
-  const canCreate = useMemo(() => {
+  const containerChoices = lookupChoices(containers || []);
+  const originChoices = lookupChoices(originPorts || []);
+  const destChoices = lookupChoices(destinationPorts || []);
+  const bookingAgentChoices = lookupChoices(bookingAgents || []);
+  const deliveryAddressChoices = lookupChoices(deliveryAddresses || []);
+
+  const poItems = Array.isArray(purchaseOrders) ? purchaseOrders : [];
+
+  const poValue = (po: PurchaseOrderOption) => {
+    const gid = String(po.purchaseOrderGID ?? "").trim();
+    if (gid) return gid;
+    const id = po.id;
+    return id === undefined || id === null ? "" : String(id);
+  };
+
+  const togglePo = (gid: string) => {
+    setForm((prev) => {
+      const cur = prev.purchaseOrderGIDs || [];
+      const next = cur.includes(gid) ? cur.filter((x) => x !== gid) : [...cur, gid];
+      return { ...prev, purchaseOrderGIDs: next };
+    });
+  };
+
+  const confirmCancel = () => {
+    if (busy) return false;
+    if (typeof window === "undefined") return true;
+    return window.confirm("Discard this new shipment and lose your changes?");
+  };
+
+  const handleCancel = () => {
+    if (!confirmCancel()) return;
+    onClose();
+  };
+
+  const submitCreate = async () => {
+    setError(null);
+
     const supplierId = String(form.supplierId || "").trim();
-    const containerNumber = String(form.containerNumber || "").trim();
-    return !!supplierId && !!containerNumber;
-  }, [form.supplierId, form.containerNumber]);
+    const containerNumber = String(form.containerNumber || "").trim().toUpperCase();
+
+    if (!supplierId || !containerNumber) {
+      setError("Supplier and Container # are required.");
+      return;
+    }
+
+    const payload: any = {
+      supplierId,
+      containerNumber,
+      containerSize: form.containerSize || null,
+      portOfOrigin: form.portOfOrigin || null,
+      destinationPort: form.destinationPort || null,
+      status: form.status || null,
+
+      eta: toYyyyMmDd(form.eta),
+      cargoReadyDate: toYyyyMmDd(form.cargoReadyDate),
+      etd: toYyyyMmDd(form.etd),
+      estimatedDeliveryToOrigin: toYyyyMmDd(form.estimatedDeliveryToOrigin),
+
+      supplierPi: String(form.supplierPi || "").trim() || null,
+      quantity: form.quantity ? safeIntString(form.quantity) : null,
+
+      bookingAgent: String(form.bookingAgent || "").trim() || null,
+      bookingNumber: String(form.bookingNumber || "").trim() || null,
+      vesselName: String(form.vesselName || "").trim() || null,
+      deliveryAddress: String(form.deliveryAddress || "").trim() || null,
+
+      notes: String(form.notes || "").trim() || null,
+      purchaseOrderGIDs: Array.isArray(form.purchaseOrderGIDs) ? form.purchaseOrderGIDs : [],
+    };
+
+    setBusy(true);
+    try {
+      const res = await fetch("/apps/logistics/shipments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ intent: "create", shipment: payload }),
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!data || data.success !== true) {
+        setError(data?.error || "Server error while creating shipment.");
+        setBusy(false);
+        return;
+      }
+
+      onCreated(data.shipment);
+      setBusy(false);
+      onClose();
+    } catch (e: any) {
+      setError(e?.message || "Network error while creating shipment.");
+      setBusy(false);
+    }
+  };
 
   return (
-    <div style={overlayStyle} role="dialog" aria-modal="true">
-      <div style={modalStyle}>
-        <div style={headerStyle}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Truck size={20} />
-            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <div style={{ fontSize: 14, fontWeight: 750 }}>Create Shipment</div>
-              <div style={{ fontSize: 12, opacity: 0.9 }}>Add a new shipment record</div>
-            </div>
+    <Modal
+      open={open}
+      onClose={handleCancel}
+      title="Create Shipment"
+    >
+      <Modal.Section>
+        {/* Scroll container */}
+        <div style={{ maxHeight: "75vh", overflowY: "auto" }}>
+          {/* Sticky top actions */}
+          <div
+            style={{
+              position: "sticky",
+              top: 0,
+              zIndex: 10,
+              background: "white",
+              paddingBottom: 12,
+              marginBottom: 12,
+              borderBottom: "1px solid var(--p-color-border-secondary, #e5e7eb)",
+            }}
+          >
+            <InlineStack align="space-between" blockAlign="center">
+              <Button onClick={handleCancel} disabled={busy}>
+                Cancel
+              </Button>
+              <Button onClick={submitCreate} loading={busy} disabled={busy}>
+                Submit
+              </Button>
+            </InlineStack>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              ...btnStyle,
-              padding: "8px 10px",
-              background: "rgba(255,255,255,0.12)",
-              color: "#fff",
-            }}
-            aria-label="Close"
-          >
-            <X size={18} />
-          </button>
-        </div>
+          <BlockStack gap="400">
+            {error ? (
+              <Banner tone="critical" title="Could not create shipment">
+                <p>{error}</p>
+              </Banner>
+            ) : null}
 
-        <div style={bodyStyle}>
-          {error ? <div style={errorBoxStyle}>{error}</div> : null}
+            {Array.isArray(deliveryAddresses) && deliveryAddresses.length === 0 ? (
+              <Banner tone="warning" title="Delivery Address list is empty">
+                <p>
+                  No rows were returned from <code>tlkp_deliveryAddress</code>, so the dropdown will be empty.
+                </p>
+              </Banner>
+            ) : null}
 
-          <section style={{ marginBottom: 18 }}>
-            <div style={sectionTitleStyle}>Shipment</div>
-
-            <div style={gridStyle}>
-              {/* Supplier */}
-              <div>
-                <div style={fieldLabelStyle}>Supplier</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <Factory size={16} />
-                  </span>
-                  <select
-                    value={String(form.supplierId || "")}
-                    onChange={(e) => {
-                      const supplierId = e.target.value || "";
-                      const found = orderedCompanies.find((c) => c.shortName === supplierId);
-                      const supplierName =
-                        (found?.displayName && String(found.displayName).trim()) || supplierId;
-
-                      setForm((p) => ({ ...p, supplierId, supplierName }));
-                    }}
-                    style={selectStyle}
-                    disabled={isSaving}
-                  >
-                    <option value="">
-                      {orderedCompanies.length ? "Select supplier…" : "No companies loaded"}
-                    </option>
-                    {orderedCompanies.map((c) => (
-                      <option key={c.shortName} value={c.shortName}>
-                        {labelOpt(c)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Container # */}
-              <div>
-                <div style={fieldLabelStyle}>Container #</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <Box size={16} />
-                  </span>
-                  <input
-                    value={String(form.containerNumber || "")}
-                    onChange={(e) =>
-                      setForm((p) => ({ ...p, containerNumber: e.target.value.toUpperCase() }))
-                    }
-                    style={inputStyle}
-                    disabled={isSaving}
-                    placeholder="e.g. MSCU1234567"
-                  />
-                </div>
-              </div>
-
-              {/* Booking Number */}
-              <div>
-                <div style={fieldLabelStyle}>Booking Number</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <Hash size={16} />
-                  </span>
-                  <input
-                    value={String(form.bookingNumber || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, bookingNumber: e.target.value }))}
-                    style={inputStyle}
-                    disabled={isSaving}
-                    placeholder="Booking #"
-                  />
-                </div>
-              </div>
-
-              {/* Supplier PI */}
-              <div>
-                <div style={fieldLabelStyle}>Supplier PI</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <FileText size={16} />
-                  </span>
-                  <input
-                    value={String(form.supplierPi || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, supplierPi: e.target.value }))}
-                    style={inputStyle}
-                    disabled={isSaving}
-                    placeholder="Supplier PI"
-                  />
-                </div>
-              </div>
-
-              {/* Quantity */}
-              <div>
-                <div style={fieldLabelStyle}>Quantity</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <Box size={16} />
-                  </span>
-                  <input
-                    value={String(form.quantity || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, quantity: e.target.value }))}
-                    style={inputStyle}
-                    disabled={isSaving}
-                    placeholder="(integer)"
-                  />
-                </div>
-              </div>
-
-              {/* Container Size */}
-              <div>
-                <div style={fieldLabelStyle}>Container Size</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <Box size={16} />
-                  </span>
-                  <select
-                    value={String(form.containerSize || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, containerSize: e.target.value }))}
-                    style={selectStyle}
-                    disabled={isSaving}
-                  >
-                    <option value="">—</option>
-                    {containers.map((c) => (
-                      <option key={c.shortName} value={c.shortName}>
-                        {labelOpt(c)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Port of Origin (from tlkp_originPort) */}
-              <div>
-                <div style={fieldLabelStyle}>Port of Origin</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <Anchor size={16} />
-                  </span>
-                  <select
-                    value={String(form.portOfOrigin || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, portOfOrigin: e.target.value }))}
-                    style={selectStyle}
-                    disabled={isSaving}
-                  >
-                    <option value="">
-                      {orderedOriginPorts.length ? "Select origin port…" : "No origin ports loaded"}
-                    </option>
-                    {orderedOriginPorts.map((p) => (
-                      <option key={p.shortName} value={p.shortName}>
-                        {labelOpt(p)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Destination Port (from tlkp_destinationPort) */}
-              <div>
-                <div style={fieldLabelStyle}>Destination Port</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <MapPin size={16} />
-                  </span>
-                  <select
-                    value={String(form.destinationPort || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, destinationPort: e.target.value }))}
-                    style={selectStyle}
-                    disabled={isSaving}
-                  >
-                    <option value="">
-                      {orderedDestinationPorts.length
-                        ? "Select destination port…"
-                        : "No destination ports loaded"}
-                    </option>
-                    {orderedDestinationPorts.map((p) => (
-                      <option key={p.shortName} value={p.shortName}>
-                        {labelOpt(p)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Cargo Ready Date */}
-              <div>
-                <div style={fieldLabelStyle}>Cargo Ready Date</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <CalendarDays size={16} />
-                  </span>
-                  <input
-                    type="date"
-                    value={String(form.cargoReadyDate || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, cargoReadyDate: e.target.value }))}
-                    style={inputStyle}
-                    disabled={isSaving}
-                  />
-                </div>
-              </div>
-
-              {/* Est. Delivery To Origin */}
-              <div>
-                <div style={fieldLabelStyle}>Est. Delivery To Origin</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <CalendarDays size={16} />
-                  </span>
-                  <input
-                    type="date"
-                    value={String(form.estimatedDeliveryToOrigin || "")}
-                    onChange={(e) =>
-                      setForm((p) => ({ ...p, estimatedDeliveryToOrigin: e.target.value }))
-                    }
-                    style={inputStyle}
-                    disabled={isSaving}
-                  />
-                </div>
-              </div>
-
-              {/* ETA */}
-              <div>
-                <div style={fieldLabelStyle}>ETA</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <CalendarDays size={16} />
-                  </span>
-                  <input
-                    type="date"
-                    value={String(form.eta || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, eta: e.target.value }))}
-                    style={inputStyle}
-                    disabled={isSaving}
-                  />
-                </div>
-              </div>
-
-              {/* Status */}
-              <div>
-                <div style={fieldLabelStyle}>Status</div>
-                <div style={inputWrapStyle}>
-                  <span style={iconStyle}>
-                    <Truck size={16} />
-                  </span>
-                  <select
-                    value={String(form.status || "")}
-                    onChange={(e) => setForm((p) => ({ ...p, status: e.target.value }))}
-                    style={selectStyle}
-                    disabled={isSaving}
-                  >
-                    <option value="">—</option>
-                    <option value="Pending">Pending</option>
-                    <option value="In Transit">In Transit</option>
-                    <option value="Arrived">Arrived</option>
-                    <option value="Delivered">Delivered</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Notes */}
-              <div style={{ gridColumn: "1 / -1" }}>
-                <div style={fieldLabelStyle}>Notes</div>
-                <textarea
-                  value={String(form.notes || "")}
-                  onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))}
-                  style={textareaStyle}
-                  disabled={isSaving}
-                  placeholder="Internal notes…"
+            <Box>
+              <Text variant="headingSm" as="h3">Booking</Text>
+              <Box paddingBlockStart="200" />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+                <Select
+                  label="Booking Agent"
+                  options={bookingAgentChoices}
+                  value={form.bookingAgent}
+                  onChange={(v) => setForm((p) => ({ ...p, bookingAgent: v }))}
+                />
+                <TextField
+                  label="Booking #"
+                  value={form.bookingNumber}
+                  onChange={(v) => setForm((p) => ({ ...p, bookingNumber: v }))}
+                  autoComplete="off"
+                  placeholder="Enter the booking number"
+                />
+                <TextField
+                  label="Vessel Name"
+                  value={form.vesselName}
+                  onChange={(v) => setForm((p) => ({ ...p, vesselName: v }))}
+                  autoComplete="off"
+                  placeholder="Name of the vessel carrying this shipment"
                 />
               </div>
-            </div>
-          </section>
-        </div>
+            </Box>
 
-        <div style={footerStyle}>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={isSaving}
-            style={{
-              ...btnStyle,
-              background: "#fff",
-              borderColor: "#d1d5db",
-              color: "#0f172a",
-            }}
-          >
-            Close
-          </button>
+            <Divider />
 
-          <button
-            type="button"
-            onClick={() => onCreate(form)}
-            disabled={isSaving || !canCreate}
-            style={{
-              ...btnStyle,
-              background: isSaving || !canCreate ? "#93c5fd" : "#2563eb",
-              color: "#fff",
-            }}
-          >
-            {isSaving ? "Creating…" : "Create Shipment"}
-          </button>
+            <Box>
+              <Text variant="headingSm" as="h3">Parties & Container</Text>
+              <Box paddingBlockStart="200" />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+                <Select
+                  label="Supplier"
+                  options={supplierChoices}
+                  value={form.supplierId}
+                  onChange={(v) => setForm((p) => ({ ...p, supplierId: v }))}
+                />
+                <TextField
+                  label="Container #"
+                  value={form.containerNumber}
+                  onChange={(v) => setForm((p) => ({ ...p, containerNumber: v }))}
+                  autoComplete="off"
+                />
+                <Select
+                  label="Container Size"
+                  options={containerChoices}
+                  value={form.containerSize}
+                  onChange={(v) => setForm((p) => ({ ...p, containerSize: v }))}
+                />
+              </div>
+            </Box>
+
+            <Box>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+                <Select
+                  label="Port of Origin"
+                  options={originChoices}
+                  value={form.portOfOrigin}
+                  onChange={(v) => setForm((p) => ({ ...p, portOfOrigin: v }))}
+                />
+                <Select
+                  label="Destination Port"
+                  options={destChoices}
+                  value={form.destinationPort}
+                  onChange={(v) => setForm((p) => ({ ...p, destinationPort: v }))}
+                />
+                <Select
+                  label="Delivery Address"
+                  options={deliveryAddressChoices}
+                  value={form.deliveryAddress}
+                  onChange={(v) => setForm((p) => ({ ...p, deliveryAddress: v }))}
+                />
+              </div>
+            </Box>
+
+            <Divider />
+
+            <Box>
+              <Text variant="headingSm" as="h3">Purchase Orders</Text>
+              <Box paddingBlockStart="200" />
+              {poItems.length === 0 ? (
+                <Text as="p" tone="subdued">No purchase orders available.</Text>
+              ) : (
+                <BlockStack gap="100">
+                  {poItems.map((po) => {
+                    const value = poValue(po);
+                    const label = String(po.shortName || "").trim() || value || "(unnamed PO)";
+                    const checked = value ? (form.purchaseOrderGIDs || []).includes(value) : false;
+                    return (
+                      <Checkbox
+                        key={value || label}
+                        label={label}
+                        checked={checked}
+                        disabled={!value}
+                        onChange={() => value && togglePo(value)}
+                      />
+                    );
+                  })}
+                </BlockStack>
+              )}
+            </Box>
+
+            {busy ? (
+              <InlineStack gap="200" align="end">
+                <Button loading>Saving</Button>
+              </InlineStack>
+            ) : null}
+          </BlockStack>
         </div>
-      </div>
-    </div>
+      </Modal.Section>
+    </Modal>
   );
 }

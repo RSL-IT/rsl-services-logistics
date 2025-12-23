@@ -3,144 +3,131 @@ import { json } from "@remix-run/node";
 import bcrypt from "bcryptjs";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
+import { commitLogisticsUserSession } from "~/logistics-auth.server";
 
-function mapUserTypeToRole(userType) {
-  const raw = String(userType || "").trim().toLowerCase();
-  return raw.includes("supplier") ? "supplier" : "internal";
-}
-
-// This route is used as an API endpoint by the LogisticsApp login UI.
-// It supports both JSON (fetch) and form-encoded posts.
+// API endpoint used by the Logistics UI login form.
+// - Allows passwordless login for legacy users with password=NULL.
+// - If a user has a password hash, requires a matching password.
+// - On success, sets a cookie session so portal reloads won't "bounce" back to login.
 export async function action({ request }) {
-  // 1) Best-effort app proxy verification
-  let proxyVerified = false;
-  let proxySkipReason = "none";
+  const debug = { stage: "start", proxyVerified: false };
 
+  // Best-effort proxy verification
   try {
     await verifyProxyIfPresent(request);
-    proxyVerified = true;
+    debug.proxyVerified = true;
   } catch (err) {
     if (err instanceof Response && err.status === 401) {
-      proxyVerified = false;
-      proxySkipReason = "no_proxy_signature";
+      debug.proxyVerified = false;
+      debug.proxySkipReason = "no_proxy_signature";
+      console.warn("[logistics login] proxy verification skipped:", {
+        status: err.status,
+      });
     } else {
-      console.info("[logistics login] proxy verification error", err);
-      proxySkipReason = "verify_exception";
+      console.error("[logistics login] proxy verification error:", err);
     }
   }
-
-  // 2) Parse body
-  const contentType = request.headers.get("content-type") || "";
-  let email = "";
-  let password = "";
 
   try {
+    debug.stage = "parse-body";
+    const contentType = request.headers.get("content-type") || "";
+    let payload;
+
     if (contentType.includes("application/json")) {
-      const body = await request.json();
-      email = (body.email || "").toString().trim().toLowerCase();
-      password = (body.password || "").toString();
+      payload = await request.json();
     } else {
       const formData = await request.formData();
-      email = ((formData.get("email") ?? "") + "").trim().toLowerCase();
-      password = ((formData.get("password") ?? "") + "").toString();
+      payload = Object.fromEntries(formData);
     }
-  } catch (err) {
-    console.error("[logistics login] body parse error", err, { contentType });
-    return json(
-      {
-        ok: false,
-        stage: "invalid_body",
-        proxyVerified,
-        proxySkipReason,
-        emailPresent: !!email,
-        passwordPresent: !!password,
+
+    const email = String(payload.email || "").trim().toLowerCase();
+    const password = String(payload.password || "");
+    const passwordPresent = password.trim().length > 0;
+
+    if (!email) {
+      return json({ ok: false, error: "Email is required.", debug }, { status: 200 });
+    }
+
+    debug.stage = "lookup-user";
+    const candidate = await logisticsDb.tbl_logisticsUser.findFirst({
+      where: { email },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+        userType: true,
+        companyID: true,
+        password: true, // may be null
       },
-      { status: 400 },
-    );
-  }
+    });
 
-  if (!email || !password) {
-    return json(
-      {
-        ok: false,
-        stage: "missing_fields",
-        proxyVerified,
-        proxySkipReason,
-        emailPresent: !!email,
-        passwordPresent: !!password,
-      },
-      { status: 400 },
-    );
-  }
+    console.info("[logistics login] candidate", {
+      id: candidate?.id,
+      email: candidate?.email,
+      isActive: candidate?.isActive,
+      userType: candidate?.userType,
+    });
 
-  // 3) Look up user
-  const candidate = await logisticsDb.tbl_logisticsUser.findFirst({
-    where: { email },
-    select: {
-      id: true,
-      email: true,
-      password: true,
-      isActive: true,
-      userType: true,
-      companyID: true,
-    },
-  });
+    if (!candidate || candidate.isActive === false) {
+      return json({ ok: false, error: "Invalid credentials.", debug }, { status: 401 });
+    }
 
-  console.info(
-    "[logistics login] candidate",
-    candidate
-      ? {
-        id: candidate.id,
-        email: candidate.email,
-        isActive: candidate.isActive,
-        userType: candidate.userType,
+    const hasPasswordHash = Boolean(candidate.password && String(candidate.password).trim());
+
+    // If user has a password set, require it and validate it.
+    if (hasPasswordHash) {
+      if (!passwordPresent) {
+        return json(
+          { ok: false, error: "Password is required for this account.", debug, stage: "missing_password" },
+          { status: 401 },
+        );
       }
-      : null,
-  );
 
-  if (!candidate || candidate.isActive === false || !candidate.password) {
+      debug.stage = "check-password";
+      const ok = await bcrypt.compare(password, String(candidate.password));
+      if (!ok) {
+        return json({ ok: false, error: "Invalid credentials.", debug, stage: "bad_password" }, { status: 401 });
+      }
+    } else {
+      // Legacy account: password=NULL → allow login (but signal it so you can later enforce).
+      debug.stage = "legacy-passwordless";
+      debug.needsPasswordSetup = true;
+    }
+
+    const rawUserType = String(candidate.userType || "").trim().toLowerCase();
+    const role = rawUserType.includes("supplier") ? "supplier" : "internal";
+    const supplierId = role === "supplier" ? (candidate.companyID ?? null) : null;
+
+    // Persist session cookie
+    debug.stage = "commit-session";
+    const setCookie = await commitLogisticsUserSession(request, candidate.id);
+
+    console.info("[logistics login] success", {
+      ok: true,
+      email: candidate.email,
+      role,
+      supplierId,
+      proxyVerified: debug.proxyVerified,
+      proxySkipReason: debug.proxySkipReason,
+      needsPasswordSetup: debug.needsPasswordSetup || false,
+    });
+
     return json(
       {
-        ok: false,
-        stage: "invalid_creds",
-        proxyVerified,
-        proxySkipReason,
+        ok: true,
+        email: candidate.email,
+        role,
+        supplierId,
+        needsPasswordSetup: Boolean(debug.needsPasswordSetup),
+        debug,
       },
-      { status: 401 },
-    );
-  }
-
-  // 4) Check password
-  const pwdOk = await bcrypt.compare(password, candidate.password);
-  if (!pwdOk) {
-    return json(
       {
-        ok: false,
-        stage: "invalid_creds",
-        proxyVerified,
-        proxySkipReason,
+        status: 200,
+        headers: { "Set-Cookie": setCookie },
       },
-      { status: 401 },
     );
+  } catch (err) {
+    console.error("[logistics login] unexpected error:", err, debug);
+    return json({ ok: false, error: "Server error during login.", debug }, { status: 200 });
   }
-
-  // 5) Map DB userType -> role
-  const role = mapUserTypeToRole(candidate.userType);
-
-  const responseBody = {
-    ok: true,
-    stage: "success",
-    proxyVerified,
-    proxySkipReason,
-    email: candidate.email,
-    role,
-    supplierId: role === "supplier" ? candidate.companyID : null,
-  };
-
-  console.info("[logistics login] success", responseBody);
-  return json(responseBody);
-}
-
-export function loader() {
-  return json({ ok: true });
 }

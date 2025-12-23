@@ -1,8 +1,34 @@
 // app/logistics-ui/components/InternalDashboard.tsx
 import React, { useMemo, useState } from "react";
-import type { Shipment, CompanyOption, LookupOption } from "../LogisticsApp";
+import type { Shipment as BaseShipment, CompanyOption, LookupOption } from "../LogisticsApp";
 import type { User } from "../data/usersData";
 import ShipmentDetailsModal from "./ShipmentDetailsModal";
+
+// Local type so we don't depend on an export from LogisticsApp
+export type PurchaseOrderOption = {
+  purchaseOrderGID: string;
+  shortName: string;
+};
+
+// Extend Shipment safely (works whether LogisticsApp's Shipment already has these or not)
+export type Shipment = BaseShipment & {
+  // DB-backed fields you’re using in the shipment endpoint:
+  cargoReadyDate?: string;
+  estimatedDeliveryToOrigin?: string;
+  supplierPi?: string;
+  quantity?: string | number | null; // UI sends string; server parses BigInt
+  bookingNumber?: string;
+  notes?: string;
+
+  // UI-only fields (until you add DB columns):
+  bookingAgent?: string;
+  vesselName?: string;
+  deliveryAddress?: string;
+
+  // PO multi-select
+  purchaseOrderGIDs?: string[];
+  purchaseOrderShortNames?: string[];
+};
 
 interface InternalDashboardProps {
   currentUser: User;
@@ -13,16 +39,21 @@ interface InternalDashboardProps {
   originPorts: LookupOption[];
   destinationPorts: LookupOption[];
 
+  bookingAgents: LookupOption[];
+  deliveryAddresses: LookupOption[];
+  purchaseOrders: PurchaseOrderOption[];
+
   // Allow passing setState directly (Dispatch<SetStateAction<Shipment[]>>)
   onShipmentsChange: (next: Shipment[] | ((prev: Shipment[]) => Shipment[])) => void;
 
-  onLogout: () => void;
+  onLogout: () => void | Promise<void>;
   onNavigateToUsers: () => void;
+  onNavigateToPurchaseOrders: () => void;
 }
 
 function sortCompaniesSpecial(companies: CompanyOption[]) {
   const list = companies.slice();
-  const norm = (v: any) => String(v || "").trim().toLowerCase();
+  const norm = (v: unknown) => String(v || "").trim().toLowerCase();
 
   list.sort((a, b) => {
     const aKey = norm(a.shortName);
@@ -218,9 +249,13 @@ export function InternalDashboard({
                                     containers,
                                     originPorts,
                                     destinationPorts,
+                                    bookingAgents,
+                                    deliveryAddresses,
+                                    purchaseOrders,
                                     onShipmentsChange,
                                     onLogout,
                                     onNavigateToUsers,
+                                    onNavigateToPurchaseOrders,
                                   }: InternalDashboardProps) {
   const [selectedStatus, setSelectedStatus] = useState<string>("all");
   const [selectedSupplier, setSelectedSupplier] = useState<string>("all");
@@ -245,6 +280,13 @@ export function InternalDashboard({
     (currentUser as any)?.permissions?.createEditUser
   );
 
+  // No dedicated PO permission yet; best-fit is dashboard edit OR shipment create/update.
+  const canManagePurchaseOrders = !!(
+    (currentUser as any)?.permissions?.editDashboard ||
+    (currentUser as any)?.permissions?.createUpdateShipment ||
+    (currentUser as any)?.permissions?.modifyShipper
+  );
+
   const filteredShipments = useMemo(() => {
     return (shipments || []).filter((s) => {
       const matchStatus = selectedStatus === "all" || s.status === selectedStatus;
@@ -261,23 +303,40 @@ export function InternalDashboard({
     const presetSupplierName =
       (presetCompany?.displayName && String(presetCompany.displayName).trim()) || presetSupplierId;
 
+    // ✅ IMPORTANT: include ALL required BaseShipment fields so TS is happy.
     const blank: Shipment = {
       id: "new",
       supplierId: presetSupplierId,
       supplierName: presetSupplierName,
-      products: [],
+      products: [] as Shipment["products"],
+
       containerNumber: "",
       containerSize: "",
       portOfOrigin: "",
       destinationPort: "",
+
       cargoReadyDate: "",
       etd: "",
-      actualDepartureDate: "",
+      actualDepartureDate: "", // required
       eta: "",
-      sealNumber: "",
-      hblNumber: "",
-      estimatedDeliveryDate: "",
+      sealNumber: "", // required
+      hblNumber: "", // required
+      estimatedDeliveryDate: "", // required
+
       status: "Pending",
+
+      // new fields
+      estimatedDeliveryToOrigin: "",
+      supplierPi: "",
+      quantity: 0,
+      bookingAgent: "",
+      bookingNumber: "",
+      vesselName: "",
+      deliveryAddress: "",
+      notes: "",
+
+      purchaseOrderGIDs: [],
+      purchaseOrderShortNames: [],
     };
 
     setActiveShipment(blank);
@@ -325,7 +384,7 @@ export function InternalDashboard({
       }
 
       closeShipmentModal();
-    } catch (err: any) {
+    } catch (err) {
       console.error("saveShipment error:", err);
       setShipmentError("Network/server error while saving shipment.");
       setSavingShipment(false);
@@ -356,7 +415,7 @@ export function InternalDashboard({
 
       onShipmentsChange((prev) => (prev || []).filter((x) => x.id !== String(s.id)));
       closeShipmentModal();
-    } catch (err: any) {
+    } catch (err) {
       console.error("deleteShipment error:", err);
       setShipmentError("Network/server error while deleting shipment.");
       setSavingShipment(false);
@@ -383,7 +442,16 @@ export function InternalDashboard({
             Manage Users
           </button>
 
-          <button onClick={onLogout} style={btnDanger}>
+          <button
+            onClick={onNavigateToPurchaseOrders}
+            disabled={!canManagePurchaseOrders}
+            style={canManagePurchaseOrders ? btnPrimary : btnDisabled}
+            title={!canManagePurchaseOrders ? "You do not have permission to manage purchase orders." : ""}
+          >
+            Manage Purchase Orders
+          </button>
+
+          <button onClick={() => void onLogout()} style={btnDanger}>
             Log Out
           </button>
         </div>
@@ -454,17 +522,19 @@ export function InternalDashboard({
                   ...(rowHoverStyle as any),
                   background: idx % 2 === 0 ? "#ffffff" : "#fbfdff",
                 }}
-                onMouseEnter={(e) => ((e.currentTarget.style.backgroundColor = "#f8fafc"))}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f8fafc")}
                 onMouseLeave={(e) =>
-                  ((e.currentTarget.style.backgroundColor = idx % 2 === 0 ? "#ffffff" : "#fbfdff"))
+                  (e.currentTarget.style.backgroundColor = idx % 2 === 0 ? "#ffffff" : "#fbfdff")
                 }
                 onClick={() => openShipmentDetail(s)}
               >
-                <td style={tdStyle}>{s.containerNumber}</td>
-                <td style={tdStyle}>{s.supplierName || s.supplierId}</td>
-                <td style={tdStyle}>{s.eta || "—"}</td>
+                <td style={tdStyle}>{s.containerNumber || "—"}</td>
+                <td style={tdStyle}>{s.supplierName || s.supplierId || "—"}</td>
+                <td style={tdStyle}>{(s as any).eta || "—"}</td>
                 <td style={tdStyle}>
-                  <span style={{ ...pillBase, ...statusPill(s.status) }}>{s.status || "—"}</span>
+                    <span style={{ ...pillBase, ...statusPill(String(s.status || "")) }}>
+                      {s.status || "—"}
+                    </span>
                 </td>
               </tr>
             ))}
@@ -488,6 +558,10 @@ export function InternalDashboard({
           containers={containers}
           originPorts={originPorts}
           destinationPorts={destinationPorts}
+          bookingAgents={bookingAgents}
+          deliveryAddresses={deliveryAddresses}
+          purchaseOrders={purchaseOrders}
+          canEdit={canCreateShipment}
           isSaving={savingShipment}
           error={shipmentError}
           onClose={closeShipmentModal}
