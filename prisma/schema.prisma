@@ -232,6 +232,10 @@ model tbl_purchaseOrder {
   // Current / latest PDF URL (Shopify CDN)
   purchaseOrderPdfUrl String?
 
+  // NEW: status lookup (FK to tlkp_purchaseOrderStatus.shortName)
+  statusShortName String?
+  status          tlkp_purchaseOrderStatus? @relation("PurchaseOrderStatus", fields: [statusShortName], references: [shortName], onDelete: SetNull, onUpdate: Cascade)
+
   // timestamps for detail page
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -241,6 +245,8 @@ model tbl_purchaseOrder {
 
   // history notes
   notes tbl_purchaseOrderNotes[]
+
+  @@index([statusShortName])
 }
 
 /**
@@ -325,4 +331,13 @@ model tlkp_permission {
   displayName String
 
   userLinks tbljn_logisticsUser_permission[]
+}
+
+model tlkp_purchaseOrderStatus {
+  id          Int    @id @default(autoincrement())
+  shortName   String @unique
+  displayName String
+
+  // NEW: back relation
+  purchaseOrders tbl_purchaseOrder[] @relation("PurchaseOrderStatus")
 }

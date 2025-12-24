@@ -2,10 +2,42 @@
 import React, { useMemo, useState } from "react";
 import { Search, Plus, ChevronLeft, Shield, Factory, Eye } from "lucide-react";
 
-import type { User as BaseUser } from "../data/usersData";
 import UserDetailsModal from "./UserDetailsModal";
+import type { Role } from "./types";
 
-export type UIUser = import("./types").User;
+export type UIPermissions = {
+  viewUserManagement?: boolean;
+  createEditUser?: boolean;
+  modifyShipper?: boolean;
+  viewDashboard?: boolean;
+  editDashboard?: boolean;
+  viewShipment?: boolean;
+  createUpdateShipment?: boolean;
+};
+
+export type UIUser = {
+  id: number | string;
+  email: string;
+
+  // Optional user-friendly name
+  name?: string | null;
+
+  // Used by the app's login/router
+  role?: Role | null;
+
+  // Display label used throughout the UI (e.g. "RSL Internal", "RSL Supplier")
+  userType?: string | null;
+
+  // Supplier/company reference when role/userType indicates supplier
+  supplierId?: string | null;
+
+  // Activation + auth
+  isActive?: boolean;
+  password?: string | null;
+
+  // UI permissions toggles
+  permissions?: UIPermissions;
+};
 
 export type CompanyOption = {
   shortName: string;
@@ -227,11 +259,11 @@ function isSupplier(user: UIUser): boolean {
 }
 
 function companyLabel(companyId: string | null | undefined, companies: CompanyOption[]) {
-  if (!companyId) return "—";
+  if (!companyId) return "-";
   const found = companies.find((c) => c.shortName === companyId);
   if (!found) return companyId;
   const display = String(found.displayName || "").trim();
-  return display ? `${found.shortName} — ${display}` : found.shortName;
+  return display ? `${found.shortName} - ${display}` : found.shortName;
 }
 
 async function postUsersEndpoint(payload: any) {
@@ -260,7 +292,6 @@ export function UserManagement({
   const [showDetails, setShowDetails] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
-  // IMPORTANT: use this instead of an unused `busy` var
   const [isSaving, setIsSaving] = useState(false);
 
   const filteredUsers = useMemo(() => {
@@ -426,7 +457,7 @@ export function UserManagement({
                 type="search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by name, email, company…"
+                placeholder="Search by name, email, company..."
                 style={searchInputStyle}
               />
             </div>

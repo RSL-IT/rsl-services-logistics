@@ -1,5 +1,5 @@
 // app/logistics-ui/LogisticsApp.tsx
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Login from "./components/Login";
 import { SupplierView } from "./components/SupplierView";
 import { InternalDashboard } from "./components/InternalDashboard";
@@ -10,6 +10,24 @@ import { mockShipments } from "./data/mockData";
 import { mockUsers, type User } from "./data/usersData";
 import type { Role } from "./components/types";
 import type { UIPurchaseOrder } from "./components/PurchaseOrderDetailsModal";
+
+function normalizePurchaseOrder(po: any): UIPurchaseOrder {
+  const gid = String(po?.purchaseOrderGID ?? "").trim();
+  const rawId = po?.id;
+  const id = String(rawId ?? "").trim() || gid || String(po?.shortName ?? "").trim();
+
+  return {
+    id: id || "new",
+    shortName: String(po?.shortName ?? "").trim(),
+    purchaseOrderGID: gid || undefined,
+    purchaseOrderPdfUrl: po?.purchaseOrderPdfUrl ?? null,
+    companyID: po?.companyID ?? po?.companyShortName ?? null,
+    companyName: po?.companyName ?? null,
+    createdAt: po?.createdAt ?? null,
+    updatedAt: po?.updatedAt ?? null,
+    notes: Array.isArray(po?.notes) ? po.notes : undefined,
+  };
+}
 
 // ---- Shared lookup types ----
 export type LookupOption = {
@@ -31,6 +49,13 @@ export type CompanyOption = {
   primaryContact?: string | null;
   primaryPhone?: string | null;
   primaryEmail?: string | null;
+};
+
+// Purchase order lookup option (used by shipment UI)
+export type PurchaseOrderOption = {
+  purchaseOrderGID: string;
+  shortName: string;
+  shipmentCount?: number;
 };
 
 // type imported from original App.tsx (same shape as mockShipments)
@@ -123,8 +148,18 @@ export default function LogisticsApp({
   );
 
   const [purchaseOrdersState, setPurchaseOrdersState] = useState<UIPurchaseOrder[]>(
-    Array.isArray(purchaseOrders) ? purchaseOrders : []
+    Array.isArray(purchaseOrders) ? purchaseOrders.map(normalizePurchaseOrder) : []
   );
+
+  const purchaseOrderOptions = useMemo<PurchaseOrderOption[]>(() => {
+    return purchaseOrdersState
+      .filter((po) => String(po.purchaseOrderGID || "").trim())
+      .map((po) => ({
+        purchaseOrderGID: String(po.purchaseOrderGID),
+        shortName: String(po.shortName || "").trim(),
+        shipmentCount: (po as any).shipmentCount,
+      }));
+  }, [purchaseOrdersState]);
 
   // Must match LoginProps.onLogin signature exactly
   const handleLogin = (role: Role, user: User, supplierIdArg?: string | null) => {
@@ -204,7 +239,7 @@ export default function LogisticsApp({
       destinationPorts={destinationPorts}
       bookingAgents={bookingAgents}
       deliveryAddresses={deliveryAddresses}
-      purchaseOrders={purchaseOrdersState as any}
+      purchaseOrders={purchaseOrderOptions}
       onShipmentsChange={setShipments}
       onLogout={handleLogout}
       onNavigateToUsers={handleNavigateToUsers}

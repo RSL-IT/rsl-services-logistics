@@ -1,545 +1,291 @@
-// app/logistics-ui/components/PurchaseOrderManagement.tsx
-import React, { useMemo, useState } from "react";
-import { Search, Plus, ChevronLeft, Eye, FileText, Building2 } from "lucide-react";
-
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import PurchaseOrderDetailsModal, {
+  type UICompany,
   type UIPurchaseOrder,
-  type CompanyOption,
 } from "./PurchaseOrderDetailsModal";
-import {withShopParam} from "~/logistics-ui/utils/shop";
 
-interface PurchaseOrderManagementProps {
-  purchaseOrders: UIPurchaseOrder[];
-  onPurchaseOrdersChange: (next: UIPurchaseOrder[]) => void;
-
-  companies: CompanyOption[];
-
-  onBack: () => void;
-  onLogout: () => void;
+function getShopParam(): string | null {
+  try {
+    const s = new URLSearchParams(window.location.search).get("shop");
+    return s ? String(s).trim() : null;
+  } catch {
+    return null;
+  }
 }
 
-type FilterOption = "all" | "withPdf" | "noPdf";
-
-// --- styles (mirrors UserManagement.tsx) -------------------------------------
-
-const pageStyle: React.CSSProperties = {
-  minHeight: "100vh",
-  backgroundColor: "#f5f7fb",
-  fontFamily:
-    'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-  color: "#111827",
-};
-
-const headerOuterStyle: React.CSSProperties = {
-  backgroundColor: "#ffffff",
-  borderBottom: "1px solid #e5e7eb",
-};
-
-const headerInnerStyle: React.CSSProperties = {
-  maxWidth: 1120,
-  margin: "0 auto",
-  padding: "12px 24px",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-};
-
-const headerLeftStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 12,
-};
-
-const backButtonStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "6px 10px",
-  borderRadius: 999,
-  border: "1px solid transparent",
-  background: "none",
-  cursor: "pointer",
-  color: "#4b5563",
-};
-
-const logoutButtonStyle: React.CSSProperties = {
-  fontSize: 13,
-  color: "#6b7280",
-  background: "none",
-  border: "none",
-  cursor: "pointer",
-};
-
-const mainStyle: React.CSSProperties = {
-  maxWidth: 1120,
-  margin: "0 auto",
-  padding: "20px 16px 32px",
-};
-
-const controlsRowStyle: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 12,
-  alignItems: "center",
-  justifyContent: "space-between",
-  marginBottom: 16,
-};
-
-const searchContainerStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 220,
-  display: "flex",
-  gap: 8,
-};
-
-const searchWrapperStyle: React.CSSProperties = {
-  position: "relative",
-  flex: 1,
-};
-
-const searchInputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "8px 10px 8px 30px",
-  borderRadius: 6,
-  border: "1px solid #d1d5db",
-  fontSize: 13,
-};
-
-const selectStyle: React.CSSProperties = {
-  minWidth: 150,
-  padding: "8px 10px",
-  borderRadius: 6,
-  border: "1px solid #d1d5db",
-  fontSize: 13,
-  backgroundColor: "#ffffff",
-};
-
-const createButtonStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 8,
-  padding: "8px 14px",
-  borderRadius: 8,
-  border: "none",
-  backgroundColor: "#2563eb",
-  color: "#ffffff",
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-  boxShadow: "0 10px 15px -3px rgba(37,99,235,0.25)",
-};
-
-const tableCardStyle: React.CSSProperties = {
-  backgroundColor: "#ffffff",
-  borderRadius: 10,
-  border: "1px solid #e5e7eb",
-  boxShadow: "0 10px 30px rgba(15,23,42,0.06)",
-  overflow: "hidden",
-};
-
-const tableStyle: React.CSSProperties = {
-  width: "100%",
-  borderCollapse: "collapse",
-  fontSize: 13,
-};
-
-const thStyle: React.CSSProperties = {
-  textAlign: "left",
-  padding: "10px 16px",
-  fontWeight: 500,
-  color: "#6b7280",
-  backgroundColor: "#f9fafb",
-  borderBottom: "1px solid #e5e7eb",
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: "10px 16px",
-  borderBottom: "1px solid #f3f4f6",
-  verticalAlign: "middle",
-};
-
-const statusPillBase: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  padding: "4px 10px",
-  borderRadius: 999,
-  fontSize: 11,
-  fontWeight: 500,
-};
-
-const linkButtonStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
-  fontSize: 12,
-  color: "#2563eb",
-  background: "none",
-  border: "none",
-  cursor: "pointer",
-};
-
-const statsRowStyle: React.CSSProperties = {
-  marginTop: 18,
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-  gap: 12,
-};
-
-const statCardStyle: React.CSSProperties = {
-  backgroundColor: "#ffffff",
-  borderRadius: 10,
-  border: "1px solid #e5e7eb",
-  padding: "10px 14px",
-  fontSize: 12,
-};
-
-const statLabelStyle: React.CSSProperties = {
-  color: "#6b7280",
-  marginBottom: 4,
-};
-
-const statValueStyle: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 600,
-  color: "#111827",
-};
-
-// --- API helper --------------------------------------------------------------
-
-async function postPurchaseOrdersEndpoint(payload: any) {
-  const res = await fetch(withShopParam("/apps/logistics/purchase-orders"), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return res.json();
+function withShop(url: string): string {
+  const shop = getShopParam();
+  if (!shop) return url;
+  try {
+    const u = new URL(url, window.location.origin);
+    u.searchParams.set("shop", shop);
+    return u.toString();
+  } catch {
+    // if url is relative without base support
+    return url.includes("?") ? `${url}&shop=${encodeURIComponent(shop)}` : `${url}?shop=${encodeURIComponent(shop)}`;
+  }
 }
 
-// -----------------------------------------------------------------------------
-// Component (named export + default)
-// -----------------------------------------------------------------------------
+function formatDateTime(v: string | Date | null | undefined): string {
+  if (!v) return "-";
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return "-";
+  return d.toLocaleString();
+}
 
-export function PurchaseOrderManagement({
-                                          purchaseOrders,
-                                          onPurchaseOrdersChange,
-                                          companies,
-                                          onBack,
-                                          onLogout,
-                                        }: PurchaseOrderManagementProps) {
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<FilterOption>("all");
+function roundToNearest(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  const r = Math.round(n);
+  return r < 1 ? 1 : r;
+}
 
-  const [selectedPO, setSelectedPO] = useState<UIPurchaseOrder | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
-  const [modalError, setModalError] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
+function formatUpdatedRelative(createdAt?: string | null, updatedAt?: string | null): string {
+  if (!createdAt || !updatedAt) return "-";
 
-  const filteredPOs = useMemo(() => {
-    const term = search.trim().toLowerCase();
+  const c = new Date(createdAt);
+  const u = new Date(updatedAt);
+  if (Number.isNaN(c.getTime()) || Number.isNaN(u.getTime())) return "-";
 
-    return (purchaseOrders || []).filter((po) => {
-      const matchesSearch =
-        !term ||
-        (po.shortName && po.shortName.toLowerCase().includes(term)) ||
-        (po.purchaseOrderGID && String(po.purchaseOrderGID).toLowerCase().includes(term));
+  const diffMs = u.getTime() - c.getTime();
+  // If no meaningful update since create, show "-"
+  if (Math.abs(diffMs) < 60_000) return "-";
 
-      const hasPdf = Boolean(String(po.purchaseOrderPdfUrl || "").trim());
+  const now = Date.now();
+  const sinceMs = now - u.getTime();
+  if (sinceMs < 0) return "0 minutes";
 
-      const matchesFilter =
-        filter === "all" ? true : filter === "withPdf" ? hasPdf : !hasPdf;
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  const month = 30 * day;
+  const year = 365 * day;
 
-      return matchesSearch && matchesFilter;
-    });
-  }, [purchaseOrders, search, filter]);
+  let value = 0;
+  let unit = "minutes";
 
-  const stats = useMemo(() => {
-    const total = purchaseOrders.length;
-    const withPdf = purchaseOrders.filter((po) =>
-      Boolean(String(po.purchaseOrderPdfUrl || "").trim())
-    ).length;
-    const noPdf = total - withPdf;
-    return { total, withPdf, noPdf };
-  }, [purchaseOrders]);
+  if (sinceMs < hour) {
+    value = roundToNearest(sinceMs / minute);
+    unit = "minute";
+  } else if (sinceMs < day) {
+    value = roundToNearest(sinceMs / hour);
+    unit = "hour";
+  } else if (sinceMs < month) {
+    value = roundToNearest(sinceMs / day);
+    unit = "day";
+  } else if (sinceMs < year) {
+    value = roundToNearest(sinceMs / month);
+    unit = "month";
+  } else {
+    value = roundToNearest(sinceMs / year);
+    unit = "year";
+  }
 
-  const openDetails = (po: UIPurchaseOrder) => {
-    setModalError(null);
-    setSelectedPO(po);
-    setShowDetails(true);
-  };
+  return `${value} ${unit}${value === 1 ? "" : "s"}`;
+}
 
-  const handleCreateClick = () => {
-    const blank: UIPurchaseOrder = {
+export function PurchaseOrderManagement() {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [companies, setCompanies] = useState<UICompany[]>([]);
+  const [purchaseOrders, setPurchaseOrders] = useState<UIPurchaseOrder[]>([]);
+
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalMode, setModalMode] = useState<"create" | "view">("view");
+  const [selected, setSelected] = useState<UIPurchaseOrder | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const res = await fetch(withShop("/apps/logistics/purchase-orders?intent=bootstrap"), {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Failed to load (${res.status})`);
+      }
+      setCompanies(Array.isArray(data.companies) ? data.companies : []);
+      setPurchaseOrders(Array.isArray(data.purchaseOrders) ? data.purchaseOrders : []);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load purchase orders.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const openCreate = useCallback(() => {
+    const nowIso = new Date().toISOString();
+    setSelected({
       id: "new",
       shortName: "",
-      companyID: "", // IMPORTANT: default to Select…
       purchaseOrderGID: "",
-      purchaseOrderPdfUrl: "",
-      notes: [],
-    };
-    openDetails(blank);
-  };
+      purchaseOrderPdfUrl: null,
+      createdAt: nowIso,
+      updatedAt: null,
+      companyID: null,
+      companyName: null,
+    });
+    setModalMode("create");
+    setModalOpen(true);
+  }, []);
 
-  const closeModal = () => {
-    setShowDetails(false);
-    setSelectedPO(null);
-    setModalError(null);
-  };
+  const openView = useCallback((po: UIPurchaseOrder) => {
+    setSelected(po);
+    setModalMode("view");
+    setModalOpen(true);
+  }, []);
 
-  const handleSave = async (mode: "create" | "update", purchaseOrderToSave: UIPurchaseOrder) => {
-    try {
-      setIsSaving(true);
-      setModalError(null);
-
-      const data = await postPurchaseOrdersEndpoint({
-        intent: mode,
-        purchaseOrder: purchaseOrderToSave,
-      });
-
-      if (!data || data.success !== true) {
-        setModalError(data?.error || "Unable to save purchase order.");
-        return;
+  const onSaved = useCallback((po: UIPurchaseOrder) => {
+    setPurchaseOrders((prev) => {
+      const idx = prev.findIndex((p) => p.purchaseOrderGID === po.purchaseOrderGID);
+      if (idx >= 0) {
+        const copy = prev.slice();
+        copy[idx] = { ...copy[idx], ...po };
+        return copy;
       }
+      return [po, ...prev];
+    });
+  }, []);
 
-      const saved = data.purchaseOrder as UIPurchaseOrder;
-
-      if (mode === "create") {
-        onPurchaseOrdersChange([...purchaseOrders, saved]);
-      } else {
-        onPurchaseOrdersChange(
-          purchaseOrders.map((po) => {
-            const a = String(po.purchaseOrderGID || "");
-            const b = String(saved.purchaseOrderGID || "");
-            if (a && b) return a === b ? saved : po;
-            return String(po.id) === String(saved.id) ? saved : po;
-          })
-        );
-      }
-
-      closeModal();
-    } catch (e: any) {
-      setModalError(e?.message || "Unable to save purchase order.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleDelete = async (purchaseOrderToDelete: UIPurchaseOrder) => {
-    try {
-      setIsSaving(true);
-      setModalError(null);
-
-      const data = await postPurchaseOrdersEndpoint({
-        intent: "delete",
-        purchaseOrder: purchaseOrderToDelete,
-      });
-
-      if (!data || data.success !== true) {
-        setModalError(data?.error || "Unable to delete purchase order.");
-        return;
-      }
-
-      const deletedGid = String(data.deletedPurchaseOrderGID || "");
-      const deletedId = String(data.deletedPurchaseOrderId || "");
-
-      onPurchaseOrdersChange(
-        purchaseOrders.filter((po) => {
-          if (deletedGid) return String(po.purchaseOrderGID || "") !== deletedGid;
-          if (deletedId) return String(po.id) !== deletedId;
-          return String(po.purchaseOrderGID || "") !== String(purchaseOrderToDelete.purchaseOrderGID || "");
-        })
-      );
-
-      closeModal();
-    } catch (e: any) {
-      setModalError(e?.message || "Unable to delete purchase order.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const companyLabel = (po: UIPurchaseOrder) => {
-    if (po.companyName) return po.companyName;
-    const cid = String(po.companyID || "").trim();
-    if (!cid) return "—";
-    const c = companies.find((x) => x.shortName === cid);
-    if (!c) return cid;
-    return c.displayName ? `${c.displayName} (${c.shortName})` : c.shortName;
-  };
+  const rows = useMemo(() => {
+    return purchaseOrders.map((po) => {
+      return {
+        key: po.purchaseOrderGID,
+        company: po.companyName || po.companyID || "-",
+        shortName: po.shortName || "-",
+        gid: po.purchaseOrderGID || "-",
+        created: formatDateTime(po.createdAt),
+        updatedRel: formatUpdatedRelative(po.createdAt ?? null, po.updatedAt ?? null),
+        po,
+      };
+    });
+  }, [purchaseOrders]);
 
   return (
-    <div style={pageStyle}>
-      <header style={headerOuterStyle}>
-        <div style={headerInnerStyle}>
-          <div style={headerLeftStyle}>
-            <button type="button" onClick={onBack} style={backButtonStyle}>
-              <ChevronLeft size={16} />
-              <span style={{ fontSize: 13 }}>Back to dashboard</span>
-            </button>
-            <div style={{ width: 1, height: 24, backgroundColor: "#e5e7eb" }} />
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 2 }}>
-                Purchase Order Management
-              </div>
-              <div style={{ fontSize: 12, color: "#6b7280" }}>
-                Manage purchase orders and PDF references
-              </div>
-            </div>
-          </div>
-
-          <button type="button" onClick={onLogout} style={logoutButtonStyle}>
-            Log out
-          </button>
-        </div>
-      </header>
-
-      <main style={mainStyle}>
-        <div style={controlsRowStyle}>
-          <div style={searchContainerStyle}>
-            <div style={searchWrapperStyle}>
-              <Search
-                size={16}
-                style={{
-                  position: "absolute",
-                  left: 8,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  color: "#9ca3af",
-                }}
-              />
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by PO number…"
-                style={searchInputStyle}
-              />
-            </div>
-
-            <select
-              value={filter}
-              onChange={(e) => setFilter(e.target.value as FilterOption)}
-              style={selectStyle}
-            >
-              <option value="all">All purchase orders</option>
-              <option value="withPdf">With PDF</option>
-              <option value="noPdf">No PDF</option>
-            </select>
-          </div>
-
+    <div style={{ padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ fontSize: 18, fontWeight: 800 }}>Purchase Orders</div>
+        <div style={{ display: "flex", gap: 8 }}>
           <button
             type="button"
-            onClick={handleCreateClick}
-            style={createButtonStyle}
-            disabled={isSaving}
+            onClick={() => void refresh()}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #e2e8f0",
+              background: "white",
+              cursor: "pointer",
+              fontWeight: 700,
+            }}
+            disabled={loading}
           >
-            <Plus size={16} />
-            <span>Create purchase order</span>
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={openCreate}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #0f172a",
+              background: "#0f172a",
+              color: "white",
+              cursor: "pointer",
+              fontWeight: 800,
+            }}
+          >
+            Create Purchase Order
           </button>
         </div>
+      </div>
 
-        <div style={tableCardStyle}>
-          <table style={tableStyle}>
+      {error ? (
+        <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#fff1f2", border: "1px solid #fecdd3" }}>
+          <div style={{ fontWeight: 800, color: "#9f1239" }}>Error</div>
+          <div style={{ color: "#9f1239" }}>{error}</div>
+        </div>
+      ) : null}
+
+      <div style={{ marginTop: 12, border: "1px solid #e2e8f0", borderRadius: 14, overflow: "hidden", background: "white" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
-            <tr>
-              <th style={thStyle}>PO Number</th>
-              <th style={thStyle}>Company</th>
-              <th style={thStyle}>PDF</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Actions</th>
+            <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Company</th>
+              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>PO Short Name</th>
+              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Purchase Order Shopify ID</th>
+              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Created</th>
+              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Updated</th>
+              <th style={{ textAlign: "right", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Actions</th>
             </tr>
             </thead>
-
             <tbody>
-            {filteredPOs.length === 0 ? (
+            {loading ? (
               <tr>
-                <td
-                  colSpan={4}
-                  style={{
-                    ...tdStyle,
-                    textAlign: "center",
-                    padding: "24px 16px",
-                    color: "#6b7280",
-                  }}
-                >
+                <td colSpan={6} style={{ padding: 12, color: "#64748b" }}>
+                  Loading…
+                </td>
+              </tr>
+            ) : rows.length === 0 ? (
+              <tr>
+                <td colSpan={6} style={{ padding: 12, color: "#64748b" }}>
                   No purchase orders found.
                 </td>
               </tr>
             ) : (
-              filteredPOs.map((po) => {
-                const hasPdf = Boolean(String(po.purchaseOrderPdfUrl || "").trim());
-
-                return (
-                  <tr
-                    key={String(po.purchaseOrderGID || po.id)}
-                    style={{ cursor: "pointer" }}
-                    onClick={() => openDetails(po)}
-                  >
-                    <td style={tdStyle}>{po.shortName || "—"}</td>
-                    <td style={tdStyle}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                          <Building2 size={14} style={{ color: "#94a3b8" }} />
-                          <span style={{ color: "#374151" }}>{companyLabel(po)}</span>
-                        </span>
-                    </td>
-                    <td style={tdStyle}>
-                        <span
-                          style={{
-                            ...statusPillBase,
-                            backgroundColor: hasPdf ? "#dcfce7" : "#f1f5f9",
-                            color: hasPdf ? "#166534" : "#334155",
-                            gap: 6,
-                          }}
-                        >
-                          <FileText size={14} />
-                          {hasPdf ? "PDF linked" : "No PDF"}
-                        </span>
-                    </td>
-                    <td style={{ ...tdStyle, textAlign: "right" }}>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openDetails(po);
-                        }}
-                        style={linkButtonStyle}
-                      >
-                        <Eye size={14} />
-                        <span>View</span>
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })
+              rows.map((r) => (
+                <tr
+                  key={r.key}
+                  style={{ borderBottom: "1px solid #f1f5f9", cursor: "pointer" }}
+                  onClick={() => openView(r.po)}
+                >
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.company}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap", fontWeight: 800 }}>{r.shortName}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.gid}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.created}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.updatedRel}</td>
+                  <td style={{ padding: 10, textAlign: "right", whiteSpace: "nowrap" }}>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openView(r.po);
+                      }}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 10,
+                        border: "1px solid #e2e8f0",
+                        background: "white",
+                        cursor: "pointer",
+                        fontWeight: 800,
+                      }}
+                    >
+                      View
+                    </button>
+                  </td>
+                </tr>
+              ))
             )}
             </tbody>
           </table>
         </div>
+      </div>
 
-        <div style={statsRowStyle}>
-          <div style={statCardStyle}>
-            <div style={statLabelStyle}>Total POs</div>
-            <div style={statValueStyle}>{stats.total}</div>
-          </div>
-          <div style={statCardStyle}>
-            <div style={statLabelStyle}>With PDF</div>
-            <div style={statValueStyle}>{stats.withPdf}</div>
-          </div>
-          <div style={statCardStyle}>
-            <div style={statLabelStyle}>No PDF</div>
-            <div style={statValueStyle}>{stats.noPdf}</div>
-          </div>
-        </div>
-      </main>
-
-      {showDetails && selectedPO ? (
+      {selected ? (
         <PurchaseOrderDetailsModal
-          purchaseOrder={selectedPO}
+          open={modalOpen}
+          mode={modalMode}
+          purchaseOrder={selected}
           companies={companies}
-          isSaving={isSaving}
-          error={modalError}
-          onClose={closeModal}
-          onSave={handleSave}
-          onDelete={handleDelete}
+          onClose={() => setModalOpen(false)}
+          onSaved={onSaved}
         />
       ) : null}
     </div>
