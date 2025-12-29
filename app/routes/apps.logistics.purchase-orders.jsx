@@ -3,40 +3,11 @@ import { json } from "@remix-run/node";
 import { logisticsDb } from "~/logistics-db.server";
 import { prisma } from "~/db.server";
 import { runAdminQuery } from "~/shopify-admin.server";
+import { ensureLogisticsUserOrJson } from "~/logistics-auth.server";
 
-/**
- * Helpers
- */
 function cleanStrOrNull(v) {
   const s = String(v ?? "").trim();
   return s ? s : null;
-}
-
-function resolveCompanyID(purchaseOrder) {
-  // UI has used companyID; some older code might send companyId.
-  return cleanStrOrNull(
-    purchaseOrder?.companyID ??
-    purchaseOrder?.companyId ??
-    purchaseOrder?.companyShortName ??
-    purchaseOrder?.company ??
-    null
-  );
-}
-
-async function getCompanySummaryByShortName(tx, shortName) {
-  if (!shortName) return null;
-  const company = await tx.tlkp_company.findUnique({
-    where: { shortName },
-    select: { shortName: true, displayName: true },
-  });
-  return company || null;
-}
-
-function formatCompanyName(company) {
-  if (!company) return null;
-  return company.displayName
-    ? `${company.displayName} (${company.shortName})`
-    : company.shortName;
 }
 
 function shopFromUrlString(urlStr) {
@@ -65,18 +36,69 @@ async function resolveShopForAdmin(request) {
   return sess?.shop || null;
 }
 
+function resolveCompanyIDFromAny(payloadOrPo, fallback) {
+  return cleanStrOrNull(
+    payloadOrPo?.companyID ??
+    payloadOrPo?.companyId ??
+    payloadOrPo?.companyShortName ??
+    payloadOrPo?.company ??
+    fallback ??
+    null,
+  );
+}
+
+async function getCompanySummaryByShortName(tx, shortName) {
+  if (!shortName) return null;
+  return tx.tlkp_company.findUnique({
+    where: { shortName },
+    select: { shortName: true, displayName: true },
+  });
+}
+
+function toUiNote(n) {
+  const createdAtIso = n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString();
+
+  // Normalize event type (just in case older rows exist)
+  const rawType = n.eventType || null;
+  const eventType = rawType === "PDF_UPDATE" ? "New PDF Uploaded" : rawType;
+
+  return {
+    id: String(n.id),
+    createdAt: createdAtIso,
+    content: n.content || "",
+    eventType,
+    pdfUrl: n.pdfUrl || null,
+    pdfFileName: n.pdfFileName || null,
+    displayName: n.logisticsUser?.displayName || null,
+  };
+}
+
+function toUiPO(po, company) {
+  return {
+    id: po.id,
+    shortName: po.shortName,
+    purchaseOrderGID: po.purchaseOrderGID,
+    purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
+    createdAt: po.createdAt ? po.createdAt.toISOString() : null,
+    updatedAt: po.updatedAt ? po.updatedAt.toISOString() : null,
+
+    companyID: company?.shortName || null,
+    // Long name only (per your request)
+    companyName: company?.displayName || company?.shortName || null,
+
+    notes: Array.isArray(po.notes) ? po.notes.map(toUiNote) : [],
+  };
+}
+
 /**
- * Shopify Files upload (stagedUploadsCreate -> PUT to staged target -> fileCreate)
- *
- * IMPORTANT:
- * Shopify's stagedUploadsCreate defaults httpMethod to PUT.
- * For GCS staged targets, you must upload with PUT (not multipart POST), otherwise
- * you can get SignatureDoesNotMatch.
+ * Shopify staged upload + fileCreate
+ * Handles:
+ *  - policy POST targets (multipart form with returned parameters + file)
+ *  - signed URL targets (some are POST-signed, some PUT-signed) => try POST then fallback PUT
  */
 async function uploadPdfToShopifyFiles({ shop, file }) {
   const filename = file.name || "purchase-order.pdf";
   const mimeType = file.type || "application/pdf";
-  // Shopify expects fileSize to be encoded as a string (UnsignedInt64)
   const fileSize = typeof file.size === "number" ? String(file.size) : undefined;
 
   const STAGED_UPLOAD = `
@@ -92,55 +114,63 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
     }
   `;
 
-  // Explicitly request PUT (matches default, but makes intent unambiguous)
   const stagedResp = await runAdminQuery(shop, STAGED_UPLOAD, {
     input: [
       {
         filename,
         mimeType,
         resource: "FILE",
-        httpMethod: "PUT",
         ...(fileSize ? { fileSize } : {}),
       },
     ],
   });
 
   const stagedErrs = stagedResp?.data?.stagedUploadsCreate?.userErrors || [];
-  if (stagedErrs.length) {
-    throw new Error(stagedErrs[0]?.message || "stagedUploadsCreate failed.");
-  }
+  if (stagedErrs.length) throw new Error(stagedErrs[0]?.message || "stagedUploadsCreate failed.");
 
   const target = stagedResp?.data?.stagedUploadsCreate?.stagedTargets?.[0];
-  if (
-    !target?.url ||
-    !target?.resourceUrl ||
-    !Array.isArray(target.parameters)
-  ) {
-    throw new Error("Missing staged upload target.");
+  if (!target?.url || !target?.resourceUrl) throw new Error("Missing staged upload target.");
+
+  const urlStr = String(target.url);
+  const params = Array.isArray(target.parameters) ? target.parameters : [];
+
+  // --- Upload to staged target ---
+  if (params.length > 0) {
+    // Policy POST style (canonical Shopify approach)
+    const fd = new FormData();
+    for (const p of params) fd.append(p.name, p.value);
+    fd.append("file", file);
+
+    const uploadRes = await fetch(urlStr, { method: "POST", body: fd });
+    if (!uploadRes.ok) {
+      const text = await uploadRes.text().catch(() => "");
+      throw new Error(`Staged upload failed: ${uploadRes.status} ${text}`.trim());
+    }
+  } else {
+    // Signed URL style (method can be POST-signed or PUT-signed; try POST first)
+    const buf = Buffer.from(await file.arrayBuffer());
+
+    const tryUpload = async (method) => {
+      const r = await fetch(urlStr, {
+        method,
+        headers: { "Content-Type": mimeType },
+        body: buf,
+      });
+      const text = !r.ok ? await r.text().catch(() => "") : "";
+      return { ok: r.ok, status: r.status, text };
+    };
+
+    let attempt = await tryUpload("POST");
+    if (!attempt.ok && String(attempt.text || "").includes("SignatureDoesNotMatch")) {
+      attempt = await tryUpload("PUT");
+    }
+
+    if (!attempt.ok) {
+      throw new Error(`Staged upload failed: ${attempt.status} ${attempt.text}`.trim());
+    }
   }
 
-  // PUT the file to the staged target.
-  // For PUT uploads, treat parameters as headers.
-  const headers = new Headers();
-  for (const p of target.parameters) {
-    if (p?.name) headers.set(p.name, String(p.value ?? ""));
-  }
-  if (!headers.has("Content-Type") && mimeType) {
-    headers.set("Content-Type", mimeType);
-  }
-
-  const uploadRes = await fetch(target.url, {
-    method: "PUT",
-    headers,
-    body: file,
-  });
-
-  if (!uploadRes.ok) {
-    const text = await uploadRes.text().catch(() => "");
-    throw new Error(`Staged upload failed: ${uploadRes.status} ${text}`.trim());
-  }
-
-  // Create the File in Shopify
+  // --- Create Shopify file record pointing at staged resourceUrl ---
   const FILE_CREATE = `
     mutation fileCreate($files: [FileCreateInput!]!) {
       fileCreate(files: $files) {
@@ -157,9 +187,7 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
   });
 
   const createErrs = createResp?.data?.fileCreate?.userErrors || [];
-  if (createErrs.length) {
-    throw new Error(createErrs[0]?.message || "fileCreate failed.");
-  }
+  if (createErrs.length) throw new Error(createErrs[0]?.message || "fileCreate failed.");
 
   const created = createResp?.data?.fileCreate?.files?.[0];
   const fileId = created?.id || null;
@@ -175,8 +203,8 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
       }
     `;
 
-    for (let i = 0; i < 5; i++) {
-      await new Promise((r) => setTimeout(r, 400));
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 450));
       const n = await runAdminQuery(shop, NODE_QUERY, { id: fileId });
       url = n?.data?.node?.url || null;
       if (url) break;
@@ -187,278 +215,137 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
   return url;
 }
 
-/**
- * Loader
- * - intent=bootstrap: purchaseOrders + companies
- * - intent=details&purchaseOrderGID=... : purchaseOrder + notes
- */
+// -------------------- LOADER --------------------
 export async function loader({ request }) {
-  try {
-    const url = new URL(request.url);
-    const intent = String(url.searchParams.get("intent") || "bootstrap").trim();
+  const userOrRes = await ensureLogisticsUserOrJson(request);
+  if (userOrRes instanceof Response) return userOrRes;
 
-    if (intent === "details") {
-      const purchaseOrderGID = cleanStrOrNull(
-        url.searchParams.get("purchaseOrderGID")
-      );
-      if (!purchaseOrderGID) {
-        return json({ success: false, error: "Missing purchaseOrderGID." });
-      }
+  const url = new URL(request.url);
+  const intent = String(url.searchParams.get("intent") || "").trim();
 
-      const po = await logisticsDb.tbl_purchaseOrder.findUnique({
-        where: { purchaseOrderGID },
-        select: {
-          id: true,
-          shortName: true,
-          purchaseOrderGID: true,
-          purchaseOrderPdfUrl: true,
-          createdAt: true,
-          updatedAt: true,
-          companyLinks: {
-            take: 1,
-            include: { company: { select: { shortName: true, displayName: true } } },
-          },
-          notes: {
-            orderBy: [{ createdAt: "desc" }],
-            select: {
-              id: true,
-              createdAt: true,
-              content: true,
-              pdfUrl: true,
-              pdfFileName: true,
-              eventType: true,
-              logisticsUser: { select: { id: true, displayName: true, email: true } },
-            },
+  // default to list
+  if (!intent || intent === "list") {
+    const rows = await logisticsDb.tbl_purchaseOrder.findMany({
+      orderBy: [{ createdAt: "desc" }],
+      select: {
+        id: true,
+        shortName: true,
+        purchaseOrderGID: true,
+        purchaseOrderPdfUrl: true,
+        createdAt: true,
+        updatedAt: true,
+        companyLinks: {
+          take: 1,
+          select: {
+            company: { select: { shortName: true, displayName: true } },
           },
         },
-      });
-
-      if (!po) {
-        return json({ success: false, error: "Purchase Order not found." });
-      }
-
-      const company = po.companyLinks?.[0]?.company || null;
-
-      return json({
-        success: true,
-        purchaseOrder: {
-          id: po.id,
-          shortName: po.shortName,
-          purchaseOrderGID: po.purchaseOrderGID,
-          purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
-          createdAt: po.createdAt,
-          updatedAt: po.updatedAt,
-          companyID: company?.shortName ?? null,
-          companyName: company ? formatCompanyName(company) : null,
-        },
-        notes: po.notes.map((n) => ({
-          id: n.id,
-          createdAt: n.createdAt,
-          content: n.content,
-          pdfUrl: n.pdfUrl || null,
-          pdfFileName: n.pdfFileName || null,
-          eventType: n.eventType || null,
-          user: n.logisticsUser
-            ? {
-              id: n.logisticsUser.id,
-              displayName: n.logisticsUser.displayName,
-              email: n.logisticsUser.email,
-            }
-            : null,
-        })),
-      });
-    }
-
-    // bootstrap
-    const [companies, purchaseOrders] = await Promise.all([
-      logisticsDb.tlkp_company.findMany({
-        orderBy: [{ shortName: "asc" }],
-        select: { shortName: true, displayName: true },
-      }),
-      logisticsDb.tbl_purchaseOrder.findMany({
-        orderBy: [{ createdAt: "desc" }],
-        select: {
-          id: true,
-          shortName: true,
-          purchaseOrderGID: true,
-          purchaseOrderPdfUrl: true,
-          createdAt: true,
-          updatedAt: true,
-          companyLinks: {
-            take: 1,
-            include: { company: { select: { shortName: true, displayName: true } } },
+        notes: {
+          orderBy: [{ createdAt: "desc" }],
+          select: {
+            id: true,
+            createdAt: true,
+            content: true,
+            pdfUrl: true,
+            pdfFileName: true,
+            eventType: true,
+            logisticsUser: { select: { displayName: true } },
           },
         },
-      }),
-    ]);
-
-    const uiPurchaseOrders = purchaseOrders.map((po) => {
-      const company = po.companyLinks?.[0]?.company || null;
-      return {
-        id: po.id,
-        shortName: po.shortName,
-        purchaseOrderGID: po.purchaseOrderGID,
-        purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
-        createdAt: po.createdAt,
-        updatedAt: po.updatedAt,
-        companyID: company?.shortName ?? null,
-        companyName: company ? formatCompanyName(company) : null,
-      };
+      },
     });
 
-    return json({
-      success: true,
-      companies,
-      purchaseOrders: uiPurchaseOrders,
+    const purchaseOrders = rows.map((po) => {
+      const company = po.companyLinks?.[0]?.company || null;
+      return toUiPO(po, company);
     });
-  } catch (e) {
-    return json({ success: false, error: e?.message || "Server error." });
+
+    return json({ ok: true, purchaseOrders });
   }
+
+  return json({ ok: false, error: `Unknown loader intent: ${intent}` }, { status: 400 });
 }
 
-function parsePurchaseOrderJsonFromForm(formData) {
-  const raw = formData.get("purchaseOrder");
-  if (!raw) return {};
-  if (typeof raw !== "string") return {};
-  try {
-    return JSON.parse(raw) || {};
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Action
- * Supports:
- * - multipart/form-data: intent=create|update|add_note (+ optional pdf File)
- * - JSON: intent=delete (kept for simplicity)
- */
+// -------------------- ACTION --------------------
 export async function action({ request }) {
+  const userOrRes = await ensureLogisticsUserOrJson(request);
+  if (userOrRes instanceof Response) return userOrRes;
+  const user = userOrRes;
+
   try {
     const contentType = request.headers.get("content-type") || "";
 
-    // --- Multipart intents (create/update/add_note) ---
+    // ----- MULTIPART: create / update with optional pdf + note -----
     if (contentType.includes("multipart/form-data")) {
       const formData = await request.formData();
-      const intent = String(formData.get("intent") || "").trim();
+      const intent = cleanStrOrNull(formData.get("intent"));
 
-      // Back-compat (if anything still calls upload_pdf)
-      if (intent === "upload_pdf") {
-        const shop = await resolveShopForAdmin(request);
-        if (!shop) {
-          return json({
-            success: false,
-            error:
-              "Missing shop context for Shopify Admin API. Include ?shop=... on the request (or ensure an offline session exists).",
-          });
-        }
-
-        const pdf = formData.get("pdf");
-        if (!pdf || typeof pdf !== "object" || typeof pdf.arrayBuffer !== "function") {
-          return json({ success: false, error: "Missing PDF file upload." });
-        }
-
-        const name = String(pdf.name || "");
-        const type = String(pdf.type || "");
-        const looksPdf = type === "application/pdf" || name.toLowerCase().endsWith(".pdf");
-        if (!looksPdf) {
-          return json({ success: false, error: "Only PDF uploads are supported." });
-        }
-
-        const maxBytes = 20 * 1024 * 1024;
-        if (typeof pdf.size === "number" && pdf.size > maxBytes) {
-          return json({ success: false, error: "PDF is too large (max 20MB)." });
-        }
-
-        const pdfUrl = await uploadPdfToShopifyFiles({ shop, file: pdf });
-        return json({ success: true, pdfUrl });
+      if (intent !== "create" && intent !== "update") {
+        return json({ ok: false, error: "Unknown multipart intent." }, { status: 400 });
       }
 
-      if (intent !== "create" && intent !== "update" && intent !== "add_note") {
-        return json({ success: false, error: "Unknown multipart intent." });
+      const purchaseOrderRaw = cleanStrOrNull(formData.get("purchaseOrder"));
+      let purchaseOrder = {};
+      try {
+        purchaseOrder = purchaseOrderRaw ? JSON.parse(purchaseOrderRaw) : {};
+      } catch {
+        return json({ ok: false, error: "Invalid purchaseOrder payload." }, { status: 400 });
       }
 
-      const purchaseOrder = parsePurchaseOrderJsonFromForm(formData);
+      const fdCompanyID = cleanStrOrNull(formData.get("companyID"));
+      const companyID = resolveCompanyIDFromAny(purchaseOrder, fdCompanyID);
+
       const note = cleanStrOrNull(formData.get("note"));
       const pdf = formData.get("pdf");
 
-      const hasPdf = !!pdf && typeof pdf === "object" && typeof pdf.arrayBuffer === "function";
+      const hasPdf = pdf && typeof pdf === "object" && typeof pdf.arrayBuffer === "function";
+      const pdfFile = hasPdf ? pdf : null;
 
-      // For UPDATE: note is required (whether PDF is included or not)
-      if (intent === "update" && !note) {
-        return json({
-          success: false,
-          error: "Note is required when updating a purchase order.",
-        });
-      }
-
-      // For ADD_NOTE: content required
-      if (intent === "add_note" && !note) {
-        return json({
-          success: false,
-          error: "Note is required.",
-        });
-      }
-
-      // If a PDF is present, we need shop context.
-      let pdfUrl = null;
-      let pdfFileName = null;
-      if (hasPdf) {
-        const shop = await resolveShopForAdmin(request);
-        if (!shop) {
-          return json({
-            success: false,
-            error:
-              "Missing shop context for Shopify Admin API. Include ?shop=... on the request (or ensure an offline session exists).",
-          });
-        }
-
-        // Basic validation (PDF-ish)
-        const name = String(pdf.name || "");
-        const type = String(pdf.type || "");
+      // PDF validation if present
+      if (pdfFile) {
+        const name = String(pdfFile.name || "");
+        const type = String(pdfFile.type || "");
         const looksPdf = type === "application/pdf" || name.toLowerCase().endsWith(".pdf");
-        if (!looksPdf) {
-          return json({ success: false, error: "Only PDF uploads are supported." });
-        }
+        if (!looksPdf) return json({ ok: false, error: "Only PDF uploads are supported." }, { status: 400 });
 
         const maxBytes = 20 * 1024 * 1024;
-        if (typeof pdf.size === "number" && pdf.size > maxBytes) {
-          return json({ success: false, error: "PDF is too large (max 20MB)." });
+        if (typeof pdfFile.size === "number" && pdfFile.size > maxBytes) {
+          return json({ ok: false, error: "PDF is too large (max 20MB)." }, { status: 400 });
         }
-
-        pdfFileName = cleanStrOrNull(pdf.name);
-        pdfUrl = await uploadPdfToShopifyFiles({ shop, file: pdf });
       }
 
-      // --- create ---
-      if (intent === "create") {
-        const shortName = cleanStrOrNull(purchaseOrder.shortName);
-        const purchaseOrderGID = cleanStrOrNull(purchaseOrder.purchaseOrderGID);
-        const companyID = resolveCompanyID(purchaseOrder);
+      const shortName = cleanStrOrNull(purchaseOrder?.shortName);
+      const purchaseOrderGID = cleanStrOrNull(purchaseOrder?.purchaseOrderGID);
 
+      if (intent === "create") {
         if (!shortName || !purchaseOrderGID) {
-          return json({
-            success: false,
-            error: "shortName and purchaseOrderGID are required.",
-          });
+          return json({ ok: false, error: "shortName and purchaseOrderGID are required." }, { status: 400 });
         }
         if (!companyID) {
-          return json({
-            success: false,
-            error: "companyID is required.",
-          });
+          return json({ ok: false, error: "companyID is required." }, { status: 400 });
+        }
+
+        const shop = pdfFile ? await resolveShopForAdmin(request) : null;
+        if (pdfFile && !shop) {
+          return json(
+            {
+              ok: false,
+              error:
+                "Missing shop context for Shopify Admin API. Include ?shop=... on the request (or ensure an offline session exists).",
+            },
+            { status: 400 },
+          );
         }
 
         const created = await logisticsDb.$transaction(async (tx) => {
           const company = await getCompanySummaryByShortName(tx, companyID);
           if (!company) throw new Error(`Unknown companyID: ${companyID}`);
 
+          let pdfUrl = null;
+          if (pdfFile) pdfUrl = await uploadPdfToShopifyFiles({ shop, file: pdfFile });
+
           const po = await tx.tbl_purchaseOrder.create({
-            data: {
-              shortName,
-              purchaseOrderGID,
-              purchaseOrderPdfUrl: pdfUrl || null,
-            },
+            data: { shortName, purchaseOrderGID, purchaseOrderPdfUrl: pdfUrl },
             select: {
               id: true,
               shortName: true,
@@ -469,74 +356,28 @@ export async function action({ request }) {
             },
           });
 
-          // Store the company link (one company per PO)
           await tx.tbljn_purchaseOrder_company.create({
-            data: {
-              purchaseOrderGID: po.purchaseOrderGID,
-              companyID: company.shortName,
-            },
+            data: { purchaseOrderGID: po.purchaseOrderGID, companyID: company.shortName },
           });
 
-          // Optional note on create. If PDF uploaded but no note, store a default note to log the event.
-          const noteContent =
-            note || (pdfUrl ? "Initial PDF uploaded." : null);
-
-          if (noteContent) {
+          // If note entered OR pdf uploaded, store a history entry (with current user id)
+          if (note || pdfUrl) {
+            const eventType = pdfUrl ? "New PDF Uploaded" : "NOTE";
+            const content = note || (pdfUrl ? "New PDF Uploaded" : "");
             await tx.tbl_purchaseOrderNotes.create({
               data: {
                 purchaseOrderGID: po.purchaseOrderGID,
-                userId: null,
-                content: noteContent,
+                userId: Number(user.id),
+                content,
                 pdfUrl: pdfUrl || null,
-                pdfFileName: pdfFileName || null,
-                eventType: pdfUrl ? "PDF_UPDATE" : "NOTE",
+                pdfFileName: pdfUrl ? String(pdfFile.name || "purchase-order.pdf") : null,
+                eventType,
               },
             });
           }
 
-          return {
-            ...po,
-            companyID: company.shortName,
-            companyName: formatCompanyName(company),
-          };
-        });
-
-        return json({ success: true, purchaseOrder: created });
-      }
-
-      // --- update ---
-      if (intent === "update") {
-        const purchaseOrderGID = cleanStrOrNull(purchaseOrder.purchaseOrderGID);
-        if (!purchaseOrderGID) {
-          return json({
-            success: false,
-            error: "purchaseOrderGID is required for update.",
-          });
-        }
-
-        const shortName = cleanStrOrNull(purchaseOrder.shortName);
-        const companyID = resolveCompanyID(purchaseOrder);
-
-        const updated = await logisticsDb.$transaction(async (tx) => {
-          // read existing (needed to bump updatedAt if no real field changes)
-          const existing = await tx.tbl_purchaseOrder.findUnique({
-            where: { purchaseOrderGID },
-            select: {
-              shortName: true,
-              purchaseOrderPdfUrl: true,
-            },
-          });
-          if (!existing) throw new Error("Purchase Order not found.");
-
-          const nextShortName = shortName || existing.shortName;
-
-          const po = await tx.tbl_purchaseOrder.update({
-            where: { purchaseOrderGID },
-            data: {
-              // Always include shortName (even if unchanged) so updatedAt bumps
-              shortName: nextShortName,
-              ...(pdfUrl ? { purchaseOrderPdfUrl: pdfUrl } : {}),
-            },
+          const full = await tx.tbl_purchaseOrder.findUnique({
+            where: { purchaseOrderGID: po.purchaseOrderGID },
             select: {
               id: true,
               shortName: true,
@@ -544,115 +385,178 @@ export async function action({ request }) {
               purchaseOrderPdfUrl: true,
               createdAt: true,
               updatedAt: true,
+              companyLinks: {
+                take: 1,
+                select: { company: { select: { shortName: true, displayName: true } } },
+              },
+              notes: {
+                orderBy: [{ createdAt: "desc" }],
+                select: {
+                  id: true,
+                  createdAt: true,
+                  content: true,
+                  pdfUrl: true,
+                  pdfFileName: true,
+                  eventType: true,
+                  logisticsUser: { select: { displayName: true } },
+                },
+              },
             },
           });
 
-          // Company link: keep existing unless companyID provided (or backfill if missing)
-          let company = null;
+          const co = full?.companyLinks?.[0]?.company || company;
+          return toUiPO(full, co);
+        });
 
-          if (companyID) {
-            company = await getCompanySummaryByShortName(tx, companyID);
-            if (!company) throw new Error(`Unknown companyID: ${companyID}`);
+        return json({ ok: true, purchaseOrder: created });
+      }
 
+      // intent === "update"
+      if (!purchaseOrderGID) {
+        return json({ ok: false, error: "purchaseOrderGID is required for update." }, { status: 400 });
+      }
+
+      // NOTE REQUIRED for update (per your requirement)
+      if (!note) {
+        return json({ ok: false, error: "Note is required when updating a purchase order." }, { status: 400 });
+      }
+
+      const shop = pdfFile ? await resolveShopForAdmin(request) : null;
+      if (pdfFile && !shop) {
+        return json(
+          {
+            ok: false,
+            error:
+              "Missing shop context for Shopify Admin API. Include ?shop=... on the request (or ensure an offline session exists).",
+          },
+          { status: 400 },
+        );
+      }
+
+      const updated = await logisticsDb.$transaction(async (tx) => {
+        const existing = await tx.tbl_purchaseOrder.findUnique({
+          where: { purchaseOrderGID },
+          select: {
+            id: true,
+            shortName: true,
+            purchaseOrderGID: true,
+            purchaseOrderPdfUrl: true,
+            createdAt: true,
+            updatedAt: true,
+            companyLinks: {
+              take: 1,
+              select: { company: { select: { shortName: true, displayName: true } } },
+            },
+          },
+        });
+        if (!existing) throw new Error("Purchase order not found.");
+
+        const linkedCompany = existing.companyLinks?.[0]?.company || null;
+
+        let newPdfUrl = null;
+        if (pdfFile) newPdfUrl = await uploadPdfToShopifyFiles({ shop, file: pdfFile });
+
+        const po = await tx.tbl_purchaseOrder.update({
+          where: { purchaseOrderGID },
+          data: {
+            ...(shortName ? { shortName } : {}),
+            ...(newPdfUrl ? { purchaseOrderPdfUrl: newPdfUrl } : {}),
+          },
+          select: {
+            id: true,
+            shortName: true,
+            purchaseOrderGID: true,
+            purchaseOrderPdfUrl: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        // Backfill company link if missing
+        if (!linkedCompany && companyID) {
+          const company = await getCompanySummaryByShortName(tx, companyID);
+          if (company) {
             await tx.tbljn_purchaseOrder_company.deleteMany({ where: { purchaseOrderGID } });
             await tx.tbljn_purchaseOrder_company.create({
-              data: {
-                purchaseOrderGID,
-                companyID: company.shortName,
-              },
+              data: { purchaseOrderGID, companyID: company.shortName },
             });
-          } else {
-            const link = await tx.tbljn_purchaseOrder_company.findFirst({
-              where: { purchaseOrderGID },
-              select: { companyID: true },
-            });
-            if (link?.companyID) company = await getCompanySummaryByShortName(tx, link.companyID);
           }
-
-          // Create a history note for the update (note required on update)
-          await tx.tbl_purchaseOrderNotes.create({
-            data: {
-              purchaseOrderGID,
-              userId: null,
-              content: note, // required, already validated
-              pdfUrl: pdfUrl || null,
-              pdfFileName: pdfFileName || null,
-              eventType: pdfUrl ? "PDF_UPDATE" : "NOTE",
-            },
-          });
-
-          return {
-            ...po,
-            companyID: company?.shortName ?? null,
-            companyName: company ? formatCompanyName(company) : null,
-          };
-        });
-
-        return json({ success: true, purchaseOrder: updated });
-      }
-
-      // --- add_note (note-only, optional PDF) ---
-      if (intent === "add_note") {
-        const purchaseOrderGID = cleanStrOrNull(purchaseOrder.purchaseOrderGID);
-        if (!purchaseOrderGID) {
-          return json({
-            success: false,
-            error: "purchaseOrderGID is required for add_note.",
-          });
         }
 
-        const result = await logisticsDb.$transaction(async (tx) => {
-          const existing = await tx.tbl_purchaseOrder.findUnique({
-            where: { purchaseOrderGID },
-            select: { shortName: true },
-          });
-          if (!existing) throw new Error("Purchase Order not found.");
-
-          // bump updatedAt
-          await tx.tbl_purchaseOrder.update({
-            where: { purchaseOrderGID },
-            data: { shortName: existing.shortName },
-          });
-
-          await tx.tbl_purchaseOrderNotes.create({
-            data: {
-              purchaseOrderGID,
-              userId: null,
-              content: note, // required
-              pdfUrl: pdfUrl || null,
-              pdfFileName: pdfFileName || null,
-              eventType: pdfUrl ? "PDF_UPDATE" : "NOTE",
-            },
-          });
-
-          return true;
+        // Always create a note row on update (note required)
+        const eventType = newPdfUrl ? "New PDF Uploaded" : "NOTE";
+        await tx.tbl_purchaseOrderNotes.create({
+          data: {
+            purchaseOrderGID,
+            userId: Number(user.id),
+            content: note,
+            pdfUrl: newPdfUrl || null,
+            pdfFileName: newPdfUrl ? String(pdfFile.name || "purchase-order.pdf") : null,
+            eventType,
+          },
         });
 
-        return json({ success: true, added: result });
-      }
+        const full = await tx.tbl_purchaseOrder.findUnique({
+          where: { purchaseOrderGID },
+          select: {
+            id: true,
+            shortName: true,
+            purchaseOrderGID: true,
+            purchaseOrderPdfUrl: true,
+            createdAt: true,
+            updatedAt: true,
+            companyLinks: {
+              take: 1,
+              select: { company: { select: { shortName: true, displayName: true } } },
+            },
+            notes: {
+              orderBy: [{ createdAt: "desc" }],
+              select: {
+                id: true,
+                createdAt: true,
+                content: true,
+                pdfUrl: true,
+                pdfFileName: true,
+                eventType: true,
+                logisticsUser: { select: { displayName: true } },
+              },
+            },
+          },
+        });
 
-      return json({ success: false, error: "Unhandled multipart intent." });
+        const co = full?.companyLinks?.[0]?.company || linkedCompany;
+        return toUiPO(full, co);
+      });
+
+      return json({ ok: true, purchaseOrder: updated });
     }
 
-    // --- JSON intents ---
+    // ----- JSON: delete -----
     const payload = await request.json().catch(() => null);
-    const intent = String(payload?.intent || "").trim();
-    const purchaseOrder = payload?.purchaseOrder || {};
+    const intent = cleanStrOrNull(payload?.intent);
 
-    if (!intent) return json({ success: false, error: "Missing intent." });
+    if (!intent) return json({ ok: false, error: "Missing intent." }, { status: 400 });
 
     if (intent === "delete") {
-      const purchaseOrderGID = cleanStrOrNull(purchaseOrder.purchaseOrderGID);
+      const purchaseOrderGID =
+        cleanStrOrNull(payload?.purchaseOrderGID) || cleanStrOrNull(payload?.purchaseOrder?.purchaseOrderGID);
+
       if (!purchaseOrderGID) {
-        return json({ success: false, error: "purchaseOrderGID is required for delete." });
+        return json({ ok: false, error: "purchaseOrderGID is required for delete." }, { status: 400 });
       }
 
-      await logisticsDb.tbl_purchaseOrder.delete({ where: { purchaseOrderGID } });
-      return json({ success: true, deletedPurchaseOrderGID: purchaseOrderGID });
+      await logisticsDb.$transaction(async (tx) => {
+        await tx.tbljn_shipment_purchaseOrder.deleteMany({ where: { purchaseOrderGID } });
+        await tx.tbljn_purchaseOrder_company.deleteMany({ where: { purchaseOrderGID } });
+        await tx.tbl_purchaseOrderNotes.deleteMany({ where: { purchaseOrderGID } });
+        await tx.tbl_purchaseOrder.delete({ where: { purchaseOrderGID } });
+      });
+
+      return json({ ok: true, deletedPurchaseOrderGID: purchaseOrderGID });
     }
 
-    return json({ success: false, error: `Unknown intent: ${intent}` });
+    return json({ ok: false, error: `Unknown intent: ${intent}` }, { status: 400 });
   } catch (e) {
-    return json({ success: false, error: e?.message || "Server error." });
+    return json({ ok: false, error: e?.message || "Server error." }, { status: 500 });
   }
 }

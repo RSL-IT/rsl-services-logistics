@@ -1,130 +1,123 @@
 // app/logistics-ui/LogisticsApp.tsx
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
+
 import Login from "./components/Login";
 import { SupplierView } from "./components/SupplierView";
 import { InternalDashboard } from "./components/InternalDashboard";
 import { UserManagement } from "./components/UserManagement";
 import { PurchaseOrderManagement } from "./components/PurchaseOrderManagement";
 
-import { mockShipments } from "./data/mockData";
-import { mockUsers, type User } from "./data/usersData";
-import type { Role } from "./components/types";
+import type {
+  Role,
+  UIUser,
+  CompanyOption,
+  LookupOption,
+  PurchaseOrderOption,
+} from "./components/types";
+
 import type { UIPurchaseOrder } from "./components/PurchaseOrderDetailsModal";
 
-function normalizePurchaseOrder(po: any): UIPurchaseOrder {
-  const gid = String(po?.purchaseOrderGID ?? "").trim();
-  const rawId = po?.id;
-  const id = String(rawId ?? "").trim() || gid || String(po?.shortName ?? "").trim();
-
-  return {
-    id: id || "new",
-    shortName: String(po?.shortName ?? "").trim(),
-    purchaseOrderGID: gid || undefined,
-    purchaseOrderPdfUrl: po?.purchaseOrderPdfUrl ?? null,
-    companyID: po?.companyID ?? po?.companyShortName ?? null,
-    companyName: po?.companyName ?? null,
-    createdAt: po?.createdAt ?? null,
-    updatedAt: po?.updatedAt ?? null,
-    notes: Array.isArray(po?.notes) ? po.notes : undefined,
-  };
-}
-
-// ---- Shared lookup types ----
-export type LookupOption = {
-  shortName: string;
-  displayName?: string | null;
-};
-
-export type CompanyOption = {
-  shortName: string;
-  displayName?: string | null;
-
-  // optional company fields if your loader provides them
-  address1?: string | null;
-  address2?: string | null;
-  city?: string | null;
-  province?: string | null;
-  postalCode?: string | null;
-  country?: string | null;
-  primaryContact?: string | null;
-  primaryPhone?: string | null;
-  primaryEmail?: string | null;
-};
-
-// Purchase order lookup option (used by shipment UI)
-export type PurchaseOrderOption = {
-  purchaseOrderGID: string;
-  shortName: string;
-  shipmentCount?: number;
-};
-
-// type imported from original App.tsx (same shape as mockShipments)
-export type Product = {
-  id: string;
-  name: string;
-  quantity: number;
-  sku: string;
-};
+// -------------------- Types used by this file --------------------
 
 export type Shipment = {
   id: string;
+
   supplierId: string;
   supplierName: string;
-  products: Product[];
+
+  products: any[];
 
   containerNumber: string;
   containerSize: string;
+
   portOfOrigin: string;
   destinationPort: string;
+  deliveryAddress?: string | null;
 
   cargoReadyDate: string; // YYYY-MM-DD
   etd: string; // YYYY-MM-DD
-  actualDepartureDate: string;
+  actualDepartureDate?: string | null;
+
   eta: string; // YYYY-MM-DD
+  estimatedDeliveryDate?: string | null;
 
-  sealNumber: string;
-  hblNumber: string;
-  estimatedDeliveryDate: string;
+  sealNumber?: string | null;
+  hblNumber?: string | null;
 
-  status: string;
+  status?: string | null;
 
-  // New fields requested
-  estimatedDeliveryToOrigin?: string; // YYYY-MM-DD
-  supplierPi?: string;
-  quantity?: number | null; // INT, allow null
-  bookingAgent?: string; // shortName (lookup)
-  bookingNumber?: string;
-  vesselName?: string;
-  deliveryAddress?: string; // shortName (lookup)
-  notes?: string;
+  estimatedDeliveryToOrigin?: string | null;
+  supplierPi?: string | null;
+  quantity?: number | null;
+  bookingAgent?: string | null;
+  bookingNumber?: string | null;
+  vesselName?: string | null;
+  notes?: string | null;
 
-  // Multi-select Purchase Orders
-  purchaseOrderGIDs?: string[];
+  purchaseOrderGIDs?: string[] | null;
 };
 
-export type ViewType = "login" | "supplier" | "dashboard" | "users" | "purchaseOrders";
+// Raw lookup shapes that can come from loaders (often allow null displayName)
+type RawLookup = { shortName: string; displayName?: string | null };
+type RawCompany = { shortName: string; displayName?: string | null };
+
+type ViewType = "login" | "supplier" | "dashboard" | "users" | "purchaseOrders";
 
 interface LogisticsAppProps {
-  initialShipments: Shipment[]; // DB-backed or mocks, same shape
-  initialUsers: User[];
+  shipments: Shipment[];
+  users: UIUser[];
 
-  // Lookups (DB-backed)
-  companies: CompanyOption[];
-  containers: LookupOption[];
-  originPorts: LookupOption[];
-  destinationPorts: LookupOption[];
-  bookingAgents: LookupOption[];
-  deliveryAddresses: LookupOption[];
+  companies: RawCompany[];
+  containers: RawLookup[];
+  originPorts: RawLookup[];
+  destinationPorts: RawLookup[];
+  bookingAgents: RawLookup[];
+  deliveryAddresses: RawLookup[];
 
-  // Purchase Orders (DB-backed)
+  // used for shipment PO selection + PO management (PO management will refresh from server)
   purchaseOrders: UIPurchaseOrder[];
 
-  currentUser?: User | null; // optional user from logistics DB
+  currentUser?: UIUser | null;
+  initialError?: string | null;
+}
+
+function normalizeLookup(list: RawLookup[] | null | undefined): LookupOption[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((x) => x && String(x.shortName || "").trim())
+    .map((x) => ({
+      shortName: String(x.shortName).trim(),
+      displayName: String((x.displayName ?? x.shortName) || "").trim(),
+    }));
+}
+
+function normalizeCompanies(list: RawCompany[] | null | undefined): CompanyOption[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((x) => x && String(x.shortName || "").trim())
+    .map((x) => ({
+      shortName: String(x.shortName).trim(),
+      displayName: String((x.displayName ?? x.shortName) || "").trim(),
+    }));
+}
+
+function buildPurchaseOrderOptions(purchaseOrders: UIPurchaseOrder[]): PurchaseOrderOption[] {
+  const seen = new Set<string>();
+  const out: PurchaseOrderOption[] = [];
+  for (const po of purchaseOrders || []) {
+    const gid = String(po?.purchaseOrderGID || "").trim();
+    const label = String(po?.shortName || "").trim();
+    if (!gid || !label) continue;
+    if (seen.has(gid)) continue;
+    seen.add(gid);
+    out.push({ id: gid, label });
+  }
+  return out;
 }
 
 export default function LogisticsApp({
-                                       initialShipments,
-                                       initialUsers,
+                                       shipments,
+                                       users,
                                        companies,
                                        containers,
                                        originPorts,
@@ -133,117 +126,115 @@ export default function LogisticsApp({
                                        deliveryAddresses,
                                        purchaseOrders,
                                        currentUser,
+                                       initialError,
                                      }: LogisticsAppProps) {
   const [currentView, setCurrentView] = useState<ViewType>("login");
   const [supplierId, setSupplierId] = useState<string | null>(null);
 
-  const [activeUser, setActiveUser] = useState<User | null>(currentUser ?? null);
-
-  const [shipments, setShipments] = useState<Shipment[]>(
-    initialShipments && initialShipments.length > 0 ? initialShipments : (mockShipments as any)
+  const [shipmentsState, setShipmentsState] = useState<Shipment[]>(
+    Array.isArray(shipments) ? shipments : [],
   );
 
-  const [usersState, setUsersState] = useState<User[]>(
-    initialUsers && initialUsers.length > 0 ? initialUsers : mockUsers
+  const [usersState, setUsersState] = useState<UIUser[]>(
+    Array.isArray(users) ? users : [],
   );
 
   const [purchaseOrdersState, setPurchaseOrdersState] = useState<UIPurchaseOrder[]>(
-    Array.isArray(purchaseOrders) ? purchaseOrders.map(normalizePurchaseOrder) : []
+    Array.isArray(purchaseOrders) ? purchaseOrders : [],
   );
 
-  const purchaseOrderOptions = useMemo<PurchaseOrderOption[]>(() => {
-    return purchaseOrdersState
-      .filter((po) => String(po.purchaseOrderGID || "").trim())
-      .map((po) => ({
-        purchaseOrderGID: String(po.purchaseOrderGID),
-        shortName: String(po.shortName || "").trim(),
-        shipmentCount: (po as any).shipmentCount,
-      }));
-  }, [purchaseOrdersState]);
+  const [currentUserState, setCurrentUserState] = useState<UIUser | null>(
+    currentUser ?? null,
+  );
 
-  // Must match LoginProps.onLogin signature exactly
-  const handleLogin = (role: Role, user: User, supplierIdArg?: string | null) => {
-    setActiveUser(user);
+  const companiesSafe = useMemo(() => normalizeCompanies(companies), [companies]);
+  const containersSafe = useMemo(() => normalizeLookup(containers), [containers]);
+  const originPortsSafe = useMemo(() => normalizeLookup(originPorts), [originPorts]);
+  const destinationPortsSafe = useMemo(() => normalizeLookup(destinationPorts), [destinationPorts]);
+  const bookingAgentsSafe = useMemo(() => normalizeLookup(bookingAgents), [bookingAgents]);
+  const deliveryAddressesSafe = useMemo(() => normalizeLookup(deliveryAddresses), [deliveryAddresses]);
 
-    if (role === "supplier" && supplierIdArg) {
-      setSupplierId(supplierIdArg);
+  const purchaseOrderOptions = useMemo(
+    () => buildPurchaseOrderOptions(purchaseOrdersState),
+    [purchaseOrdersState],
+  );
+
+  const logout = () => {
+    setCurrentUserState(null);
+    setSupplierId(null);
+    setCurrentView("login");
+  };
+
+  const handleLogin = (role: Role, supplierIdArg?: string, userArg?: UIUser) => {
+    setCurrentUserState(userArg ?? null);
+
+    if (role === "supplier") {
+      setSupplierId(supplierIdArg ?? null);
       setCurrentView("supplier");
       return;
     }
 
-    if (role === "internal") {
-      setSupplierId(null);
-      setCurrentView("dashboard");
-      return;
-    }
-
     setSupplierId(null);
-    setCurrentView("login");
+    setCurrentView("dashboard");
   };
-
-  const handleLogout = () => {
-    setActiveUser(null);
-    setSupplierId(null);
-    setCurrentView("login");
-  };
-
-  const handleNavigateToUsers = () => setCurrentView("users");
-  const handleNavigateToPurchaseOrders = () => setCurrentView("purchaseOrders");
-  const handleBackToDashboard = () => setCurrentView("dashboard");
-
-  // ---- Views ----
-
-  if (currentView === "login") {
-    return <Login onLogin={handleLogin} users={usersState} />;
-  }
-
-  if (currentView === "supplier" && supplierId) {
-    return <SupplierView supplierId={supplierId} shipments={shipments as any} onLogout={handleLogout} />;
-  }
-
-  if (currentView === "users") {
-    return (
-      <UserManagement
-        users={usersState}
-        onUsersChange={setUsersState as any}
-        onBack={handleBackToDashboard}
-        onLogout={handleLogout}
-        companies={companies as any}
-      />
-    );
-  }
-
-  if (currentView === "purchaseOrders") {
-    return (
-      <PurchaseOrderManagement
-        purchaseOrders={purchaseOrdersState}
-        onPurchaseOrdersChange={setPurchaseOrdersState}
-        companies={companies as any}
-        onBack={handleBackToDashboard}
-        onLogout={handleLogout}
-      />
-    );
-  }
-
-  if (!activeUser) {
-    return <Login onLogin={handleLogin} users={usersState} />;
-  }
 
   return (
-    <InternalDashboard
-      currentUser={activeUser}
-      shipments={shipments}
-      companies={companies}
-      containers={containers}
-      originPorts={originPorts}
-      destinationPorts={destinationPorts}
-      bookingAgents={bookingAgents}
-      deliveryAddresses={deliveryAddresses}
-      purchaseOrders={purchaseOrderOptions}
-      onShipmentsChange={setShipments}
-      onLogout={handleLogout}
-      onNavigateToUsers={handleNavigateToUsers}
-      onNavigateToPurchaseOrders={handleNavigateToPurchaseOrders}
-    />
+    <div style={{ minHeight: "100vh" }}>
+      {currentView === "login" && (
+        <Login
+          onLogin={handleLogin}
+          users={usersState}
+          initialError={initialError ?? null}
+        />
+      )}
+
+      {currentView === "supplier" && supplierId && (
+        <SupplierView
+          supplierId={supplierId}
+          shipments={shipmentsState}
+          onLogout={logout}
+        />
+      )}
+
+      {currentView === "dashboard" && (
+        <InternalDashboard
+          shipments={shipmentsState}
+          onShipmentsChange={(next) => setShipmentsState(next)}
+          users={usersState}
+          onUsersChange={(next) => setUsersState(next)}
+          companies={companiesSafe}
+          containers={containersSafe}
+          originPorts={originPortsSafe}
+          destinationPorts={destinationPortsSafe}
+          bookingAgents={bookingAgentsSafe}
+          deliveryAddresses={deliveryAddressesSafe}
+          purchaseOrderOptions={purchaseOrderOptions}
+          currentUser={currentUserState}
+          onNavigateToUsers={() => setCurrentView("users")}
+          onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
+          onLogout={logout}
+        />
+      )}
+
+      {currentView === "users" && (
+        <UserManagement
+          users={usersState}
+          onUsersChange={(next) => setUsersState(next)}
+          companies={companiesSafe}
+          onBack={() => setCurrentView("dashboard")}
+          onLogout={logout}
+        />
+      )}
+
+      {currentView === "purchaseOrders" && (
+        <PurchaseOrderManagement
+          purchaseOrders={purchaseOrdersState}
+          onPurchaseOrdersChange={(next) => setPurchaseOrdersState(next)}
+          companies={companiesSafe}
+          onBack={() => setCurrentView("dashboard")}
+          onLogout={logout}
+        />
+      )}
+    </div>
   );
 }

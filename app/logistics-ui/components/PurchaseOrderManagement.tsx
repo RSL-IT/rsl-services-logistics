@@ -1,291 +1,541 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+// app/logistics-ui/components/PurchaseOrderManagement.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Eye, LogOut, Plus, Search } from "lucide-react";
+
 import PurchaseOrderDetailsModal, {
-  type UICompany,
-  type UIPurchaseOrder,
+  CompanyOption,
+  UIPurchaseOrder,
 } from "./PurchaseOrderDetailsModal";
 
-function getShopParam(): string | null {
-  try {
-    const s = new URLSearchParams(window.location.search).get("shop");
-    return s ? String(s).trim() : null;
-  } catch {
-    return null;
-  }
+import { withShopParam } from "../utils/shop";
+
+type SortKey = "purchaseOrder" | "company" | "created" | "updated";
+
+interface PurchaseOrderManagementProps {
+  purchaseOrders: UIPurchaseOrder[];
+  onPurchaseOrdersChange: (nextPurchaseOrders: UIPurchaseOrder[]) => void;
+
+  companies: CompanyOption[];
+
+  onBack: () => void;
+  onLogout: () => void;
 }
 
-function withShop(url: string): string {
-  const shop = getShopParam();
-  if (!shop) return url;
-  try {
-    const u = new URL(url, window.location.origin);
-    u.searchParams.set("shop", shop);
-    return u.toString();
-  } catch {
-    // if url is relative without base support
-    return url.includes("?") ? `${url}&shop=${encodeURIComponent(shop)}` : `${url}?shop=${encodeURIComponent(shop)}`;
-  }
+function safeStr(v: unknown) {
+  return String(v ?? "").trim();
 }
 
-function formatDateTime(v: string | Date | null | undefined): string {
-  if (!v) return "-";
-  const d = v instanceof Date ? v : new Date(v);
+function parseCompanyLongName(companyName?: string | null) {
+  const s = safeStr(companyName);
+  if (!s) return "-";
+  const idx = s.indexOf(" (");
+  return idx > 0 ? s.slice(0, idx).trim() : s;
+}
+
+function fmtDate(isoOrDate?: string | Date | null) {
+  if (!isoOrDate) return "-";
+  const d = isoOrDate instanceof Date ? isoOrDate : new Date(String(isoOrDate));
   if (Number.isNaN(d.getTime())) return "-";
   return d.toLocaleString();
 }
 
-function roundToNearest(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  const r = Math.round(n);
-  return r < 1 ? 1 : r;
+function isEffectivelySameMoment(aIso?: string | Date | null, bIso?: string | Date | null) {
+  if (!aIso || !bIso) return true;
+  const a = aIso instanceof Date ? aIso.getTime() : new Date(String(aIso)).getTime();
+  const b = bIso instanceof Date ? bIso.getTime() : new Date(String(bIso)).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return true;
+  return Math.abs(a - b) < 60_000; // < 60s = treat as same
 }
 
-function formatUpdatedRelative(createdAt?: string | null, updatedAt?: string | null): string {
-  if (!createdAt || !updatedAt) return "-";
+function timeSinceNatural(isoOrDate?: string | Date | null) {
+  if (!isoOrDate) return "-";
+  const d = isoOrDate instanceof Date ? isoOrDate : new Date(String(isoOrDate));
+  if (Number.isNaN(d.getTime())) return "-";
 
-  const c = new Date(createdAt);
-  const u = new Date(updatedAt);
-  if (Number.isNaN(c.getTime()) || Number.isNaN(u.getTime())) return "-";
-
-  const diffMs = u.getTime() - c.getTime();
-  // If no meaningful update since create, show "-"
-  if (Math.abs(diffMs) < 60_000) return "-";
-
-  const now = Date.now();
-  const sinceMs = now - u.getTime();
-  if (sinceMs < 0) return "0 minutes";
+  let ms = Date.now() - d.getTime();
+  if (!Number.isFinite(ms)) return "-";
+  if (ms < 0) ms = 0;
 
   const minute = 60_000;
   const hour = 60 * minute;
   const day = 24 * hour;
-  const month = 30 * day;
-  const year = 365 * day;
+  const month = 30.4375 * day;
+  const year = 365.25 * day;
 
-  let value = 0;
-  let unit = "minutes";
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
 
-  if (sinceMs < hour) {
-    value = roundToNearest(sinceMs / minute);
-    unit = "minute";
-  } else if (sinceMs < day) {
-    value = roundToNearest(sinceMs / hour);
-    unit = "hour";
-  } else if (sinceMs < month) {
-    value = roundToNearest(sinceMs / day);
-    unit = "day";
-  } else if (sinceMs < year) {
-    value = roundToNearest(sinceMs / month);
-    unit = "month";
-  } else {
-    value = roundToNearest(sinceMs / year);
-    unit = "year";
-  }
-
-  return `${value} ${unit}${value === 1 ? "" : "s"}`;
+  if (ms < hour) return plural(Math.max(1, Math.round(ms / minute)), "minute");
+  if (ms < day) return plural(Math.max(1, Math.round(ms / hour)), "hour");
+  if (ms < month) return plural(Math.max(1, Math.round(ms / day)), "day");
+  if (ms < year) return plural(Math.max(1, Math.round(ms / month)), "month");
+  return plural(Math.max(1, Math.round(ms / year)), "year");
 }
 
-export function PurchaseOrderManagement() {
-  const [loading, setLoading] = useState(true);
+// -----------------------------------------------------------------------------
+// Styles
+// -----------------------------------------------------------------------------
+
+const wrapStyle: React.CSSProperties = { padding: 18 };
+
+const headerRowStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+  flexWrap: "wrap",
+  marginBottom: 14,
+};
+
+const titleStyle: React.CSSProperties = {
+  fontSize: 16,
+  fontWeight: 900,
+  color: "#0f172a",
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+};
+
+const toolbarStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 10,
+  alignItems: "center",
+  flexWrap: "wrap",
+};
+
+const btnStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "10px 12px",
+  borderRadius: 10,
+  border: "1px solid #e2e8f0",
+  background: "#fff",
+  color: "#0f172a",
+  fontSize: 13,
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const primaryBtnStyle: React.CSSProperties = {
+  ...btnStyle,
+  border: "none",
+  background: "#2563eb",
+  color: "#fff",
+};
+
+const searchWrapStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  border: "1px solid #e2e8f0",
+  borderRadius: 10,
+  overflow: "hidden",
+  background: "#fff",
+};
+
+const iconBoxStyle: React.CSSProperties = {
+  padding: "9px 10px",
+  borderRight: "1px solid #e2e8f0",
+  color: "#64748b",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const inputStyle: React.CSSProperties = {
+  border: "none",
+  outline: "none",
+  padding: "9px 12px",
+  fontSize: 13,
+  width: 260,
+};
+
+const tableWrapStyle: React.CSSProperties = {
+  border: "1px solid #e2e8f0",
+  borderRadius: 12,
+  overflow: "hidden",
+  background: "#fff",
+};
+
+const tableStyle: React.CSSProperties = {
+  width: "100%",
+  borderCollapse: "collapse",
+};
+
+const thStyle: React.CSSProperties = {
+  textAlign: "left",
+  padding: "10px 12px",
+  fontSize: 12,
+  fontWeight: 900,
+  color: "#0f172a",
+  background: "#f8fafc",
+  borderBottom: "1px solid #e2e8f0",
+  userSelect: "none",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+const tdStyle: React.CSSProperties = {
+  padding: "10px 12px",
+  fontSize: 13,
+  color: "#0f172a",
+  borderBottom: "1px solid #e2e8f0",
+  verticalAlign: "top",
+};
+
+const subtleStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#64748b",
+};
+
+const linkBtnStyle: React.CSSProperties = {
+  padding: "8px 10px",
+  borderRadius: 10,
+  border: "1px solid #e2e8f0",
+  background: "#ffffff",
+  color: "#0f172a",
+  fontSize: 12,
+  fontWeight: 900,
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+};
+
+const errorStyle: React.CSSProperties = {
+  padding: "10px 12px",
+  borderRadius: 10,
+  background: "#fef2f2",
+  border: "1px solid #fecaca",
+  color: "#991b1b",
+  fontSize: 12,
+  marginBottom: 12,
+};
+
+// -----------------------------------------------------------------------------
+// Component
+// -----------------------------------------------------------------------------
+
+export function PurchaseOrderManagement({
+                                          purchaseOrders,
+                                          onPurchaseOrdersChange,
+                                          companies,
+                                          onBack,
+                                          onLogout,
+                                        }: PurchaseOrderManagementProps) {
+  const [q, setQ] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("updated");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const [selectedPO, setSelectedPO] = useState<UIPurchaseOrder | null>(null);
+  const [mode, setMode] = useState<"create" | "view">("view");
+
+  const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [companies, setCompanies] = useState<UICompany[]>([]);
-  const [purchaseOrders, setPurchaseOrders] = useState<UIPurchaseOrder[]>([]);
+  const didInitialFetch = useRef(false);
 
-  const [modalOpen, setModalOpen] = useState(false);
-  const [modalMode, setModalMode] = useState<"create" | "view">("view");
-  const [selected, setSelected] = useState<UIPurchaseOrder | null>(null);
+  const companyMap = useMemo(() => {
+    const m = new Map<string, CompanyOption>();
+    for (const c of companies || []) m.set(String(c.shortName), c);
+    return m;
+  }, [companies]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const res = await fetch(withShop("/apps/logistics/purchase-orders?intent=bootstrap"), {
-        method: "GET",
-        headers: { Accept: "application/json" },
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.error || `Failed to load (${res.status})`);
-      }
-      setCompanies(Array.isArray(data.companies) ? data.companies : []);
-      setPurchaseOrders(Array.isArray(data.purchaseOrders) ? data.purchaseOrders : []);
-    } catch (e: any) {
-      setError(e?.message || "Failed to load purchase orders.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // Initial refresh from server so Company/Created/Updated are filled even if portal loader is minimal
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (didInitialFetch.current) return;
+    didInitialFetch.current = true;
 
-  const openCreate = useCallback(() => {
-    const nowIso = new Date().toISOString();
-    setSelected({
+    (async () => {
+      try {
+        const url = withShopParam("/apps/logistics/purchase-orders?intent=list");
+        const res = await fetch(url, { method: "GET" });
+        const data: any = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) return;
+        const next = Array.isArray(data.purchaseOrders) ? data.purchaseOrders : [];
+        onPurchaseOrdersChange(next);
+      } catch {
+        // silent: page still usable with existing list
+      }
+    })();
+  }, [onPurchaseOrdersChange]);
+
+  const normalized = useMemo(() => {
+    const list = Array.isArray(purchaseOrders) ? purchaseOrders.slice() : [];
+    return list.map((po, idx) => {
+      const idRaw = safeStr((po as any)?.id);
+      const gid = safeStr((po as any)?.purchaseOrderGID);
+      const shortName = safeStr((po as any)?.shortName);
+      const id =
+        idRaw && idRaw.toLowerCase() !== "new"
+          ? idRaw
+          : gid
+            ? `po_${gid}`
+            : shortName
+              ? `po_${shortName}`
+              : `po_${idx}_${Date.now()}`;
+
+      return { ...po, id };
+    });
+  }, [purchaseOrders]);
+
+  const filteredSorted = useMemo(() => {
+    const needle = safeStr(q).toLowerCase();
+
+    const companyText = (po: UIPurchaseOrder) => {
+      const cid = safeStr(po.companyID);
+      const c = cid ? companyMap.get(cid) : null;
+      if (c) return safeStr(c.displayName || c.shortName);
+      if (po.companyName) return parseCompanyLongName(po.companyName);
+      return cid || "-";
+    };
+
+    const rows = normalized.filter((po) => {
+      if (!needle) return true;
+      const shortName = safeStr(po.shortName).toLowerCase();
+      const gid = safeStr(po.purchaseOrderGID).toLowerCase();
+      const company = companyText(po).toLowerCase();
+      return shortName.includes(needle) || gid.includes(needle) || company.includes(needle);
+    });
+
+    const getCreated = (po: UIPurchaseOrder) => {
+      const d = new Date(safeStr(po.createdAt));
+      return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+    };
+
+    const getUpdated = (po: UIPurchaseOrder) => {
+      const d = new Date(safeStr(po.updatedAt));
+      return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+    };
+
+    rows.sort((a, b) => {
+      let cmp = 0;
+
+      if (sortKey === "purchaseOrder") {
+        cmp = safeStr(a.shortName).localeCompare(safeStr(b.shortName));
+      } else if (sortKey === "company") {
+        cmp = companyText(a).localeCompare(companyText(b));
+      } else if (sortKey === "created") {
+        cmp = getCreated(a) - getCreated(b);
+      } else if (sortKey === "updated") {
+        cmp = getUpdated(a) - getUpdated(b);
+      }
+
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+
+    return rows;
+  }, [normalized, q, sortKey, sortDir, companyMap]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "purchaseOrder" || key === "company" ? "asc" : "desc");
+    }
+  };
+
+  const openCreate = () => {
+    setError(null);
+    setMode("create");
+    setSelectedPO({
       id: "new",
       shortName: "",
       purchaseOrderGID: "",
       purchaseOrderPdfUrl: null,
-      createdAt: nowIso,
-      updatedAt: null,
-      companyID: null,
+      companyID: "",
       companyName: null,
+      createdAt: null,
+      updatedAt: null,
+      notes: [],
     });
-    setModalMode("create");
-    setModalOpen(true);
-  }, []);
+  };
 
-  const openView = useCallback((po: UIPurchaseOrder) => {
-    setSelected(po);
-    setModalMode("view");
-    setModalOpen(true);
-  }, []);
+  const openView = (po: UIPurchaseOrder) => {
+    setError(null);
+    setMode("view");
+    setSelectedPO(po);
+  };
 
-  const onSaved = useCallback((po: UIPurchaseOrder) => {
-    setPurchaseOrders((prev) => {
-      const idx = prev.findIndex((p) => p.purchaseOrderGID === po.purchaseOrderGID);
-      if (idx >= 0) {
-        const copy = prev.slice();
-        copy[idx] = { ...copy[idx], ...po };
-        return copy;
+  const closeModal = () => setSelectedPO(null);
+
+  const upsertLocal = (updated: UIPurchaseOrder) => {
+    const gid = safeStr(updated.purchaseOrderGID);
+    const list = Array.isArray(purchaseOrders) ? purchaseOrders.slice() : [];
+    const idx = list.findIndex((x) => safeStr(x.purchaseOrderGID) === gid);
+
+    if (idx >= 0) list[idx] = updated;
+    else list.unshift(updated);
+
+    onPurchaseOrdersChange(list);
+  };
+
+  const handleSave = async (
+    saveMode: "create" | "update",
+    payload: { purchaseOrder: UIPurchaseOrder; companyID: string; note?: string | null; pdfFile?: File | null },
+  ) => {
+    setIsSaving(true);
+    setError(null);
+
+    try {
+      const url = withShopParam("/apps/logistics/purchase-orders");
+      const fd = new FormData();
+
+      fd.append("intent", saveMode);
+      fd.append("purchaseOrder", JSON.stringify(payload.purchaseOrder));
+      fd.append("companyID", payload.companyID);
+
+      const note = safeStr(payload.note);
+      if (note) fd.append("note", note);
+
+      if (payload.pdfFile) fd.append("pdf", payload.pdfFile);
+
+      const res = await fetch(url, { method: "POST", body: fd });
+      const data: any = await res.json().catch(() => null);
+
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || "Save failed.");
       }
-      return [po, ...prev];
-    });
-  }, []);
 
-  const rows = useMemo(() => {
-    return purchaseOrders.map((po) => {
-      return {
-        key: po.purchaseOrderGID,
-        company: po.companyName || po.companyID || "-",
-        shortName: po.shortName || "-",
-        gid: po.purchaseOrderGID || "-",
-        created: formatDateTime(po.createdAt),
-        updatedRel: formatUpdatedRelative(po.createdAt ?? null, po.updatedAt ?? null),
-        po,
-      };
-    });
-  }, [purchaseOrders]);
+      const updated = data.purchaseOrder as UIPurchaseOrder;
+      upsertLocal(updated);
+      setSelectedPO(updated);
+      setMode("view");
+    } catch (e: any) {
+      setError(e?.message || "Save failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async (po: UIPurchaseOrder) => {
+    setIsSaving(true);
+    setError(null);
+
+    try {
+      const url = withShopParam("/apps/logistics/purchase-orders");
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent: "delete", purchaseOrder: { purchaseOrderGID: po.purchaseOrderGID } }),
+      });
+      const data: any = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) throw new Error(data?.error || "Delete failed.");
+
+      const gid = safeStr(po.purchaseOrderGID);
+      const next = (purchaseOrders || []).filter((x) => safeStr(x.purchaseOrderGID) !== gid);
+      onPurchaseOrdersChange(next);
+      setSelectedPO(null);
+    } catch (e: any) {
+      setError(e?.message || "Delete failed.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const companyTextForRow = (po: UIPurchaseOrder) => {
+    const cid = safeStr(po.companyID);
+    const c = cid ? companyMap.get(cid) : null;
+    if (c) return safeStr(c.displayName || c.shortName);
+    if (po.companyName) return parseCompanyLongName(po.companyName);
+    return cid || "-";
+  };
+
+  const createdTextForRow = (po: UIPurchaseOrder) => fmtDate(po.createdAt);
+
+  const updatedTextForRow = (po: UIPurchaseOrder) => {
+    if (isEffectivelySameMoment(po.createdAt, po.updatedAt)) return "-";
+    return timeSinceNatural(po.updatedAt);
+  };
 
   return (
-    <div style={{ padding: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ fontSize: 18, fontWeight: 800 }}>Purchase Orders</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            type="button"
-            onClick={() => void refresh()}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 10,
-              border: "1px solid #e2e8f0",
-              background: "white",
-              cursor: "pointer",
-              fontWeight: 700,
-            }}
-            disabled={loading}
-          >
-            Refresh
+    <div style={wrapStyle}>
+      {error ? <div style={errorStyle}>{error}</div> : null}
+
+      <div style={headerRowStyle}>
+        <div style={titleStyle}>
+          <button type="button" style={btnStyle} onClick={onBack} disabled={isSaving}>
+            <ArrowLeft size={16} />
+            Back
           </button>
-          <button
-            type="button"
-            onClick={openCreate}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 10,
-              border: "1px solid #0f172a",
-              background: "#0f172a",
-              color: "white",
-              cursor: "pointer",
-              fontWeight: 800,
-            }}
-          >
+          Purchase Orders
+        </div>
+
+        <div style={toolbarStyle}>
+          <div style={searchWrapStyle}>
+            <span style={iconBoxStyle}>
+              <Search size={16} />
+            </span>
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search PO / GID / company…"
+              style={inputStyle}
+              disabled={isSaving}
+            />
+          </div>
+
+          <button type="button" style={primaryBtnStyle} onClick={openCreate} disabled={isSaving}>
+            <Plus size={16} />
             Create Purchase Order
           </button>
+
+          <button type="button" style={btnStyle} onClick={onLogout} disabled={isSaving}>
+            <LogOut size={16} />
+            Logout
+          </button>
         </div>
       </div>
 
-      {error ? (
-        <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "#fff1f2", border: "1px solid #fecdd3" }}>
-          <div style={{ fontWeight: 800, color: "#9f1239" }}>Error</div>
-          <div style={{ color: "#9f1239" }}>{error}</div>
-        </div>
-      ) : null}
+      <div style={tableWrapStyle}>
+        <table style={tableStyle}>
+          <thead>
+          <tr>
+            <th style={thStyle} onClick={() => toggleSort("purchaseOrder")}>Purchase Order</th>
+            <th style={thStyle} onClick={() => toggleSort("company")}>Company</th>
+            <th style={thStyle} onClick={() => toggleSort("created")}>Created</th>
+            <th style={thStyle} onClick={() => toggleSort("updated")}>Updated</th>
+            <th style={{ ...thStyle, cursor: "default" }}>Action</th>
+          </tr>
+          </thead>
 
-      <div style={{ marginTop: 12, border: "1px solid #e2e8f0", borderRadius: 14, overflow: "hidden", background: "white" }}>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-            <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Company</th>
-              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>PO Short Name</th>
-              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Purchase Order Shopify ID</th>
-              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Created</th>
-              <th style={{ textAlign: "left", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Updated</th>
-              <th style={{ textAlign: "right", padding: 10, fontWeight: 900, whiteSpace: "nowrap" }}>Actions</th>
+          <tbody>
+          {filteredSorted.length === 0 ? (
+            <tr>
+              <td style={tdStyle} colSpan={5}>
+                <div style={subtleStyle}>No purchase orders found.</div>
+              </td>
             </tr>
-            </thead>
-            <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={6} style={{ padding: 12, color: "#64748b" }}>
-                  Loading…
+          ) : (
+            filteredSorted.map((po) => (
+              <tr key={safeStr(po.id) || safeStr(po.purchaseOrderGID) || safeStr(po.shortName)}>
+                <td style={tdStyle}>{safeStr(po.shortName) || "-"}</td>
+                <td style={tdStyle}>{companyTextForRow(po)}</td>
+                <td style={tdStyle}>{createdTextForRow(po)}</td>
+                <td style={tdStyle}>{updatedTextForRow(po)}</td>
+                <td style={tdStyle}>
+                  <button type="button" style={linkBtnStyle} onClick={() => openView(po)} disabled={isSaving}>
+                    <Eye size={14} />
+                    View
+                  </button>
                 </td>
               </tr>
-            ) : rows.length === 0 ? (
-              <tr>
-                <td colSpan={6} style={{ padding: 12, color: "#64748b" }}>
-                  No purchase orders found.
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => (
-                <tr
-                  key={r.key}
-                  style={{ borderBottom: "1px solid #f1f5f9", cursor: "pointer" }}
-                  onClick={() => openView(r.po)}
-                >
-                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.company}</td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap", fontWeight: 800 }}>{r.shortName}</td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.gid}</td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.created}</td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{r.updatedRel}</td>
-                  <td style={{ padding: 10, textAlign: "right", whiteSpace: "nowrap" }}>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openView(r.po);
-                      }}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 10,
-                        border: "1px solid #e2e8f0",
-                        background: "white",
-                        cursor: "pointer",
-                        fontWeight: 800,
-                      }}
-                    >
-                      View
-                    </button>
-                  </td>
-                </tr>
-              ))
-            )}
-            </tbody>
-          </table>
-        </div>
+            ))
+          )}
+          </tbody>
+        </table>
       </div>
 
-      {selected ? (
+      {selectedPO ? (
         <PurchaseOrderDetailsModal
-          open={modalOpen}
-          mode={modalMode}
-          purchaseOrder={selected}
+          mode={mode}
+          purchaseOrder={selectedPO}
           companies={companies}
-          onClose={() => setModalOpen(false)}
-          onSaved={onSaved}
+          isSaving={isSaving}
+          error={error}
+          onClose={closeModal}
+          onSave={handleSave}
+          onDelete={mode === "view" ? handleDelete : undefined}
         />
       ) : null}
     </div>
