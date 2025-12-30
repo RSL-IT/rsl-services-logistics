@@ -142,8 +142,33 @@ export async function loader({ request }) {
         orderBy: { shortName: "asc" },
       }),
       logisticsDb.tbl_purchaseOrder.findMany({
-        select: { purchaseOrderGID: true, shortName: true },
         orderBy: { shortName: "asc" },
+        select: {
+          id: true,
+          purchaseOrderGID: true,
+          shortName: true,
+          purchaseOrderPdfUrl: true,
+          createdAt: true,
+          updatedAt: true,
+          companyLinks: {
+            take: 1,
+            select: {
+              company: { select: { shortName: true, displayName: true } },
+            },
+          },
+          notes: {
+            orderBy: [{ createdAt: "desc" }],
+            select: {
+              id: true,
+              createdAt: true,
+              content: true,
+              pdfUrl: true,
+              pdfFileName: true,
+              eventType: true,
+              logisticsUser: { select: { displayName: true } },
+            },
+          },
+        },
       }),
     ]);
 
@@ -212,10 +237,33 @@ export async function loader({ request }) {
     destinationPorts = destRows.map((p) => ({ shortName: p.shortName, displayName: p.displayName }));
     bookingAgents = bookingAgentRows.map((b) => ({ shortName: b.shortName, displayName: b.displayName }));
     deliveryAddresses = deliveryAddressRows.map((d) => ({ shortName: d.shortName, displayName: d.displayName }));
-    purchaseOrders = purchaseOrderRows.map((po) => ({
-      purchaseOrderGID: po.purchaseOrderGID,
-      shortName: po.shortName,
-    }));
+    purchaseOrders = purchaseOrderRows.map((po) => {
+      const company = po.companyLinks?.[0]?.company || null;
+      const notes = Array.isArray(po.notes) ? po.notes.map((n) => ({
+        id: String(n.id),
+        timestamp: n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString(),
+        content: n.content || "",
+        eventType: n.eventType === "PDF_UPDATE" ? "New PDF Uploaded" : n.eventType,
+        pdfUrl: n.pdfUrl || null,
+        pdfFileName: n.pdfFileName || null,
+        user: n.logisticsUser?.displayName || null,
+      })) : [];
+
+      const lastUpdatedBy = notes.length > 0 && notes[0].user ? notes[0].user : null;
+
+      return {
+        id: po.id,
+        purchaseOrderGID: po.purchaseOrderGID,
+        shortName: po.shortName,
+        purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
+        createdAt: po.createdAt ? po.createdAt.toISOString() : null,
+        updatedAt: po.updatedAt ? po.updatedAt.toISOString() : null,
+        companyID: company?.shortName || null,
+        companyName: company?.displayName || company?.shortName || null,
+        lastUpdatedBy,
+        notes,
+      };
+    });
   } catch (err) {
     console.error("[logistics portal] DB error:", err);
   }
@@ -255,26 +303,26 @@ export default function LogisticsPortalRoute() {
 
   return (
     <html lang="en">
-      <head>
-        <meta charSet="utf-8" />
-        <title>RSL Logistics Portal</title>
-      </head>
-      <body>
-        <div id="logistics-root">
-          <LogisticsApp
-            initialShipments={initialShipments}
-            initialUsers={initialUsers}
-            companies={companies}
-            containers={containers}
-            originPorts={originPorts}
-            destinationPorts={destinationPorts}
-            bookingAgents={bookingAgents}
-            deliveryAddresses={deliveryAddresses}
-            purchaseOrders={purchaseOrders}
-            currentUser={currentUser}
-          />
-        </div>
-      </body>
+    <head>
+      <meta charSet="utf-8" />
+      <title>RSL Logistics Portal</title>
+    </head>
+    <body>
+    <div id="logistics-root">
+      <LogisticsApp
+        initialShipments={initialShipments}
+        initialUsers={initialUsers}
+        companies={companies}
+        containers={containers}
+        originPorts={originPorts}
+        destinationPorts={destinationPorts}
+        bookingAgents={bookingAgents}
+        deliveryAddresses={deliveryAddresses}
+        purchaseOrders={purchaseOrders}
+        currentUser={currentUser}
+      />
+    </div>
+    </body>
     </html>
   );
 }

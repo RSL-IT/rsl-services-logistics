@@ -1,12 +1,7 @@
 // app/logistics-ui/components/UserDetailsModal.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { X, Mail, Shield, User as UserIcon, Lock, Factory } from "lucide-react";
-import type { UIUser } from "./UserManagement";
-
-export type CompanyOption = {
-  shortName: string;
-  displayName?: string | null;
-};
+import type { UIUser, CompanyOption } from "./types";
 
 // Optional permission option type – when you start feeding from tlkp_permission
 export interface PermissionOption {

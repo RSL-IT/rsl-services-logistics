@@ -3,46 +3,7 @@ import React, { useMemo, useState } from "react";
 import { Search, Plus, ChevronLeft, Shield, Factory, Eye } from "lucide-react";
 
 import UserDetailsModal from "./UserDetailsModal";
-import type { Role } from "./types";
-
-export type UIPermissions = {
-  viewUserManagement?: boolean;
-  createEditUser?: boolean;
-  modifyShipper?: boolean;
-  viewDashboard?: boolean;
-  editDashboard?: boolean;
-  viewShipment?: boolean;
-  createUpdateShipment?: boolean;
-};
-
-export type UIUser = {
-  id: number | string;
-  email: string;
-
-  // Optional user-friendly name
-  name?: string | null;
-
-  // Used by the app's login/router
-  role?: Role | null;
-
-  // Display label used throughout the UI (e.g. "RSL Internal", "RSL Supplier")
-  userType?: string | null;
-
-  // Supplier/company reference when role/userType indicates supplier
-  supplierId?: string | null;
-
-  // Activation + auth
-  isActive?: boolean;
-  password?: string | null;
-
-  // UI permissions toggles
-  permissions?: UIPermissions;
-};
-
-export type CompanyOption = {
-  shortName: string;
-  displayName?: string | null;
-};
+import type { Role, UIUser, UIPermissions, CompanyOption } from "./types";
 
 interface UserManagementProps {
   users: UIUser[];

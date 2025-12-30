@@ -32,16 +32,27 @@ export type UIPurchaseOrder = {
   companyID?: string | null;
   companyName?: string | null;
 
+  lastUpdatedBy?: string | null;
+
   notes?: UIPurchaseOrderNote[];
 };
 
 type SaveMode = "create" | "update";
+
+// Current user type for showing who is creating
+type CurrentUser = {
+  id?: string | number;
+  name?: string | null;
+  displayName?: string | null;
+  email?: string;
+};
 
 interface PurchaseOrderDetailsModalProps {
   mode: "create" | "view";
 
   purchaseOrder: UIPurchaseOrder;
   companies: CompanyOption[];
+  currentUser?: CurrentUser | null;
 
   isSaving?: boolean;
   error?: string | null;
@@ -81,6 +92,8 @@ function displayEventType(t?: string | null) {
   const s = safeStr(t);
   if (!s) return "Note";
   if (s === "PDF_UPDATE") return "New PDF Uploaded";
+  if (s === "PO Created") return "PO Created";
+  if (s === "NOTE") return "Note";
   return s;
 }
 
@@ -236,6 +249,7 @@ export function PurchaseOrderDetailsModal({
                                             mode,
                                             purchaseOrder,
                                             companies,
+                                            currentUser,
                                             isSaving = false,
                                             error = null,
                                             onClose,
@@ -244,6 +258,9 @@ export function PurchaseOrderDetailsModal({
                                           }: PurchaseOrderDetailsModalProps) {
   const isCreate = mode === "create";
   const saveMode: SaveMode = isCreate ? "create" : "update";
+
+  // Get current user display name for create mode
+  const currentUserName = safeStr(currentUser?.displayName || currentUser?.name || currentUser?.email) || "Current User";
 
   const [poNumber, setPoNumber] = useState<string>(safeStr(purchaseOrder.shortName));
   const [gid, setGid] = useState<string>(safeStr(purchaseOrder.purchaseOrderGID));
@@ -357,11 +374,23 @@ export function PurchaseOrderDetailsModal({
               )}
             </div>
 
-            {/* Shopify PO ID */}
-            <div style={fieldStyle}>
-              <div style={labelStyle}>Shopify Purchase Order ID</div>
+            {/* For Create: show "Created By" with user name; For View: show Created */}
+            {isCreate ? (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>Created By</div>
+                <div style={readOnlyBoxStyle}>{currentUserName}</div>
+              </div>
+            ) : (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>Created</div>
+                <div style={readOnlyBoxStyle}>{createdText}</div>
+              </div>
+            )}
 
-              {isCreate ? (
+            {/* Shopify PO ID - only shown in create mode */}
+            {isCreate ? (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>Shopify Purchase Order ID</div>
                 <input
                   style={inputStyle}
                   value={gid}
@@ -369,10 +398,8 @@ export function PurchaseOrderDetailsModal({
                   placeholder="Enter the number at the end of the PO URL"
                   disabled={isSaving}
                 />
-              ) : (
-                <div style={readOnlyBoxStyle}>{safeStr(purchaseOrder.purchaseOrderGID) || "-"}</div>
-              )}
-            </div>
+              </div>
+            ) : null}
 
             {/* Company */}
             <div style={fieldStyle}>
@@ -388,7 +415,7 @@ export function PurchaseOrderDetailsModal({
                   <option value="">Select a company…</option>
                   {(companies || []).map((c) => (
                     <option key={safeStr(c.shortName)} value={safeStr(c.shortName)}>
-                      {safeStr(c.shortName)}
+                      {safeStr(c.displayName) || safeStr(c.shortName)}
                     </option>
                   ))}
                 </select>
@@ -397,64 +424,95 @@ export function PurchaseOrderDetailsModal({
               )}
 
               {isCreate ? (
-                <div style={helperStyle}>Dropdown shows company short names.</div>
+                <div style={helperStyle}>Select the company for this purchase order.</div>
               ) : null}
             </div>
 
-            {/* Created */}
-            <div style={fieldStyle}>
-              <div style={labelStyle}>Created</div>
-              <div style={readOnlyBoxStyle}>{createdText}</div>
-            </div>
-
-            {/* Updated */}
-            <div style={fieldStyle}>
-              <div style={labelStyle}>Last Updated</div>
-              <div style={readOnlyBoxStyle}>{updatedText}</div>
-            </div>
-
-            {/* PDF */}
-            <div style={fieldStyle}>
-              <div style={labelStyle}>PDF</div>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {currentPdfUrl ? (
-                  <div style={readOnlyBoxStyle}>
-                    <a
-                      href={currentPdfUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: "#2563eb", fontWeight: 900, textDecoration: "none" }}
-                    >
-                      View current PDF
-                    </a>
-                  </div>
-                ) : (
-                  <div style={readOnlyBoxStyle}>No PDF uploaded</div>
-                )}
-
-                <input
-                  type="file"
-                  accept="application/pdf"
-                  disabled={isSaving}
-                  onChange={(e) => {
-                    const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
-                    setPdfFile(f);
-                  }}
-                />
-
-                {pdfFile ? (
-                  <div style={helperStyle}>
-                    Selected: <b>{pdfFile.name}</b>
-                    {!safeStr(note) ? (
-                      <div style={{ color: "#991b1b", marginTop: 4 }}>
-                        Note is required when uploading a new PDF.
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
+            {/* For View: Last Updated By */}
+            {!isCreate ? (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>Last Updated By</div>
+                <div style={readOnlyBoxStyle}>{safeStr(purchaseOrder.lastUpdatedBy) || "-"}</div>
               </div>
-            </div>
+            ) : null}
+
+            {/* For View: PDF (swapped with Last Updated) */}
+            {!isCreate ? (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>PDF</div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {currentPdfUrl ? (
+                    <div style={readOnlyBoxStyle}>
+                      <a
+                        href={currentPdfUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "#2563eb", fontWeight: 900, textDecoration: "none" }}
+                      >
+                        View current PDF
+                      </a>
+                    </div>
+                  ) : (
+                    <div style={readOnlyBoxStyle}>No PDF uploaded</div>
+                  )}
+
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    disabled={isSaving}
+                    onChange={(e) => {
+                      const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+                      setPdfFile(f);
+                    }}
+                  />
+
+                  {pdfFile ? (
+                    <div style={helperStyle}>
+                      Selected: <b>{pdfFile.name}</b>
+                      {!safeStr(note) ? (
+                        <div style={{ color: "#991b1b", marginTop: 4 }}>
+                          Note is required when uploading a new PDF.
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {/* For View: Last Updated (swapped with PDF) */}
+            {!isCreate ? (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>Last Updated</div>
+                <div style={readOnlyBoxStyle}>{updatedText}</div>
+              </div>
+            ) : null}
+
+            {/* For Create: PDF upload */}
+            {isCreate ? (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>PDF (Optional)</div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    disabled={isSaving}
+                    onChange={(e) => {
+                      const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+                      setPdfFile(f);
+                    }}
+                  />
+
+                  {pdfFile ? (
+                    <div style={helperStyle}>
+                      Selected: <b>{pdfFile.name}</b>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
 
             {/* Note */}
             <div style={fieldStyle}>
@@ -528,7 +586,15 @@ export function PurchaseOrderDetailsModal({
               Cancel
             </button>
 
-            <button type="button" style={primaryBtnStyle} onClick={submit} disabled={!canSave}>
+            <button
+              type="button"
+              style={{
+                ...primaryBtnStyle,
+                ...(canSave ? {} : { opacity: 0.5, cursor: "not-allowed" }),
+              }}
+              onClick={submit}
+              disabled={!canSave}
+            >
               <Save size={16} />
               {isCreate ? "Create Purchase Order" : "Update Purchase Order"}
             </button>

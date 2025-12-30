@@ -56,7 +56,7 @@ async function getCompanySummaryByShortName(tx, shortName) {
 }
 
 function toUiNote(n) {
-  const createdAtIso = n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString();
+  const timestampIso = n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString();
 
   // Normalize event type (just in case older rows exist)
   const rawType = n.eventType || null;
@@ -64,16 +64,21 @@ function toUiNote(n) {
 
   return {
     id: String(n.id),
-    createdAt: createdAtIso,
+    timestamp: timestampIso,  // UI expects 'timestamp' not 'createdAt'
     content: n.content || "",
     eventType,
     pdfUrl: n.pdfUrl || null,
     pdfFileName: n.pdfFileName || null,
-    displayName: n.logisticsUser?.displayName || null,
+    user: n.logisticsUser?.displayName || null,  // UI expects 'user' not 'displayName'
   };
 }
 
 function toUiPO(po, company) {
+  const notes = Array.isArray(po.notes) ? po.notes.map(toUiNote) : [];
+
+  // Get the user from the most recent note (notes are already ordered desc by createdAt)
+  const lastUpdatedBy = notes.length > 0 && notes[0].user ? notes[0].user : null;
+
   return {
     id: po.id,
     shortName: po.shortName,
@@ -86,15 +91,20 @@ function toUiPO(po, company) {
     // Long name only (per your request)
     companyName: company?.displayName || company?.shortName || null,
 
-    notes: Array.isArray(po.notes) ? po.notes.map(toUiNote) : [],
+    lastUpdatedBy,
+    notes,
   };
 }
 
 /**
  * Shopify staged upload + fileCreate
- * Handles:
- *  - policy POST targets (multipart form with returned parameters + file)
- *  - signed URL targets (some are POST-signed, some PUT-signed) => try POST then fallback PUT
+ *
+ * Shopify returns GCS v4 signed URLs. The `parameters` array contains metadata
+ * like content_type and acl that were used to generate the signature, but these
+ * are NOT form fields to POST. Instead, we must PUT the raw file body directly.
+ *
+ * The signature only covers the `host` header (X-Goog-SignedHeaders=host),
+ * so we must NOT add any other headers like Content-Type.
  */
 async function uploadPdfToShopifyFiles({ shop, file }) {
   const filename = file.name || "purchase-order.pdf";
@@ -114,6 +124,8 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
     }
   `;
 
+  console.log("[upload] Creating staged upload for:", filename, "size:", fileSize);
+
   const stagedResp = await runAdminQuery(shop, STAGED_UPLOAD, {
     input: [
       {
@@ -132,43 +144,31 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
   if (!target?.url || !target?.resourceUrl) throw new Error("Missing staged upload target.");
 
   const urlStr = String(target.url);
-  const params = Array.isArray(target.parameters) ? target.parameters : [];
+
+  console.log("[upload] Target URL:", urlStr.substring(0, 100) + "...");
+  console.log("[upload] ResourceUrl:", target.resourceUrl);
 
   // --- Upload to staged target ---
-  if (params.length > 0) {
-    // Policy POST style (canonical Shopify approach)
-    const fd = new FormData();
-    for (const p of params) fd.append(p.name, p.value);
-    fd.append("file", file);
+  // Shopify's GCS v4 signed URLs expect a PUT request with raw body
+  // Do NOT add any headers - the signature only covers 'host'
+  const buf = Buffer.from(await file.arrayBuffer());
 
-    const uploadRes = await fetch(urlStr, { method: "POST", body: fd });
-    if (!uploadRes.ok) {
-      const text = await uploadRes.text().catch(() => "");
-      throw new Error(`Staged upload failed: ${uploadRes.status} ${text}`.trim());
-    }
-  } else {
-    // Signed URL style (method can be POST-signed or PUT-signed; try POST first)
-    const buf = Buffer.from(await file.arrayBuffer());
+  console.log("[upload] Uploading", buf.length, "bytes via PUT");
 
-    const tryUpload = async (method) => {
-      const r = await fetch(urlStr, {
-        method,
-        headers: { "Content-Type": mimeType },
-        body: buf,
-      });
-      const text = !r.ok ? await r.text().catch(() => "") : "";
-      return { ok: r.ok, status: r.status, text };
-    };
+  const uploadRes = await fetch(urlStr, {
+    method: "PUT",
+    body: buf,
+    // NO headers - signature only covers 'host' header which is added automatically
+  });
 
-    let attempt = await tryUpload("POST");
-    if (!attempt.ok && String(attempt.text || "").includes("SignatureDoesNotMatch")) {
-      attempt = await tryUpload("PUT");
-    }
-
-    if (!attempt.ok) {
-      throw new Error(`Staged upload failed: ${attempt.status} ${attempt.text}`.trim());
-    }
+  if (!uploadRes.ok) {
+    const text = await uploadRes.text().catch(() => "");
+    console.error("[upload] PUT upload failed:", uploadRes.status);
+    console.error("[upload] Response:", text.substring(0, 500));
+    throw new Error(`Staged upload failed: ${uploadRes.status} ${text}`.trim());
   }
+
+  console.log("[upload] PUT upload succeeded, status:", uploadRes.status);
 
   // --- Create Shopify file record pointing at staged resourceUrl ---
   const FILE_CREATE = `
@@ -360,21 +360,25 @@ export async function action({ request }) {
             data: { purchaseOrderGID: po.purchaseOrderGID, companyID: company.shortName },
           });
 
-          // If note entered OR pdf uploaded, store a history entry (with current user id)
-          if (note || pdfUrl) {
-            const eventType = pdfUrl ? "New PDF Uploaded" : "NOTE";
-            const content = note || (pdfUrl ? "New PDF Uploaded" : "");
-            await tx.tbl_purchaseOrderNotes.create({
-              data: {
-                purchaseOrderGID: po.purchaseOrderGID,
-                userId: Number(user.id),
-                content,
-                pdfUrl: pdfUrl || null,
-                pdfFileName: pdfUrl ? String(pdfFile.name || "purchase-order.pdf") : null,
-                eventType,
-              },
-            });
-          }
+          // Always create a "PO Created" note entry when creating a new PO
+          // If user provided a note, include it; otherwise leave content blank
+          // If PDF was uploaded, note that as well
+          const eventType = "PO Created";
+          const contentParts = [];
+          if (pdfUrl) contentParts.push("PDF uploaded");
+          if (note) contentParts.push(note);
+          const content = contentParts.join(" - ");
+
+          await tx.tbl_purchaseOrderNotes.create({
+            data: {
+              purchaseOrderGID: po.purchaseOrderGID,
+              userId: Number(user.id),
+              content,
+              pdfUrl: pdfUrl || null,
+              pdfFileName: pdfUrl ? String(pdfFile.name || "purchase-order.pdf") : null,
+              eventType,
+            },
+          });
 
           const full = await tx.tbl_purchaseOrder.findUnique({
             where: { purchaseOrderGID: po.purchaseOrderGID },
@@ -557,6 +561,7 @@ export async function action({ request }) {
 
     return json({ ok: false, error: `Unknown intent: ${intent}` }, { status: 400 });
   } catch (e) {
+    console.error("[purchase-orders action] error:", e);
     return json({ ok: false, error: e?.message || "Server error." }, { status: 500 });
   }
 }

@@ -1,37 +1,12 @@
 // app/logistics-ui/components/InternalDashboard.tsx
 import React, { useMemo, useState } from "react";
-import type { Shipment as BaseShipment, CompanyOption, LookupOption } from "../LogisticsApp";
-import type { User } from "../data/usersData";
+import type { Shipment } from "../LogisticsApp";
+import type { UIUser, CompanyOption, LookupOption, PurchaseOrderOption } from "./types";
 import ShipmentDetailsModal from "./ShipmentDetailsModal";
 
-// Local type so we don't depend on an export from LogisticsApp
-export type PurchaseOrderOption = {
-  purchaseOrderGID: string;
-  shortName: string;
-};
-
-// Extend Shipment safely (works whether LogisticsApp's Shipment already has these or not)
-export type Shipment = BaseShipment & {
-  // DB-backed fields you’re using in the shipment endpoint:
-  cargoReadyDate?: string;
-  estimatedDeliveryToOrigin?: string;
-  supplierPi?: string;
-  quantity?: string | number | null; // UI sends string; server parses BigInt
-  bookingNumber?: string;
-  notes?: string;
-
-  // UI-only fields (until you add DB columns):
-  bookingAgent?: string;
-  vesselName?: string;
-  deliveryAddress?: string;
-
-  // PO multi-select
-  purchaseOrderGIDs?: string[];
-  purchaseOrderShortNames?: string[];
-};
 
 interface InternalDashboardProps {
-  currentUser: User;
+  currentUser: UIUser | null;
   shipments: Shipment[];
 
   companies: CompanyOption[];

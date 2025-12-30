@@ -1,7 +1,7 @@
 // app/logistics-ui/components/ShipmentDetailsModal.tsx
 import React, { useMemo, useState } from "react";
-import type { CompanyOption, LookupOption } from "../LogisticsApp";
-import type { PurchaseOrderOption, Shipment } from "./InternalDashboard";
+import type { Shipment } from "../LogisticsApp";
+import type { CompanyOption, LookupOption, PurchaseOrderOption } from "./types";
 
 type SaveMode = "create" | "update";
 

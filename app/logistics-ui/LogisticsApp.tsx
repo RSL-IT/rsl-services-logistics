@@ -17,6 +17,9 @@ import type {
 
 import type { UIPurchaseOrder } from "./components/PurchaseOrderDetailsModal";
 
+// Re-export types that other components import from LogisticsApp
+export type { CompanyOption, LookupOption, PurchaseOrderOption } from "./components/types";
+
 // -------------------- Types used by this file --------------------
 
 export type Shipment = {
@@ -48,13 +51,14 @@ export type Shipment = {
 
   estimatedDeliveryToOrigin?: string | null;
   supplierPi?: string | null;
-  quantity?: number | null;
+  quantity?: number | string | null;
   bookingAgent?: string | null;
   bookingNumber?: string | null;
   vesselName?: string | null;
   notes?: string | null;
 
   purchaseOrderGIDs?: string[] | null;
+  purchaseOrderShortNames?: string[] | null;
 };
 
 // Raw lookup shapes that can come from loaders (often allow null displayName)
@@ -64,8 +68,11 @@ type RawCompany = { shortName: string; displayName?: string | null };
 type ViewType = "login" | "supplier" | "dashboard" | "users" | "purchaseOrders";
 
 interface LogisticsAppProps {
-  shipments: Shipment[];
-  users: UIUser[];
+  // Accept both naming conventions for compatibility
+  shipments?: Shipment[];
+  initialShipments?: Shipment[];
+  users?: UIUser[];
+  initialUsers?: UIUser[];
 
   companies: RawCompany[];
   containers: RawLookup[];
@@ -110,14 +117,16 @@ function buildPurchaseOrderOptions(purchaseOrders: UIPurchaseOrder[]): PurchaseO
     if (!gid || !label) continue;
     if (seen.has(gid)) continue;
     seen.add(gid);
-    out.push({ id: gid, label });
+    out.push({ purchaseOrderGID: gid, shortName: label });
   }
   return out;
 }
 
 export default function LogisticsApp({
                                        shipments,
+                                       initialShipments,
                                        users,
+                                       initialUsers,
                                        companies,
                                        containers,
                                        originPorts,
@@ -131,12 +140,16 @@ export default function LogisticsApp({
   const [currentView, setCurrentView] = useState<ViewType>("login");
   const [supplierId, setSupplierId] = useState<string | null>(null);
 
+  // Support both naming conventions: shipments/initialShipments, users/initialUsers
+  const shipmentsData = shipments ?? initialShipments;
+  const usersData = users ?? initialUsers;
+
   const [shipmentsState, setShipmentsState] = useState<Shipment[]>(
-    Array.isArray(shipments) ? shipments : [],
+    Array.isArray(shipmentsData) ? shipmentsData : [],
   );
 
   const [usersState, setUsersState] = useState<UIUser[]>(
-    Array.isArray(users) ? users : [],
+    Array.isArray(usersData) ? usersData : [],
   );
 
   const [purchaseOrdersState, setPurchaseOrdersState] = useState<UIPurchaseOrder[]>(
@@ -165,7 +178,7 @@ export default function LogisticsApp({
     setCurrentView("login");
   };
 
-  const handleLogin = (role: Role, supplierIdArg?: string, userArg?: UIUser) => {
+  const handleLogin = (role: Role, userArg: UIUser, supplierIdArg?: string | null) => {
     setCurrentUserState(userArg ?? null);
 
     if (role === "supplier") {
@@ -200,15 +213,13 @@ export default function LogisticsApp({
         <InternalDashboard
           shipments={shipmentsState}
           onShipmentsChange={(next) => setShipmentsState(next)}
-          users={usersState}
-          onUsersChange={(next) => setUsersState(next)}
           companies={companiesSafe}
           containers={containersSafe}
           originPorts={originPortsSafe}
           destinationPorts={destinationPortsSafe}
           bookingAgents={bookingAgentsSafe}
           deliveryAddresses={deliveryAddressesSafe}
-          purchaseOrderOptions={purchaseOrderOptions}
+          purchaseOrders={purchaseOrderOptions}
           currentUser={currentUserState}
           onNavigateToUsers={() => setCurrentView("users")}
           onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
@@ -231,6 +242,7 @@ export default function LogisticsApp({
           purchaseOrders={purchaseOrdersState}
           onPurchaseOrdersChange={(next) => setPurchaseOrdersState(next)}
           companies={companiesSafe}
+          currentUser={currentUserState}
           onBack={() => setCurrentView("dashboard")}
           onLogout={logout}
         />

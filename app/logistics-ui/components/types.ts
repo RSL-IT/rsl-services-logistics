@@ -1,22 +1,70 @@
 // app/logistics-ui/components/types.ts
-// Shared types for the Logistics UI login flow.
-// These bridge the React components with the DB-backed login endpoint.
-
-import type { User as BaseUser } from "../data/usersData";
-
-// Core user model used by the UI.
-// We extend the static BaseUser with an optional supplierId
-// that comes back from the login API.
-export type User = BaseUser & {
-  supplierId?: string | null;
-};
+// Shared types for the Logistics UI.
+// These bridge the React components with the DB-backed endpoints.
 
 export type Role = "internal" | "supplier";
 
-export type OnLogin = (role: Role, user: User, supplierId?: string | null) => void;
+// Permission flags for user capabilities
+export type UIPermissions = {
+  viewUserManagement?: boolean;
+  createEditUser?: boolean;
+  modifyShipper?: boolean;
+  viewDashboard?: boolean;
+  editDashboard?: boolean;
+  viewShipment?: boolean;
+  createUpdateShipment?: boolean;
+};
+
+// Full user model used throughout the UI
+export type UIUser = {
+  id: number | string;
+  email: string;
+
+  // Optional user-friendly name
+  name?: string | null;
+
+  // Used by the app's login/router
+  role?: Role | null;
+
+  // Display label used throughout the UI (e.g. "RSL Internal", "RSL Supplier")
+  userType?: string | null;
+
+  // Supplier/company reference when role/userType indicates supplier
+  supplierId?: string | null;
+
+  // Activation + auth
+  isActive?: boolean;
+  password?: string | null;
+
+  // UI permissions toggles
+  permissions?: UIPermissions;
+};
+
+// Alias for backward compatibility
+export type User = UIUser;
+
+// Lookup option for dropdowns (containers, ports, booking agents, etc.)
+export type LookupOption = {
+  shortName: string;
+  displayName: string;
+};
+
+// Company option (suppliers)
+export type CompanyOption = {
+  shortName: string;
+  displayName: string;
+};
+
+// Purchase order option for shipment PO selection
+export type PurchaseOrderOption = {
+  purchaseOrderGID: string;
+  shortName: string;
+};
+
+export type OnLogin = (role: Role, user: UIUser, supplierId?: string | null) => void;
 
 export interface LoginProps {
   onLogin: OnLogin;
-  users: User[];
-  initialError?: string;
+  users: UIUser[];
+  initialError?: string | null;
 }

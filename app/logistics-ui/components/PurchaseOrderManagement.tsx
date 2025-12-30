@@ -11,11 +11,20 @@ import { withShopParam } from "../utils/shop";
 
 type SortKey = "purchaseOrder" | "company" | "created" | "updated";
 
+// Current user type
+type CurrentUser = {
+  id?: string | number;
+  name?: string | null;
+  displayName?: string | null;
+  email?: string;
+};
+
 interface PurchaseOrderManagementProps {
   purchaseOrders: UIPurchaseOrder[];
   onPurchaseOrdersChange: (nextPurchaseOrders: UIPurchaseOrder[]) => void;
 
   companies: CompanyOption[];
+  currentUser?: CurrentUser | null;
 
   onBack: () => void;
   onLogout: () => void;
@@ -219,6 +228,7 @@ export function PurchaseOrderManagement({
                                           purchaseOrders,
                                           onPurchaseOrdersChange,
                                           companies,
+                                          currentUser,
                                           onBack,
                                           onLogout,
                                         }: PurchaseOrderManagementProps) {
@@ -250,7 +260,7 @@ export function PurchaseOrderManagement({
         const url = withShopParam("/apps/logistics/purchase-orders?intent=list");
         const res = await fetch(url, { method: "GET" });
         const data: any = await res.json().catch(() => null);
-        if (!res.ok || !data?.success) return;
+        if (!res.ok || !data?.ok) return;
         const next = Array.isArray(data.purchaseOrders) ? data.purchaseOrders : [];
         onPurchaseOrdersChange(next);
       } catch {
@@ -393,7 +403,7 @@ export function PurchaseOrderManagement({
       const res = await fetch(url, { method: "POST", body: fd });
       const data: any = await res.json().catch(() => null);
 
-      if (!res.ok || !data?.success) {
+      if (!res.ok || !data?.ok) {
         throw new Error(data?.error || "Save failed.");
       }
 
@@ -409,6 +419,12 @@ export function PurchaseOrderManagement({
   };
 
   const handleDelete = async (po: UIPurchaseOrder) => {
+    // Confirm before deleting
+    const confirmed = window.confirm(
+      `Are you sure you want to delete purchase order "${safeStr(po.shortName)}"? This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
     setIsSaving(true);
     setError(null);
 
@@ -420,7 +436,7 @@ export function PurchaseOrderManagement({
         body: JSON.stringify({ intent: "delete", purchaseOrder: { purchaseOrderGID: po.purchaseOrderGID } }),
       });
       const data: any = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) throw new Error(data?.error || "Delete failed.");
+      if (!res.ok || !data?.ok) throw new Error(data?.error || "Delete failed.");
 
       const gid = safeStr(po.purchaseOrderGID);
       const next = (purchaseOrders || []).filter((x) => safeStr(x.purchaseOrderGID) !== gid);
@@ -531,6 +547,7 @@ export function PurchaseOrderManagement({
           mode={mode}
           purchaseOrder={selectedPO}
           companies={companies}
+          currentUser={currentUser}
           isSaving={isSaving}
           error={error}
           onClose={closeModal}

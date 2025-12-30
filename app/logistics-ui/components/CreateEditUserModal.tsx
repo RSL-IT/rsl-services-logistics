@@ -1,7 +1,7 @@
 // app/logistics-ui/components/CreateEditUserModal.tsx
 import React from "react";
-import UserDetailsModal, { type CompanyOption, type PermissionOption } from "./UserDetailsModal";
-import type { UIUser } from "./UserManagement";
+import UserDetailsModal, { type PermissionOption } from "./UserDetailsModal";
+import type { UIUser, CompanyOption } from "./types";
 
 interface CreateEditUserModalProps {
   user?: UIUser;
