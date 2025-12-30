@@ -562,6 +562,16 @@ export async function action({ request }) {
     return json({ ok: false, error: `Unknown intent: ${intent}` }, { status: 400 });
   } catch (e) {
     console.error("[purchase-orders action] error:", e);
-    return json({ ok: false, error: e?.message || "Server error." }, { status: 500 });
+
+    // Check for unique constraint violation on purchaseOrderGID
+    const errorMessage = e?.message || "";
+    if (errorMessage.includes("Unique constraint") && errorMessage.includes("purchaseOrderGID")) {
+      return json({
+        ok: false,
+        error: "Whoops. Looks like you are trying to use a duplicate Shopify Purchase Order ID. Check your URL for the PO and try again."
+      }, { status: 400 });
+    }
+
+    return json({ ok: false, error: errorMessage || "Server error." }, { status: 500 });
   }
 }

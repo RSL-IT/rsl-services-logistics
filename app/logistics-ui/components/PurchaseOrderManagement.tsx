@@ -34,6 +34,11 @@ function safeStr(v: unknown) {
   return String(v ?? "").trim();
 }
 
+function adminPurchaseOrderUrl(gid: string) {
+  const clean = safeStr(gid);
+  return `https://admin.shopify.com/store/rogersoundlabs/purchase_orders/${encodeURIComponent(clean)}`;
+}
+
 function parseCompanyLongName(companyName?: string | null) {
   const s = safeStr(companyName);
   if (!s) return "-";
@@ -224,6 +229,8 @@ const errorStyle: React.CSSProperties = {
 // Component
 // -----------------------------------------------------------------------------
 
+const PO_SESSION_KEY = "logistics_po_modal";
+
 export function PurchaseOrderManagement({
                                           purchaseOrders,
                                           onPurchaseOrdersChange,
@@ -232,17 +239,65 @@ export function PurchaseOrderManagement({
                                           onBack,
                                           onLogout,
                                         }: PurchaseOrderManagementProps) {
+  // Helper to get initial modal state from sessionStorage
+  const getInitialModalState = () => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = sessionStorage.getItem(PO_SESSION_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch {
+      // ignore parse errors
+    }
+    return null;
+  };
+
+  const savedModal = getInitialModalState();
+
   const [q, setQ] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("updated");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  const [selectedPO, setSelectedPO] = useState<UIPurchaseOrder | null>(null);
-  const [mode, setMode] = useState<"create" | "view">("view");
+  // Restore modal state from session if available
+  const [selectedPO, setSelectedPO] = useState<UIPurchaseOrder | null>(() => {
+    if (savedModal?.selectedPOGID && Array.isArray(purchaseOrders)) {
+      const found = purchaseOrders.find(
+        (po) => safeStr(po.purchaseOrderGID) === savedModal.selectedPOGID
+      );
+      if (found) return found;
+    }
+    return null;
+  });
+
+  const [mode, setMode] = useState<"create" | "view">(() => {
+    return savedModal?.mode || "view";
+  });
 
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const didInitialFetch = useRef(false);
+
+  // Persist modal state to sessionStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const modalData = {
+      selectedPOGID: selectedPO?.purchaseOrderGID || null,
+      mode,
+    };
+
+    try {
+      if (selectedPO) {
+        sessionStorage.setItem(PO_SESSION_KEY, JSON.stringify(modalData));
+      } else {
+        sessionStorage.removeItem(PO_SESSION_KEY);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, [selectedPO, mode]);
 
   const companyMap = useMemo(() => {
     const m = new Map<string, CompanyOption>();
@@ -263,6 +318,18 @@ export function PurchaseOrderManagement({
         if (!res.ok || !data?.ok) return;
         const next = Array.isArray(data.purchaseOrders) ? data.purchaseOrders : [];
         onPurchaseOrdersChange(next);
+
+        // If we had a saved modal state, try to restore it with fresh data
+        const savedModalState = getInitialModalState();
+        if (savedModalState?.selectedPOGID) {
+          const found = next.find(
+            (po: UIPurchaseOrder) => safeStr(po.purchaseOrderGID) === savedModalState.selectedPOGID
+          );
+          if (found) {
+            setSelectedPO(found);
+            setMode(savedModalState.mode || "view");
+          }
+        }
       } catch {
         // silent: page still usable with existing list
       }
@@ -409,8 +476,14 @@ export function PurchaseOrderManagement({
 
       const updated = data.purchaseOrder as UIPurchaseOrder;
       upsertLocal(updated);
-      setSelectedPO(updated);
-      setMode("view");
+
+      // For create: close the modal; for update: stay in view mode
+      if (saveMode === "create") {
+        setSelectedPO(null);
+      } else {
+        setSelectedPO(updated);
+        setMode("view");
+      }
     } catch (e: any) {
       setError(e?.message || "Save failed.");
     } finally {
@@ -525,7 +598,16 @@ export function PurchaseOrderManagement({
           ) : (
             filteredSorted.map((po) => (
               <tr key={safeStr(po.id) || safeStr(po.purchaseOrderGID) || safeStr(po.shortName)}>
-                <td style={tdStyle}>{safeStr(po.shortName) || "-"}</td>
+                <td style={tdStyle}>
+                  <a
+                    href={adminPurchaseOrderUrl(po.purchaseOrderGID)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
+                  >
+                    #{safeStr(po.shortName) || "-"}
+                  </a>
+                </td>
                 <td style={tdStyle}>{companyTextForRow(po)}</td>
                 <td style={tdStyle}>{createdTextForRow(po)}</td>
                 <td style={tdStyle}>{updatedTextForRow(po)}</td>

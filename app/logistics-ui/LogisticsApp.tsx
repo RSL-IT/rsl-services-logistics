@@ -1,5 +1,5 @@
 // app/logistics-ui/LogisticsApp.tsx
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import Login from "./components/Login";
 import { SupplierView } from "./components/SupplierView";
@@ -137,12 +137,47 @@ export default function LogisticsApp({
                                        currentUser,
                                        initialError,
                                      }: LogisticsAppProps) {
-  const [currentView, setCurrentView] = useState<ViewType>("login");
-  const [supplierId, setSupplierId] = useState<string | null>(null);
-
   // Support both naming conventions: shipments/initialShipments, users/initialUsers
   const shipmentsData = shipments ?? initialShipments;
   const usersData = users ?? initialUsers;
+
+  // Session storage keys
+  const SESSION_KEY = "logistics_session";
+
+  // Track if user has explicitly logged out this session (to prevent auto-login from server props)
+  const hasLoggedOutRef = useRef(false);
+
+  // Helper to get initial state from sessionStorage or default
+  const getInitialSessionState = () => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = sessionStorage.getItem(SESSION_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch {
+      // ignore parse errors
+    }
+    return null;
+  };
+
+  const savedSession = getInitialSessionState();
+
+  // Initialize state from session storage if available, otherwise use defaults
+  const [currentView, setCurrentView] = useState<ViewType>(() => {
+    // If server sent currentUser, user is already logged in
+    if (currentUser) {
+      return savedSession?.currentView || "dashboard";
+    }
+    return "login";
+  });
+
+  const [supplierId, setSupplierId] = useState<string | null>(() => {
+    if (currentUser) {
+      return savedSession?.supplierId || currentUser.supplierId || null;
+    }
+    return null;
+  });
 
   const [shipmentsState, setShipmentsState] = useState<Shipment[]>(
     Array.isArray(shipmentsData) ? shipmentsData : [],
@@ -156,9 +191,32 @@ export default function LogisticsApp({
     Array.isArray(purchaseOrders) ? purchaseOrders : [],
   );
 
-  const [currentUserState, setCurrentUserState] = useState<UIUser | null>(
-    currentUser ?? null,
-  );
+  // Use server-provided currentUser if available
+  const [currentUserState, setCurrentUserState] = useState<UIUser | null>(() => {
+    if (currentUser) return currentUser;
+    return null;
+  });
+
+  // Persist session state to sessionStorage whenever it changes
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (hasLoggedOutRef.current) return; // Don't persist after logout
+
+    // Only persist if user is actually logged in
+    if (currentUserState && currentView !== "login") {
+      const sessionData = {
+        currentView,
+        supplierId,
+        currentUserId: currentUserState?.id || null,
+      };
+
+      try {
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
+      } catch {
+        // ignore storage errors
+      }
+    }
+  }, [currentView, supplierId, currentUserState]);
 
   const companiesSafe = useMemo(() => normalizeCompanies(companies), [companies]);
   const containersSafe = useMemo(() => normalizeLookup(containers), [containers]);
@@ -172,7 +230,28 @@ export default function LogisticsApp({
     [purchaseOrdersState],
   );
 
-  const logout = () => {
+  const logout = async () => {
+    // Mark that user has logged out to prevent auto-login from stale server props
+    hasLoggedOutRef.current = true;
+
+    // Clear all client-side session storage first
+    if (typeof window !== "undefined") {
+      try {
+        sessionStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem("logistics_po_modal");
+      } catch {
+        // ignore
+      }
+    }
+
+    // Call server to clear the session cookie
+    try {
+      await fetch("/apps/logistics/logout", { method: "POST" });
+    } catch {
+      // ignore - we'll clear client state anyway
+    }
+
+    // Clear client state
     setCurrentUserState(null);
     setSupplierId(null);
     setCurrentView("login");

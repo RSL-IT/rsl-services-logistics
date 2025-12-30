@@ -351,15 +351,34 @@ export function PurchaseOrderDetailsModal({
               <div style={labelStyle}>Purchase Order</div>
 
               {isCreate ? (
-                <>
+                <div style={{ display: "flex", alignItems: "center" }}>
+                  <span
+                    style={{
+                      ...inputStyle,
+                      borderRight: "none",
+                      borderTopRightRadius: 0,
+                      borderBottomRightRadius: 0,
+                      background: "#f1f5f9",
+                      color: "#64748b",
+                      fontWeight: 700,
+                      paddingRight: 8,
+                    }}
+                  >
+                    #
+                  </span>
                   <input
-                    style={inputStyle}
+                    style={{
+                      ...inputStyle,
+                      borderTopLeftRadius: 0,
+                      borderBottomLeftRadius: 0,
+                      flex: 1,
+                    }}
                     value={poNumber}
                     onChange={(e) => setPoNumber(e.target.value)}
                     placeholder="Enter the PO number"
                     disabled={isSaving}
                   />
-                </>
+                </div>
               ) : (
                 <div style={readOnlyBoxStyle}>
                   <a
@@ -368,7 +387,7 @@ export function PurchaseOrderDetailsModal({
                     rel="noreferrer"
                     style={{ color: "#2563eb", fontWeight: 900, textDecoration: "none" }}
                   >
-                    {safeStr(purchaseOrder.shortName) || "-"}
+                    #{safeStr(purchaseOrder.shortName) || "-"}
                   </a>
                 </div>
               )}
