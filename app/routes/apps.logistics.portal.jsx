@@ -47,14 +47,20 @@ function uniqStrings(arr) {
   return out;
 }
 
-function pickPurchaseOrdersInfo(s) {
-  const links = Array.isArray(s?.purchaseOrders) ? s.purchaseOrders : [];
+/**
+ * Schema-accurate shipment -> PO link reader:
+ * tbl_shipment.tbljn_shipment_purchaseOrder[].tbl_purchaseOrder
+ */
+function pickPurchaseOrdersInfoFromShipment(s) {
+  const links = Array.isArray(s?.tbljn_shipment_purchaseOrder) ? s.tbljn_shipment_purchaseOrder : [];
+
   const gids = links
-    .map((l) => l?.purchaseOrder?.purchaseOrderGID)
+    .map((l) => l?.tbl_purchaseOrder?.purchaseOrderGID)
     .filter(Boolean)
     .map((x) => String(x));
+
   const names = links
-    .map((l) => l?.purchaseOrder?.shortName)
+    .map((l) => l?.tbl_purchaseOrder?.shortName)
     .filter(Boolean)
     .map((x) => String(x));
 
@@ -62,6 +68,23 @@ function pickPurchaseOrdersInfo(s) {
     purchaseOrderGIDs: uniqStrings(gids),
     purchaseOrderShortNames: uniqStrings(names),
   };
+}
+
+/**
+ * Avoid "cannot read ... findMany" hard-crashes if a model is missing from the generated client
+ * (e.g. deploy didn't run prisma generate), and keep portal usable.
+ */
+async function safeFindMany(model, args, label) {
+  try {
+    if (!model || typeof model.findMany !== "function") {
+      console.warn("[logistics portal] safeFindMany: model missing:", label);
+      return [];
+    }
+    return await model.findMany(args);
+  } catch (err) {
+    console.error("[logistics portal] safeFindMany error:", label, err);
+    return [];
+  }
 }
 
 export async function loader({ request }) {
@@ -84,6 +107,7 @@ export async function loader({ request }) {
   // 2) Session user (if any)
   const sessionUser = await getLogisticsUser(request);
   const sessionUserId = sessionUser?.id ?? null;
+  const sessionEmail = sessionUser?.email ?? null;
 
   // 3) Fetch shipments + users + lookups
   let shipments = [];
@@ -95,178 +119,277 @@ export async function loader({ request }) {
   let bookingAgents = [];
   let deliveryAddresses = [];
   let purchaseOrders = [];
+  let rslModels = [];
 
-  try {
-    const [
-      shipmentRows,
-      userRows,
-      companyRows,
-      containerRows,
-      originRows,
-      destRows,
-      bookingAgentRows,
-      deliveryAddressRows,
-      purchaseOrderRows,
-    ] = await Promise.all([
-      logisticsDb.tbl_shipment.findMany({
-        orderBy: { etaDate: "asc" },
-        include: { purchaseOrders: { include: { purchaseOrder: true } } },
-      }),
-      logisticsDb.tbl_logisticsUser.findMany({
-        orderBy: { id: "asc" },
-        include: { permissionLinks: { include: { permission: true } } },
-      }),
-      // Supplier dropdown source in this schema is tlkp_company (shortName/displayName)
-      logisticsDb.tlkp_company.findMany({
-        select: { shortName: true, displayName: true },
-        orderBy: { shortName: "asc" },
-      }),
-      logisticsDb.tlkp_container.findMany({
-        select: { shortName: true, displayName: true },
-        orderBy: { shortName: "asc" },
-      }),
-      logisticsDb.tlkp_originPort.findMany({
-        select: { shortName: true, displayName: true },
-        orderBy: { shortName: "asc" },
-      }),
-      logisticsDb.tlkp_destinationPort.findMany({
-        select: { shortName: true, displayName: true },
-        orderBy: { shortName: "asc" },
-      }),
-      logisticsDb.tlkp_bookingAgent.findMany({
-        select: { shortName: true, displayName: true },
-        orderBy: { shortName: "asc" },
-      }),
-      logisticsDb.tlkp_deliveryAddress.findMany({
-        select: { shortName: true, displayName: true },
-        orderBy: { shortName: "asc" },
-      }),
-      logisticsDb.tbl_purchaseOrder.findMany({
-        orderBy: { shortName: "asc" },
-        select: {
-          id: true,
-          purchaseOrderGID: true,
-          shortName: true,
-          purchaseOrderPdfUrl: true,
-          createdAt: true,
-          updatedAt: true,
-          companyLinks: {
-            take: 1,
-            select: {
-              company: { select: { shortName: true, displayName: true } },
-            },
-          },
-          notes: {
-            orderBy: [{ createdAt: "desc" }],
-            select: {
-              id: true,
-              createdAt: true,
-              content: true,
-              pdfUrl: true,
-              pdfFileName: true,
-              eventType: true,
-              logisticsUser: { select: { displayName: true } },
-            },
+  // Do NOT use Promise.all() that can fail-all if one query fails.
+  // Each query is isolated so login doesn't break.
+  const shipmentRows = await safeFindMany(
+    logisticsDb.tbl_shipment,
+    {
+      orderBy: { etaDate: "asc" },
+      include: {
+        // schema: tbl_shipment.tbljn_shipment_purchaseOrder[]
+        tbljn_shipment_purchaseOrder: {
+          include: {
+            // schema: tbljn_shipment_purchaseOrder.tbl_purchaseOrder
+            tbl_purchaseOrder: { select: { purchaseOrderGID: true, shortName: true } },
           },
         },
-      }),
-    ]);
+      },
+    },
+    "tbl_shipment"
+  );
 
-    shipments = shipmentRows.map((s) => {
-      const po = pickPurchaseOrdersInfo(s);
-      return {
-        id: String(s.id),
-        supplierId: s.companyId,
-        supplierName: s.companyName,
-        products: [],
+  let userRows = await safeFindMany(
+    logisticsDb.tbl_logisticsUser,
+    {
+      orderBy: { id: "asc" },
+      include: {
+        // schema: tbl_logisticsUser.tbljn_logisticsUser_permission[]
+        tbljn_logisticsUser_permission: {
+          include: {
+            // schema: tbljn_logisticsUser_permission.tlkp_permission
+            tlkp_permission: true,
+          },
+        },
+      },
+    },
+    "tbl_logisticsUser"
+  );
 
-        containerNumber: s.containerNumber,
-        containerSize: s.containerSize ?? "",
-        portOfOrigin: s.portOfOrigin ?? "",
-        destinationPort: s.destinationPort ?? "",
+  // If the main users query failed but we have a session, try to load just the session user
+  if ((!userRows || userRows.length === 0) && (sessionUserId || sessionEmail)) {
+    const where = sessionUserId
+      ? { id: Number(sessionUserId) }
+      : { email: String(sessionEmail) };
 
-        cargoReadyDate: toIsoOrEmpty(s.cargoReadyDate),
-        etd: "",
-        actualDepartureDate: "",
-        eta: toIsoOrEmpty(s.etaDate),
-        sealNumber: "",
-        hblNumber: "",
-        estimatedDeliveryDate: "",
-        status: s.status ?? "",
+    const oneUserRows = await safeFindMany(
+      logisticsDb.tbl_logisticsUser,
+      {
+        where,
+        take: 1,
+        include: {
+          tbljn_logisticsUser_permission: {
+            include: { tlkp_permission: true },
+          },
+        },
+      },
+      "tbl_logisticsUser(session fallback)"
+    );
+    if (oneUserRows && oneUserRows.length > 0) userRows = oneUserRows;
+  }
 
-        estimatedDeliveryToOrigin: toIsoOrEmpty(s.estimatedDeliveryToOrigin),
-        supplierPi: s.supplierPi ?? "",
-        quantity: s.quantity != null ? String(s.quantity) : "",
-        bookingAgent: s.bookingAgent ?? "",
-        bookingNumber: s.bookingNumber ?? "",
-        vesselName: s.vesselName ?? "",
-        deliveryAddress: s.deliveryAddress ?? "",
-        notes: s.notes ?? "",
+  const companyRows = await safeFindMany(
+    logisticsDb.tlkp_company,
+    { select: { shortName: true, displayName: true }, orderBy: { shortName: "asc" } },
+    "tlkp_company"
+  );
 
-        purchaseOrderGIDs: po.purchaseOrderGIDs,
-        purchaseOrderShortNames: po.purchaseOrderShortNames,
-      };
-    });
+  const containerRows = await safeFindMany(
+    logisticsDb.tlkp_container,
+    { select: { shortName: true, displayName: true }, orderBy: { shortName: "asc" } },
+    "tlkp_container"
+  );
 
-    users = userRows.map((u) => {
-      const userType = normalizeUserTypeForUi(u.userType);
-      const role = userType === "RSL Supplier" ? "supplier" : "internal";
-      const supplierId = role === "supplier" ? u.companyID ?? null : null;
+  const originRows = await safeFindMany(
+    logisticsDb.tlkp_originPort,
+    { select: { shortName: true, displayName: true }, orderBy: { shortName: "asc" } },
+    "tlkp_originPort"
+  );
 
-      const dbPerms = new Set(
-        (u.permissionLinks || []).map((x) => x.permission?.shortName).filter(Boolean)
-      );
+  const destRows = await safeFindMany(
+    logisticsDb.tlkp_destinationPort,
+    { select: { shortName: true, displayName: true }, orderBy: { shortName: "asc" } },
+    "tlkp_destinationPort"
+  );
 
-      return {
-        id: String(u.id),
-        email: u.email,
-        password: "",
-        userType,
-        isActive: u.isActive !== false,
-        permissions: mapDbPermissionSetToUi(dbPerms),
-        name: u.displayName || u.email,
-        role,
-        supplierId,
-        companyName: u.companyID || "",
-      };
-    });
+  const bookingAgentRows = await safeFindMany(
+    logisticsDb.tlkp_bookingAgent,
+    { select: { shortName: true, displayName: true }, orderBy: { shortName: "asc" } },
+    "tlkp_bookingAgent"
+  );
 
-    companies = companyRows.map((c) => ({ shortName: c.shortName, displayName: c.displayName }));
-    containers = containerRows.map((c) => ({ shortName: c.shortName, displayName: c.displayName }));
-    originPorts = originRows.map((p) => ({ shortName: p.shortName, displayName: p.displayName }));
-    destinationPorts = destRows.map((p) => ({ shortName: p.shortName, displayName: p.displayName }));
-    bookingAgents = bookingAgentRows.map((b) => ({ shortName: b.shortName, displayName: b.displayName }));
-    deliveryAddresses = deliveryAddressRows.map((d) => ({ shortName: d.shortName, displayName: d.displayName }));
-    purchaseOrders = purchaseOrderRows.map((po) => {
-      const company = po.companyLinks?.[0]?.company || null;
-      const notes = Array.isArray(po.notes) ? po.notes.map((n) => ({
+  const deliveryAddressRows = await safeFindMany(
+    logisticsDb.tlkp_deliveryAddress,
+    { select: { shortName: true, displayName: true }, orderBy: { shortName: "asc" } },
+    "tlkp_deliveryAddress"
+  );
+
+  const purchaseOrderRows = await safeFindMany(
+    logisticsDb.tbl_purchaseOrder,
+    {
+      orderBy: { shortName: "asc" },
+      select: {
+        id: true,
+        purchaseOrderGID: true,
+        shortName: true,
+        purchaseOrderPdfUrl: true,
+        createdAt: true,
+        updatedAt: true,
+
+        // schema: tbl_purchaseOrder.tbljn_purchaseOrder_rslProduct[]
+        tbljn_purchaseOrder_rslProduct: {
+          select: {
+            rslProductID: true,
+            quantity: true,
+            // schema: tbljn_purchaseOrder_rslProduct.tlkp_rslProduct
+            tlkp_rslProduct: { select: { shortName: true, displayName: true, SKU: true } },
+          },
+        },
+
+        // schema: tbl_purchaseOrder.tbljn_purchaseOrder_company[]
+        tbljn_purchaseOrder_company: {
+          take: 1,
+          select: {
+            // schema: tbljn_purchaseOrder_company.tlkp_company
+            tlkp_company: { select: { shortName: true, displayName: true } },
+          },
+        },
+
+        // schema: tbl_purchaseOrder.tbl_purchaseOrderNotes[]
+        tbl_purchaseOrderNotes: {
+          orderBy: [{ createdAt: "desc" }],
+          select: {
+            id: true,
+            createdAt: true,
+            content: true,
+            pdfUrl: true,
+            pdfFileName: true,
+            eventType: true,
+            // schema: tbl_purchaseOrderNotes.tbl_logisticsUser
+            tbl_logisticsUser: { select: { displayName: true } },
+          },
+        },
+      },
+    },
+    "tbl_purchaseOrder"
+  );
+
+  const rslModelRows = await safeFindMany(
+    logisticsDb.tlkp_rslProduct,
+    { select: { shortName: true, displayName: true, SKU: true }, orderBy: [{ displayName: "asc" }] },
+    "tlkp_rslProduct"
+  );
+
+  // Map shipments
+  shipments = (shipmentRows || []).map((s) => {
+    const po = pickPurchaseOrdersInfoFromShipment(s);
+    return {
+      id: String(s.id),
+      supplierId: s.companyId,
+      supplierName: s.companyName,
+      products: [],
+
+      containerNumber: s.containerNumber,
+      containerSize: s.containerSize ?? "",
+      portOfOrigin: s.portOfOrigin ?? "",
+      destinationPort: s.destinationPort ?? "",
+
+      cargoReadyDate: toIsoOrEmpty(s.cargoReadyDate),
+      etd: "",
+      actualDepartureDate: "",
+      eta: toIsoOrEmpty(s.etaDate),
+      sealNumber: "",
+      hblNumber: "",
+      estimatedDeliveryDate: "",
+      status: s.status ?? "",
+
+      estimatedDeliveryToOrigin: toIsoOrEmpty(s.estimatedDeliveryToOrigin),
+      supplierPi: s.supplierPi ?? "",
+      quantity: s.quantity != null ? String(s.quantity) : "",
+      bookingAgent: s.bookingAgent ?? "",
+      bookingNumber: s.bookingNumber ?? "",
+      vesselName: s.vesselName ?? "",
+      deliveryAddress: s.deliveryAddress ?? "",
+      notes: s.notes ?? "",
+
+      purchaseOrderGIDs: po.purchaseOrderGIDs,
+      purchaseOrderShortNames: po.purchaseOrderShortNames,
+    };
+  });
+
+  // Map users
+  users = (userRows || []).map((u) => {
+    const userType = normalizeUserTypeForUi(u.userType);
+    const role = userType === "RSL Supplier" ? "supplier" : "internal";
+    const supplierId = role === "supplier" ? u.companyID ?? null : null;
+
+    const dbPerms = new Set(
+      (u.tbljn_logisticsUser_permission || [])
+        .map((x) => x.tlkp_permission?.shortName)
+        .filter(Boolean)
+    );
+
+    return {
+      id: String(u.id),
+      email: u.email,
+      password: "",
+      userType,
+      isActive: u.isActive !== false,
+      permissions: mapDbPermissionSetToUi(dbPerms),
+      name: u.displayName || u.email,
+      role,
+      supplierId,
+      companyName: u.companyID || "",
+    };
+  });
+
+  companies = (companyRows || []).map((c) => ({ shortName: c.shortName, displayName: c.displayName }));
+  containers = (containerRows || []).map((c) => ({ shortName: c.shortName, displayName: c.displayName }));
+  originPorts = (originRows || []).map((p) => ({ shortName: p.shortName, displayName: p.displayName }));
+  destinationPorts = (destRows || []).map((p) => ({ shortName: p.shortName, displayName: p.displayName }));
+  bookingAgents = (bookingAgentRows || []).map((b) => ({ shortName: b.shortName, displayName: b.displayName }));
+  deliveryAddresses = (deliveryAddressRows || []).map((d) => ({ shortName: d.shortName, displayName: d.displayName }));
+
+  purchaseOrders = (purchaseOrderRows || []).map((po) => {
+    const company = po.tbljn_purchaseOrder_company?.[0]?.tlkp_company || null;
+
+    const products = Array.isArray(po.tbljn_purchaseOrder_rslProduct)
+      ? po.tbljn_purchaseOrder_rslProduct.map((l) => ({
+        rslProductID: l.rslProductID,
+        shortName: l.tlkp_rslProduct?.shortName || l.rslProductID,
+        displayName: l.tlkp_rslProduct?.displayName || l.rslProductID,
+        SKU: l.tlkp_rslProduct?.SKU || null,
+        quantity: typeof l.quantity === "number" ? l.quantity : 0,
+      }))
+      : [];
+
+    const notes = Array.isArray(po.tbl_purchaseOrderNotes)
+      ? po.tbl_purchaseOrderNotes.map((n) => ({
         id: String(n.id),
         timestamp: n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString(),
         content: n.content || "",
         eventType: n.eventType === "PDF_UPDATE" ? "New PDF Uploaded" : n.eventType,
         pdfUrl: n.pdfUrl || null,
         pdfFileName: n.pdfFileName || null,
-        user: n.logisticsUser?.displayName || null,
-      })) : [];
+        user: n.tbl_logisticsUser?.displayName || null,
+      }))
+      : [];
 
-      const lastUpdatedBy = notes.length > 0 && notes[0].user ? notes[0].user : null;
+    const lastUpdatedBy = notes.length > 0 && notes[0].user ? notes[0].user : null;
 
-      return {
-        id: po.id,
-        purchaseOrderGID: po.purchaseOrderGID,
-        shortName: po.shortName,
-        purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
-        createdAt: po.createdAt ? po.createdAt.toISOString() : null,
-        updatedAt: po.updatedAt ? po.updatedAt.toISOString() : null,
-        companyID: company?.shortName || null,
-        companyName: company?.displayName || company?.shortName || null,
-        lastUpdatedBy,
-        notes,
-      };
-    });
-  } catch (err) {
-    console.error("[logistics portal] DB error:", err);
-  }
+    return {
+      id: po.id,
+      purchaseOrderGID: po.purchaseOrderGID,
+      shortName: po.shortName,
+      purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
+      createdAt: po.createdAt ? po.createdAt.toISOString() : null,
+      updatedAt: po.updatedAt ? po.updatedAt.toISOString() : null,
+
+      products,
+
+      companyID: company?.shortName || null,
+      companyName: company?.displayName || company?.shortName || null,
+      lastUpdatedBy,
+      notes,
+    };
+  });
+
+  rslModels = (rslModelRows || []).map((m) => ({
+    shortName: m.shortName,
+    displayName: m.displayName,
+    SKU: m.SKU,
+  }));
 
   const currentUser = sessionUserId
     ? users.find((u) => String(u.id) === String(sessionUserId)) || null
@@ -282,6 +405,7 @@ export async function loader({ request }) {
     bookingAgents,
     deliveryAddresses,
     purchaseOrders,
+    rslModels,
     currentUser,
     debug,
   });
@@ -298,6 +422,7 @@ export default function LogisticsPortalRoute() {
     bookingAgents,
     deliveryAddresses,
     purchaseOrders,
+    rslModels,
     currentUser,
   } = useLoaderData();
 
@@ -319,6 +444,7 @@ export default function LogisticsPortalRoute() {
         bookingAgents={bookingAgents}
         deliveryAddresses={deliveryAddresses}
         purchaseOrders={purchaseOrders}
+        rslModels={rslModels}
         currentUser={currentUser}
       />
     </div>

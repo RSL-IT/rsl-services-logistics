@@ -3,7 +3,7 @@
 // DB-backed CRUD for Logistics users.
 // - Creates/updates tbl_logisticsUser
 // - Maintains permission links in tbljn_logisticsUser_permission
-// - Validates supplier company shortName exists in tlkp_company
+// - Validates supplier company shortName exists in tbl_company
 //
 // Payload (JSON or FormData):
 //   {
@@ -207,7 +207,7 @@ export async function action({ request }) {
       }
 
       // Validate company exists
-      const company = await logisticsDb.tlkp_company.findUnique({ where: { shortName: companyID } });
+      const company = await logisticsDb.tbl_company.findUnique({ where: { shortName: companyID } });
       if (!company) {
         return json(
           { success: false, error: `Unknown company shortName: ${companyID}`, debug },
@@ -302,7 +302,7 @@ export async function action({ request }) {
       }
 
       // Validate company exists
-      const company = await logisticsDb.tlkp_company.findUnique({ where: { shortName: companyID } });
+      const company = await logisticsDb.tbl_company.findUnique({ where: { shortName: companyID } });
       if (!company) {
         return json(
           { success: false, error: `Unknown company shortName: ${companyID}`, debug },

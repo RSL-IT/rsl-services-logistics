@@ -4,6 +4,7 @@ import { ArrowLeft, Eye, LogOut, Plus, Search } from "lucide-react";
 
 import PurchaseOrderDetailsModal, {
   CompanyOption,
+  RslModelOption,
   UIPurchaseOrder,
 } from "./PurchaseOrderDetailsModal";
 
@@ -24,6 +25,7 @@ interface PurchaseOrderManagementProps {
   onPurchaseOrdersChange: (nextPurchaseOrders: UIPurchaseOrder[]) => void;
 
   companies: CompanyOption[];
+  rslModels: RslModelOption[];
   currentUser?: CurrentUser | null;
 
   onBack: () => void;
@@ -235,6 +237,7 @@ export function PurchaseOrderManagement({
                                           purchaseOrders,
                                           onPurchaseOrdersChange,
                                           companies,
+                                          rslModels,
                                           currentUser,
                                           onBack,
                                           onLogout,
@@ -424,6 +427,7 @@ export function PurchaseOrderManagement({
       companyName: null,
       createdAt: null,
       updatedAt: null,
+      products: [],
       notes: [],
     });
   };
@@ -629,6 +633,7 @@ export function PurchaseOrderManagement({
           mode={mode}
           purchaseOrder={selectedPO}
           companies={companies}
+          rslModels={rslModels}
           currentUser={currentUser}
           isSaving={isSaving}
           error={error}

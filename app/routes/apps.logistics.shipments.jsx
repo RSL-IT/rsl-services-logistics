@@ -225,7 +225,7 @@ export async function action({ request }) {
         );
       }
 
-      const company = await logisticsDb.tlkp_company.findUnique({
+      const company = await logisticsDb.tbl_company.findUnique({
         where: { shortName: supplierId },
         select: { shortName: true, displayName: true },
       });
@@ -308,7 +308,7 @@ export async function action({ request }) {
 
       const supplierId = String(shipment.supplierId || "").trim() || existing.companyId;
 
-      const company = await logisticsDb.tlkp_company.findUnique({
+      const company = await logisticsDb.tbl_company.findUnique({
         where: { shortName: supplierId },
         select: { shortName: true, displayName: true },
       });

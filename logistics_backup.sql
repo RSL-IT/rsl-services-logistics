@@ -564,10 +564,10 @@ ALTER SEQUENCE public."tlkp_purchaseOrder_id_seq" OWNED BY public."tlkp_purchase
 
 
 --
--- Name: tlkp_rslModel; Type: TABLE; Schema: public; Owner: neondb_owner
+-- Name: tlkp_rslProduct; Type: TABLE; Schema: public; Owner: neondb_owner
 --
 
-CREATE TABLE public."tlkp_rslModel" (
+CREATE TABLE public."tlkp_rslProduct" (
     "shortName" text NOT NULL,
     "displayName" text NOT NULL,
     "SKU" text NOT NULL,
@@ -575,13 +575,13 @@ CREATE TABLE public."tlkp_rslModel" (
 );
 
 
-ALTER TABLE public."tlkp_rslModel" OWNER TO neondb_owner;
+ALTER TABLE public."tlkp_rslProduct" OWNER TO neondb_owner;
 
 --
--- Name: tlkp_rslModel_id_seq; Type: SEQUENCE; Schema: public; Owner: neondb_owner
+-- Name: tlkp_rslProduct_id_seq; Type: SEQUENCE; Schema: public; Owner: neondb_owner
 --
 
-CREATE SEQUENCE public."tlkp_rslModel_id_seq"
+CREATE SEQUENCE public."tlkp_rslProduct_id_seq"
     AS integer
     START WITH 1
     INCREMENT BY 1
@@ -590,13 +590,13 @@ CREATE SEQUENCE public."tlkp_rslModel_id_seq"
     CACHE 1;
 
 
-ALTER SEQUENCE public."tlkp_rslModel_id_seq" OWNER TO neondb_owner;
+ALTER SEQUENCE public."tlkp_rslProduct_id_seq" OWNER TO neondb_owner;
 
 --
--- Name: tlkp_rslModel_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: neondb_owner
+-- Name: tlkp_rslProduct_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: neondb_owner
 --
 
-ALTER SEQUENCE public."tlkp_rslModel_id_seq" OWNED BY public."tlkp_rslModel".id;
+ALTER SEQUENCE public."tlkp_rslProduct_id_seq" OWNED BY public."tlkp_rslProduct".id;
 
 
 --
@@ -691,10 +691,10 @@ ALTER TABLE ONLY public."tlkp_purchaseOrder" ALTER COLUMN id SET DEFAULT nextval
 
 
 --
--- Name: tlkp_rslModel id; Type: DEFAULT; Schema: public; Owner: neondb_owner
+-- Name: tlkp_rslProduct id; Type: DEFAULT; Schema: public; Owner: neondb_owner
 --
 
-ALTER TABLE ONLY public."tlkp_rslModel" ALTER COLUMN id SET DEFAULT nextval('public."tlkp_rslModel_id_seq"'::regclass);
+ALTER TABLE ONLY public."tlkp_rslProduct" ALTER COLUMN id SET DEFAULT nextval('public."tlkp_rslProduct_id_seq"'::regclass);
 
 
 --
@@ -897,10 +897,10 @@ COPY public."tlkp_purchaseOrder" ("shortName", "purchaseOrderGID", id) FROM stdi
 
 
 --
--- Data for Name: tlkp_rslModel; Type: TABLE DATA; Schema: public; Owner: neondb_owner
+-- Data for Name: tlkp_rslProduct; Type: TABLE DATA; Schema: public; Owner: neondb_owner
 --
 
-COPY public."tlkp_rslModel" ("shortName", "displayName", "SKU", id) FROM stdin;
+COPY public."tlkp_rslProduct" ("shortName", "displayName", "SKU", id) FROM stdin;
 \.
 
 
@@ -996,10 +996,10 @@ SELECT pg_catalog.setval('public."tlkp_purchaseOrder_id_seq"', 1, false);
 
 
 --
--- Name: tlkp_rslModel_id_seq; Type: SEQUENCE SET; Schema: public; Owner: neondb_owner
+-- Name: tlkp_rslProduct_id_seq; Type: SEQUENCE SET; Schema: public; Owner: neondb_owner
 --
 
-SELECT pg_catalog.setval('public."tlkp_rslModel_id_seq"', 1, false);
+SELECT pg_catalog.setval('public."tlkp_rslProduct_id_seq"', 1, false);
 
 
 --
@@ -1123,11 +1123,11 @@ ALTER TABLE ONLY public."tlkp_purchaseOrder"
 
 
 --
--- Name: tlkp_rslModel tlkp_rslModel_pkey; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
+-- Name: tlkp_rslProduct tlkp_rslProduct_pkey; Type: CONSTRAINT; Schema: public; Owner: neondb_owner
 --
 
-ALTER TABLE ONLY public."tlkp_rslModel"
-    ADD CONSTRAINT "tlkp_rslModel_pkey" PRIMARY KEY (id);
+ALTER TABLE ONLY public."tlkp_rslProduct"
+    ADD CONSTRAINT "tlkp_rslProduct_pkey" PRIMARY KEY (id);
 
 
 --

@@ -85,7 +85,7 @@ interface NewShipmentModalProps {
   onCreated: (createdShipment: any) => void;
 
   // Lookups
-  // Supplier source (requested: tlkp_supplier). In this repo schema it's tlkp_company.
+  // Supplier source (requested: tlkp_supplier). In this repo schema it's tbl_company.
   // Accept both names so callers don't have to be perfectly consistent.
   suppliers?: LookupOption[];
   companies?: LookupOption[]; // back-compat

@@ -15,7 +15,7 @@ import type {
   PurchaseOrderOption,
 } from "./components/types";
 
-import type { UIPurchaseOrder } from "./components/PurchaseOrderDetailsModal";
+import type { UIPurchaseOrder, RslModelOption } from "./components/PurchaseOrderDetailsModal";
 
 // Re-export types that other components import from LogisticsApp
 export type { CompanyOption, LookupOption, PurchaseOrderOption } from "./components/types";
@@ -84,6 +84,9 @@ interface LogisticsAppProps {
   // used for shipment PO selection + PO management (PO management will refresh from server)
   purchaseOrders: UIPurchaseOrder[];
 
+  // Product list used when creating POs
+  rslModels?: RslModelOption[];
+
   currentUser?: UIUser | null;
   initialError?: string | null;
 }
@@ -134,6 +137,7 @@ export default function LogisticsApp({
                                        bookingAgents,
                                        deliveryAddresses,
                                        purchaseOrders,
+                                       rslModels,
                                        currentUser,
                                        initialError,
                                      }: LogisticsAppProps) {
@@ -190,6 +194,17 @@ export default function LogisticsApp({
   const [purchaseOrdersState, setPurchaseOrdersState] = useState<UIPurchaseOrder[]>(
     Array.isArray(purchaseOrders) ? purchaseOrders : [],
   );
+
+  const rslModelsSafe = useMemo(() => {
+    if (!Array.isArray(rslModels)) return [] as RslModelOption[];
+    return rslModels
+      .filter((m) => m && String(m.shortName || "").trim())
+      .map((m) => ({
+        shortName: String(m.shortName).trim(),
+        displayName: String((m.displayName ?? m.shortName) || "").trim(),
+        SKU: String((m.SKU ?? "") || "").trim(),
+      }));
+  }, [rslModels]);
 
   // Use server-provided currentUser if available
   const [currentUserState, setCurrentUserState] = useState<UIUser | null>(() => {
@@ -321,6 +336,7 @@ export default function LogisticsApp({
           purchaseOrders={purchaseOrdersState}
           onPurchaseOrdersChange={(next) => setPurchaseOrdersState(next)}
           companies={companiesSafe}
+          rslModels={rslModelsSafe}
           currentUser={currentUserState}
           onBack={() => setCurrentView("dashboard")}
           onLogout={logout}
