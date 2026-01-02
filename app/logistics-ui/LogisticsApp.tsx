@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import Login from "./components/Login";
 import { SupplierView } from "./components/SupplierView";
 import { InternalDashboard } from "./components/InternalDashboard";
+import { SupplierDashboard } from "./components/SupplierDashboard";
 import { UserManagement } from "./components/UserManagement";
 import { PurchaseOrderManagement } from "./components/PurchaseOrderManagement";
 
@@ -65,7 +66,7 @@ export type Shipment = {
 type RawLookup = { shortName: string; displayName?: string | null };
 type RawCompany = { shortName: string; displayName?: string | null };
 
-type ViewType = "login" | "supplier" | "dashboard" | "users" | "purchaseOrders";
+type ViewType = "login" | "supplier" | "dashboard" | "supplierDashboard" | "users" | "purchaseOrders";
 
 interface LogisticsAppProps {
   // Accept both naming conventions for compatibility
@@ -120,7 +121,25 @@ function buildPurchaseOrderOptions(purchaseOrders: UIPurchaseOrder[]): PurchaseO
     if (!gid || !label) continue;
     if (seen.has(gid)) continue;
     seen.add(gid);
-    out.push({ purchaseOrderGID: gid, shortName: label });
+
+    // Map products from UIPurchaseOrder to PurchaseOrderProduct format
+    const products = Array.isArray(po.products)
+      ? po.products.map((p: any) => ({
+          rslModelID: String(p.rslModelID || p.rslProductID || "").trim(),
+          shortName: p.shortName || undefined,
+          displayName: p.displayName || undefined,
+          SKU: p.SKU || null,
+          quantity: p.quantity,
+        }))
+      : [];
+
+    out.push({
+      purchaseOrderGID: gid,
+      shortName: label,
+      products,
+      purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
+      companyID: po.companyID || null,
+    });
   }
   return out;
 }
@@ -167,11 +186,28 @@ export default function LogisticsApp({
 
   const savedSession = getInitialSessionState();
 
+  // Helper to determine the correct dashboard view based on user role
+  const getDefaultDashboardView = (user: UIUser | null | undefined): ViewType => {
+    if (!user) return "login";
+    // Check if user is a supplier (RSL Supplier role)
+    const userType = String((user as any)?.userType || "").toLowerCase();
+    const role = String((user as any)?.role || "").toLowerCase();
+    if (userType.includes("supplier") || role === "supplier") {
+      return "supplierDashboard";
+    }
+    return "dashboard";
+  };
+
   // Initialize state from session storage if available, otherwise use defaults
   const [currentView, setCurrentView] = useState<ViewType>(() => {
     // If server sent currentUser, user is already logged in
     if (currentUser) {
-      return savedSession?.currentView || "dashboard";
+      // Use saved view if valid, otherwise determine based on user role
+      const savedView = savedSession?.currentView;
+      if (savedView && savedView !== "login") {
+        return savedView;
+      }
+      return getDefaultDashboardView(currentUser);
     }
     return "login";
   });
@@ -277,7 +313,8 @@ export default function LogisticsApp({
 
     if (role === "supplier") {
       setSupplierId(supplierIdArg ?? null);
-      setCurrentView("supplier");
+      // Use new SupplierDashboard for supplier users
+      setCurrentView("supplierDashboard");
       return;
     }
 
@@ -321,6 +358,23 @@ export default function LogisticsApp({
         />
       )}
 
+      {currentView === "supplierDashboard" && (
+        <SupplierDashboard
+          shipments={shipmentsState}
+          onShipmentsChange={(next) => setShipmentsState(next)}
+          companies={companiesSafe}
+          containers={containersSafe}
+          originPorts={originPortsSafe}
+          destinationPorts={destinationPortsSafe}
+          bookingAgents={bookingAgentsSafe}
+          deliveryAddresses={deliveryAddressesSafe}
+          purchaseOrders={purchaseOrderOptions}
+          currentUser={currentUserState}
+          onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
+          onLogout={logout}
+        />
+      )}
+
       {currentView === "users" && (
         <UserManagement
           users={usersState}
@@ -338,7 +392,8 @@ export default function LogisticsApp({
           companies={companiesSafe}
           rslModels={rslModelsSafe}
           currentUser={currentUserState}
-          onBack={() => setCurrentView("dashboard")}
+          viewOnly={getDefaultDashboardView(currentUserState) === "supplierDashboard"}
+          onBack={() => setCurrentView(getDefaultDashboardView(currentUserState))}
           onLogout={logout}
         />
       )}

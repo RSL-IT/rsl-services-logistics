@@ -78,6 +78,9 @@ interface PurchaseOrderDetailsModalProps {
   rslModels: RslModelOption[];
   currentUser?: CurrentUser | null;
 
+  // View-only mode for suppliers (no editing, no delete)
+  viewOnly?: boolean;
+
   isSaving?: boolean;
   error?: string | null;
 
@@ -352,6 +355,7 @@ export function PurchaseOrderDetailsModal({
                                             companies,
                                             rslModels,
                                             currentUser,
+                                            viewOnly = false,
                                             isSaving = false,
                                             error = null,
                                             onClose,
@@ -543,14 +547,20 @@ export function PurchaseOrderDetailsModal({
                 </div>
               ) : (
                 <div style={readOnlyBoxStyle}>
-                  <a
-                    href={adminPurchaseOrderUrl(purchaseOrder.purchaseOrderGID)}
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{ color: "#2563eb", fontWeight: 900, textDecoration: "none" }}
-                  >
-                    #{safeStr(purchaseOrder.shortName) || "-"}
-                  </a>
+                  {viewOnly ? (
+                    <span style={{ fontWeight: 900, color: "#0f172a" }}>
+                      #{safeStr(purchaseOrder.shortName) || "-"}
+                    </span>
+                  ) : (
+                    <a
+                      href={adminPurchaseOrderUrl(purchaseOrder.purchaseOrderGID)}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: "#2563eb", fontWeight: 900, textDecoration: "none" }}
+                    >
+                      #{safeStr(purchaseOrder.shortName) || "-"}
+                    </a>
+                  )}
                 </div>
               )}
             </div>
@@ -611,11 +621,13 @@ export function PurchaseOrderDetailsModal({
             <div style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
               <div style={labelStyle}>Products</div>
 
-              <div style={{ ...helperStyle, marginTop: 2 }}>
-                {isCreate
-                  ? "Select at least one product to create a purchase order."
-                  : "Check/uncheck products, then click Update Purchase Order to save changes."}
-              </div>
+              {!viewOnly && (
+                <div style={{ ...helperStyle, marginTop: 2 }}>
+                  {isCreate
+                    ? "Select at least one product to create a purchase order."
+                    : "Check/uncheck products, then click Update Purchase Order to save changes."}
+                </div>
+              )}
 
               {isCreate && selectedCount === 0 ? (
                 <div style={{ ...helperStyle, color: "#991b1b" }}>At least one product must be selected.</div>
@@ -630,20 +642,23 @@ export function PurchaseOrderDetailsModal({
                       const id = safeStr(m.shortName);
                       if (!id) return null;
                       const checked = selectedSet.has(id);
+                      // In viewOnly mode, only show selected products
+                      if (viewOnly && !checked) return null;
                       return (
                         <label
                           key={id}
                           style={{
                             ...checkboxItemStyle,
                             ...(checked ? { borderColor: "#93c5fd", background: "#eff6ff" } : {}),
+                            ...(viewOnly ? { cursor: "default" } : {}),
                           }}
                         >
                           <input
                             type="checkbox"
                             checked={checked}
                             onChange={() => toggleProduct(id)}
-                            disabled={isSaving}
-                            style={{ marginTop: 2 }}
+                            disabled={isSaving || viewOnly}
+                            style={{ marginTop: 2, ...(viewOnly ? { display: "none" } : {}) }}
                           />
                           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                             <div style={{ fontWeight: 900, fontSize: 12, color: "#0f172a" }}>
@@ -693,24 +708,28 @@ export function PurchaseOrderDetailsModal({
                     <div style={readOnlyBoxStyle}>No PDF uploaded</div>
                   )}
 
-                  <input
-                    type="file"
-                    accept="application/pdf"
-                    disabled={isSaving}
-                    onChange={(e) => {
-                      const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
-                      setPdfFile(f);
-                    }}
-                  />
+                  {!viewOnly && (
+                    <>
+                      <input
+                        type="file"
+                        accept="application/pdf"
+                        disabled={isSaving}
+                        onChange={(e) => {
+                          const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+                          setPdfFile(f);
+                        }}
+                      />
 
-                  {pdfFile ? (
-                    <div style={helperStyle}>
-                      Selected: <b>{pdfFile.name}</b>
-                      {!safeStr(note) ? (
-                        <div style={{ color: "#991b1b", marginTop: 4 }}>Note is required when uploading a new PDF.</div>
+                      {pdfFile ? (
+                        <div style={helperStyle}>
+                          Selected: <b>{pdfFile.name}</b>
+                          {!safeStr(note) ? (
+                            <div style={{ color: "#991b1b", marginTop: 4 }}>Note is required when uploading a new PDF.</div>
+                          ) : null}
+                        </div>
                       ) : null}
-                    </div>
-                  ) : null}
+                    </>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -748,17 +767,19 @@ export function PurchaseOrderDetailsModal({
               </div>
             ) : null}
 
-            {/* Note */}
-            <div style={fieldStyle}>
-              <div style={labelStyle}>Note</div>
-              <textarea
-                style={{ ...inputStyle, minHeight: 104, resize: "vertical" }}
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder={isCreate ? "Optional note…" : "Optional note… (required if uploading a new PDF)"}
-                disabled={isSaving}
-              />
-            </div>
+            {/* Note - hidden in viewOnly mode */}
+            {!viewOnly && (
+              <div style={fieldStyle}>
+                <div style={labelStyle}>Note</div>
+                <textarea
+                  style={{ ...inputStyle, minHeight: 104, resize: "vertical" }}
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder={isCreate ? "Optional note…" : "Optional note… (required if uploading a new PDF)"}
+                  disabled={isSaving}
+                />
+              </div>
+            )}
           </div>
 
           <div style={sectionTitleStyle}>History</div>
@@ -800,7 +821,7 @@ export function PurchaseOrderDetailsModal({
 
         <div style={footerStyle}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {onDelete && !isCreate ? (
+            {onDelete && !isCreate && !viewOnly ? (
               <button type="button" style={dangerBtnStyle} disabled={isSaving} onClick={() => onDelete(purchaseOrder)}>
                 <Trash2 size={16} />
                 Delete
@@ -810,21 +831,23 @@ export function PurchaseOrderDetailsModal({
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button type="button" style={btnStyle} onClick={onClose} disabled={isSaving}>
-              Cancel
+              {viewOnly ? "Close" : "Cancel"}
             </button>
 
-            <button
-              type="button"
-              style={{
-                ...primaryBtnStyle,
-                ...(canSave ? {} : { opacity: 0.5, cursor: "not-allowed" }),
-              }}
-              onClick={submit}
-              disabled={!canSave}
-            >
-              <Save size={16} />
-              {isCreate ? "Create Purchase Order" : "Update Purchase Order"}
-            </button>
+            {!viewOnly && (
+              <button
+                type="button"
+                style={{
+                  ...primaryBtnStyle,
+                  ...(canSave ? {} : { opacity: 0.5, cursor: "not-allowed" }),
+                }}
+                onClick={submit}
+                disabled={!canSave}
+              >
+                <Save size={16} />
+                {isCreate ? "Create Purchase Order" : "Update Purchase Order"}
+              </button>
+            )}
           </div>
         </div>
       </div>

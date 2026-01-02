@@ -1,7 +1,7 @@
 // app/logistics-ui/components/ShipmentDetailsModal.tsx
 import React, { useMemo, useState } from "react";
 import type { Shipment } from "../LogisticsApp";
-import type { CompanyOption, LookupOption, PurchaseOrderOption } from "./types";
+import type { CompanyOption, LookupOption, PurchaseOrderOption, PurchaseOrderProduct } from "./types";
 
 type SaveMode = "create" | "update";
 
@@ -18,6 +18,9 @@ interface ShipmentDetailsModalProps {
   purchaseOrders: PurchaseOrderOption[];
 
   canEdit?: boolean;
+
+  // Is the current user a supplier? If true, supplier field is always read-only
+  isSupplier?: boolean;
 
   isSaving?: boolean;
   error?: string | null;
@@ -198,6 +201,7 @@ export default function ShipmentDetailsModal({
                                                deliveryAddresses,
                                                purchaseOrders,
                                                canEdit = true,
+                                               isSupplier = false,
                                                isSaving = false,
                                                error = null,
                                                onClose,
@@ -206,7 +210,6 @@ export default function ShipmentDetailsModal({
                                              }: ShipmentDetailsModalProps) {
   const isCreate = String(shipment.id) === "new";
   const mode: SaveMode = isCreate ? "create" : "update";
-  const canChangeContainerNumber = isCreate; // do NOT change containerNumber on update
 
   const companiesSafe = Array.isArray(companies) ? companies : [];
   const containersSafe = Array.isArray(containers) ? containers : [];
@@ -215,6 +218,9 @@ export default function ShipmentDetailsModal({
   const bookingAgentsSafe = Array.isArray(bookingAgents) ? bookingAgents : [];
   const deliveryAddressesSafe = Array.isArray(deliveryAddresses) ? deliveryAddresses : [];
   const purchaseOrdersSafe = Array.isArray(purchaseOrders) ? purchaseOrders : [];
+
+  // Track previous supplier to detect changes
+  const prevSupplierIdRef = React.useRef<string | null>(null);
 
   const initialPoGids = useMemo<string[]>(
     () => (Array.isArray((shipment as any).purchaseOrderGIDs) ? (shipment as any).purchaseOrderGIDs : []),
@@ -225,6 +231,7 @@ export default function ShipmentDetailsModal({
   const [draft, setDraft] = useState(() => {
     const supplierId = norm((shipment as any).supplierId);
     const supplierName = norm((shipment as any).supplierName);
+    const isNewShipment = String(shipment.id) === "new";
 
     return {
       supplierId,
@@ -238,13 +245,15 @@ export default function ShipmentDetailsModal({
       destinationPort: norm((shipment as any).destinationPort),
 
       cargoReadyDate: norm((shipment as any).cargoReadyDate),
-      etd: norm((shipment as any).etd),
+      // ETD maps to estimatedDeliveryToOrigin in the database
+      etd: norm((shipment as any).etd) || norm((shipment as any).estimatedDeliveryToOrigin),
       eta: norm((shipment as any).eta),
       estimatedDeliveryToOrigin: norm((shipment as any).estimatedDeliveryToOrigin),
 
       supplierPi: norm((shipment as any).supplierPi),
       quantity: norm((shipment as any).quantity), // keep as string for UI
-      notes: norm((shipment as any).notes),
+      // For create mode, show any existing notes; for update mode, start empty (notes go to history)
+      notes: isNewShipment ? norm((shipment as any).notes) : "",
 
       bookingAgent: norm((shipment as any).bookingAgent),
       bookingNumber: norm((shipment as any).bookingNumber),
@@ -255,13 +264,209 @@ export default function ShipmentDetailsModal({
     };
   });
 
+  // Store initial values to detect changes
+  const initialDraftRef = React.useRef({
+    supplierId: norm((shipment as any).supplierId),
+    status: norm((shipment as any).status) || "Pending",
+    containerNumber: norm((shipment as any).containerNumber),
+    containerSize: norm((shipment as any).containerSize),
+    portOfOrigin: norm((shipment as any).portOfOrigin),
+    destinationPort: norm((shipment as any).destinationPort),
+    cargoReadyDate: norm((shipment as any).cargoReadyDate),
+    etd: norm((shipment as any).etd) || norm((shipment as any).estimatedDeliveryToOrigin),
+    eta: norm((shipment as any).eta),
+    estimatedDeliveryToOrigin: norm((shipment as any).estimatedDeliveryToOrigin),
+    supplierPi: norm((shipment as any).supplierPi),
+    quantity: norm((shipment as any).quantity),
+    notes: isCreate ? norm((shipment as any).notes) : "",
+    bookingAgent: norm((shipment as any).bookingAgent),
+    bookingNumber: norm((shipment as any).bookingNumber),
+    vesselName: norm((shipment as any).vesselName),
+    deliveryAddress: norm((shipment as any).deliveryAddress),
+    purchaseOrderGIDs: Array.isArray(initialPoGids) ? [...initialPoGids] : [],
+  });
+
+  const initialProductQuantitiesRef = React.useRef<Record<string, string>>(() => {
+    const saved = (shipment as any).productQuantities;
+    if (saved && typeof saved === "object") {
+      const result: Record<string, string> = {};
+      for (const [key, val] of Object.entries(saved)) {
+        result[key] = String(val ?? 0);
+      }
+      return result;
+    }
+    return {};
+  });
+
   const title = isCreate ? "Create Shipment" : "Shipment Details";
   const subtitle = isCreate ? "New shipment" : `ID: ${String(shipment.id)}`;
 
+  // Filter purchase orders by selected supplier (for both create and edit mode)
+  const filteredPurchaseOrders = useMemo(() => {
+    const selectedSupplier = draft.supplierId;
+    if (!selectedSupplier) {
+      // No supplier selected, show no POs
+      return [];
+    }
+
+    // Filter to only POs belonging to the selected supplier
+    return purchaseOrdersSafe.filter((po) => po.companyID === selectedSupplier);
+  }, [draft.supplierId, purchaseOrdersSafe]);
+
+  // When supplier changes in create mode, clear selected POs that don't belong to new supplier
+  React.useEffect(() => {
+    if (!isCreate) return;
+
+    const currentSupplierId = draft.supplierId;
+    const prevSupplierId = prevSupplierIdRef.current;
+
+    // Update ref
+    prevSupplierIdRef.current = currentSupplierId;
+
+    // If supplier changed and we have selected POs, filter them
+    if (prevSupplierId !== null && prevSupplierId !== currentSupplierId) {
+      setDraft((prev) => {
+        const validGids = new Set(
+          purchaseOrdersSafe
+            .filter((po) => po.companyID === currentSupplierId)
+            .map((po) => po.purchaseOrderGID)
+        );
+
+        const filteredGids = (prev.purchaseOrderGIDs || []).filter((gid) => validGids.has(gid));
+
+        // Only update if something changed
+        if (filteredGids.length !== (prev.purchaseOrderGIDs || []).length) {
+          return { ...prev, purchaseOrderGIDs: filteredGids };
+        }
+        return prev;
+      });
+    }
+  }, [isCreate, draft.supplierId, purchaseOrdersSafe]);
+
+  // Track quantities for each product (keyed by rslModelID)
+  // Initialize from saved shipment product quantities if editing existing shipment
+  const [productQuantities, setProductQuantities] = useState<Record<string, string>>(() => {
+    const saved = (shipment as any).productQuantities;
+    if (saved && typeof saved === "object") {
+      const result: Record<string, string> = {};
+      for (const [key, val] of Object.entries(saved)) {
+        result[key] = String(val ?? 0);
+      }
+      return result;
+    }
+    return {};
+  });
+
+  // Aggregate products from all selected purchase orders
+  const aggregatedProducts = useMemo(() => {
+    const selectedGIDs = draft.purchaseOrderGIDs || [];
+    if (selectedGIDs.length === 0) return [];
+
+    // Build a map to aggregate products by rslModelID (summing quantities from multiple POs)
+    const productMap = new Map<string, PurchaseOrderProduct & { quantity: number }>();
+
+    for (const po of filteredPurchaseOrders) {
+      if (!selectedGIDs.includes(po.purchaseOrderGID)) continue;
+
+      const products = Array.isArray(po.products) ? po.products : [];
+
+      for (const product of products) {
+        const id = String(product.rslModelID || "").trim();
+        if (!id) continue;
+
+        const existingQuantity = productMap.get(id)?.quantity || 0;
+        const productQuantity = typeof product.quantity === "number" ? product.quantity : 0;
+
+        // Add or update the product (summing quantities if from multiple POs)
+        productMap.set(id, {
+          rslModelID: id,
+          shortName: product.shortName || id,
+          displayName: product.displayName || product.shortName || id,
+          SKU: product.SKU || null,
+          quantity: existingQuantity + productQuantity,
+        });
+      }
+    }
+
+    // Convert to sorted array
+    return Array.from(productMap.values()).sort((a, b) =>
+      (a.displayName || a.shortName || "").localeCompare(b.displayName || b.shortName || "")
+    );
+  }, [draft.purchaseOrderGIDs, draft.supplierId, filteredPurchaseOrders]);
+
+  // Initialize product quantities from PO quantities when products change
+  React.useEffect(() => {
+    const newQuantities: Record<string, string> = {};
+    for (const product of aggregatedProducts) {
+      // Only set if not already set by user
+      if (!(product.rslModelID in productQuantities)) {
+        newQuantities[product.rslModelID] = String(product.quantity || 0);
+      }
+    }
+    if (Object.keys(newQuantities).length > 0) {
+      setProductQuantities((prev) => ({ ...prev, ...newQuantities }));
+    }
+  }, [aggregatedProducts]);
+
+  // Update quantity for a specific product
+  const updateProductQuantity = (productId: string, quantity: string) => {
+    setProductQuantities((prev) => ({
+      ...prev,
+      [productId]: quantity,
+    }));
+  };
+
+  // Detect if any data has changed from initial state
+  const hasChanges = useMemo(() => {
+    const initial = initialDraftRef.current;
+
+    // Compare draft fields
+    if (draft.supplierId !== initial.supplierId) return true;
+    if (draft.status !== initial.status) return true;
+    if (draft.containerNumber !== initial.containerNumber) return true;
+    if (draft.containerSize !== initial.containerSize) return true;
+    if (draft.portOfOrigin !== initial.portOfOrigin) return true;
+    if (draft.destinationPort !== initial.destinationPort) return true;
+    if (draft.cargoReadyDate !== initial.cargoReadyDate) return true;
+    if (draft.etd !== initial.etd) return true;
+    if (draft.eta !== initial.eta) return true;
+    if (draft.estimatedDeliveryToOrigin !== initial.estimatedDeliveryToOrigin) return true;
+    if (draft.supplierPi !== initial.supplierPi) return true;
+    if (draft.bookingAgent !== initial.bookingAgent) return true;
+    if (draft.bookingNumber !== initial.bookingNumber) return true;
+    if (draft.vesselName !== initial.vesselName) return true;
+    if (draft.deliveryAddress !== initial.deliveryAddress) return true;
+    if (draft.notes !== initial.notes) return true;
+
+    // Compare purchase order GIDs
+    const draftGids = draft.purchaseOrderGIDs || [];
+    const initialGids = initial.purchaseOrderGIDs || [];
+    if (draftGids.length !== initialGids.length) return true;
+    const sortedDraft = [...draftGids].sort();
+    const sortedInitial = [...initialGids].sort();
+    if (sortedDraft.some((gid, i) => gid !== sortedInitial[i])) return true;
+
+    // Compare product quantities
+    const initialPQ = typeof initialProductQuantitiesRef.current === "function"
+      ? {}
+      : (initialProductQuantitiesRef.current || {});
+    const allKeys = new Set([...Object.keys(productQuantities), ...Object.keys(initialPQ)]);
+    for (const key of allKeys) {
+      if ((productQuantities[key] || "0") !== (initialPQ[key] || "0")) return true;
+    }
+
+    return false;
+  }, [draft, productQuantities]);
+
   const handleCancel = () => {
     if (isSaving) return;
-    const ok = window.confirm("Cancel without saving? Your changes will be lost.");
-    if (ok) onClose();
+    // Only show confirm dialog if there are unsaved changes
+    if (hasChanges) {
+      const ok = window.confirm("Cancel without saving? Your changes will be lost.");
+      if (ok) onClose();
+    } else {
+      onClose();
+    }
   };
 
   const setField = (k: keyof typeof draft, v: string | string[]) => {
@@ -317,6 +522,7 @@ export default function ShipmentDetailsModal({
       deliveryAddress: draft.deliveryAddress,
 
       purchaseOrderGIDs: Array.isArray(draft.purchaseOrderGIDs) ? draft.purchaseOrderGIDs : [],
+      productQuantities: productQuantities,
     } as Shipment;
 
     onSave(mode, next);
@@ -329,7 +535,7 @@ export default function ShipmentDetailsModal({
           <div>
             <div style={headerTitleStyle}>{title}</div>
             <div style={headerSubStyle}>
-              {subtitle} • Supplier: <b>{supplierDisplay}</b>
+              Supplier: <b>{supplierDisplay}</b>
             </div>
           </div>
 
@@ -337,7 +543,12 @@ export default function ShipmentDetailsModal({
             {!isCreate ? (
               <button
                 type="button"
-                onClick={() => onDelete(shipment)}
+                onClick={() => {
+                  const ok = window.confirm(
+                    `Are you sure you want to delete this shipment (Container #${draft.containerNumber || shipment.id})? This action cannot be undone.`
+                  );
+                  if (ok) onDelete(shipment);
+                }}
                 disabled={!canEdit || isSaving}
                 style={!canEdit || isSaving ? btnDisabled : btnDanger}
                 title={!canEdit ? "You do not have permission to delete shipments." : ""}
@@ -358,11 +569,17 @@ export default function ShipmentDetailsModal({
             <button
               type="button"
               onClick={handleSave}
-              disabled={!canEdit || isSaving}
-              style={!canEdit || isSaving ? btnDisabled : btnPrimary}
-              title={!canEdit ? "You do not have permission to create/update shipments." : ""}
+              disabled={!canEdit || isSaving || (!isCreate && !hasChanges)}
+              style={!canEdit || isSaving || (!isCreate && !hasChanges) ? btnDisabled : btnPrimary}
+              title={
+                !canEdit
+                  ? "You do not have permission to create/update shipments."
+                  : !isCreate && !hasChanges
+                  ? "No changes to save."
+                  : ""
+              }
             >
-              {isSaving ? "Saving…" : "Submit"}
+              {isSaving ? "Saving…" : isCreate ? "Create Shipment" : "Update Shipment"}
             </button>
           </div>
         </div>
@@ -375,14 +592,14 @@ export default function ShipmentDetailsModal({
             <div style={sectionTitleStyle}>Basics</div>
 
             <div style={gridStyle}>
-              {/* Supplier */}
+              {/* Supplier - read-only after create OR for supplier users */}
               <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
                 <div style={labelStyle}>Supplier</div>
                 <select
                   value={draft.supplierId}
                   onChange={(e) => setField("supplierId", e.target.value)}
-                  style={canEdit ? selectStyle : disabledStyle}
-                  disabled={!canEdit}
+                  style={canEdit && isCreate && !isSupplier ? selectStyle : disabledStyle}
+                  disabled={!canEdit || !isCreate || isSupplier}
                 >
                   <option value="">Select…</option>
                   {companiesSafe.map((c: CompanyOption) => (
@@ -415,8 +632,8 @@ export default function ShipmentDetailsModal({
                 <input
                   value={draft.containerNumber}
                   onChange={(e) => setField("containerNumber", e.target.value.toUpperCase())}
-                  style={canEdit && canChangeContainerNumber ? inputStyle : disabledStyle}
-                  disabled={!canEdit || !canChangeContainerNumber}
+                  style={canEdit ? inputStyle : disabledStyle}
+                  disabled={!canEdit}
                   placeholder="e.g. MSCU1234567"
                 />
               </div>
@@ -483,20 +700,7 @@ export default function ShipmentDetailsModal({
                   onChange={(e) => setField("supplierPi", e.target.value)}
                   style={canEdit ? inputStyle : disabledStyle}
                   disabled={!canEdit}
-                  placeholder="optional"
-                />
-              </div>
-
-              {/* Quantity */}
-              <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
-                <div style={labelStyle}>Quantity</div>
-                <input
-                  value={draft.quantity}
-                  onChange={(e) => setField("quantity", e.target.value)}
-                  style={canEdit ? inputStyle : disabledStyle}
-                  disabled={!canEdit}
-                  inputMode="numeric"
-                  placeholder="whole number"
+                  placeholder="Update PI when available."
                 />
               </div>
             </div>
@@ -511,50 +715,238 @@ export default function ShipmentDetailsModal({
               </span>
             </div>
 
-            {purchaseOrdersSafe.length === 0 ? (
+            {!draft.supplierId && isCreate ? (
               <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
-                No purchase orders available.
+                Select a supplier to see available purchase orders.
+              </div>
+            ) : filteredPurchaseOrders.length === 0 ? (
+              <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
+                No purchase orders available for this supplier.
               </div>
             ) : (
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
                   gap: 10,
                 }}
               >
-                {purchaseOrdersSafe.map((po: PurchaseOrderOption) => {
+                {filteredPurchaseOrders.map((po: PurchaseOrderOption) => {
                   const checked =
                     Array.isArray(draft.purchaseOrderGIDs) && draft.purchaseOrderGIDs.includes(po.purchaseOrderGID);
+                  const hasPdf = Boolean(po.purchaseOrderPdfUrl);
                   return (
-                    <label
+                    <div
                       key={po.purchaseOrderGID}
                       style={{
                         display: "flex",
                         alignItems: "center",
+                        justifyContent: "space-between",
                         gap: 10,
-                        background: "#f8fafc",
-                        border: "1px solid #e5e7eb",
+                        background: checked ? "#eff6ff" : "#f8fafc",
+                        border: checked ? "1px solid #2563eb" : "1px solid #e5e7eb",
                         borderRadius: 12,
-                        padding: "10px 10px",
-                        cursor: canEdit ? "pointer" : "default",
+                        padding: "10px 12px",
                       }}
                     >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={!canEdit}
-                        onChange={() => togglePo(po.purchaseOrderGID)}
-                      />
-                      <span style={{ fontSize: 13, fontWeight: 800, color: "#0f172a" }}>
-                        {po.shortName}
-                      </span>
-                    </label>
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          cursor: canEdit ? "pointer" : "default",
+                          flex: 1,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!canEdit}
+                          onChange={() => togglePo(po.purchaseOrderGID)}
+                        />
+                        <span style={{ fontSize: 13, fontWeight: 800, color: "#0f172a" }}>
+                          #{po.shortName}
+                        </span>
+                      </label>
+                      {hasPdf ? (
+                        <a
+                          href={po.purchaseOrderPdfUrl!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "6px 10px",
+                            fontSize: 12,
+                            fontWeight: 700,
+                            color: "#2563eb",
+                            background: "#fff",
+                            border: "1px solid #2563eb",
+                            borderRadius: 8,
+                            textDecoration: "none",
+                            cursor: "pointer",
+                            whiteSpace: "nowrap",
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          View PO
+                        </a>
+                      ) : (
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "6px 10px",
+                            fontSize: 12,
+                            fontWeight: 700,
+                            color: "#9ca3af",
+                            background: "#f3f4f6",
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 8,
+                            cursor: "not-allowed",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          View PO
+                        </span>
+                      )}
+                    </div>
                   );
                 })}
               </div>
             )}
           </div>
+
+          {/* Products from Selected Purchase Orders */}
+          {aggregatedProducts.length > 0 && (
+            <div style={{ ...cardStyle, marginBottom: 12 }}>
+              <div style={sectionTitleStyle}>
+                <span>Products from Selected Purchase Orders</span>
+                <span style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
+                  {aggregatedProducts.length} product{aggregatedProducts.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+
+              <div
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 10,
+                  overflow: "hidden",
+                }}
+              >
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ background: "#f8fafc" }}>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "10px 12px",
+                          fontSize: 12,
+                          fontWeight: 800,
+                          color: "#475569",
+                          borderBottom: "1px solid #e5e7eb",
+                        }}
+                      >
+                        Product
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "10px 12px",
+                          fontSize: 12,
+                          fontWeight: 800,
+                          color: "#475569",
+                          borderBottom: "1px solid #e5e7eb",
+                          width: 120,
+                        }}
+                      >
+                        SKU
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "10px 12px",
+                          fontSize: 12,
+                          fontWeight: 800,
+                          color: "#475569",
+                          borderBottom: "1px solid #e5e7eb",
+                          width: 100,
+                        }}
+                      >
+                        Quantity
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {aggregatedProducts.map((product, idx) => (
+                      <tr
+                        key={product.rslModelID}
+                        style={{
+                          background: idx % 2 === 0 ? "#fff" : "#fafafa",
+                        }}
+                      >
+                        <td
+                          style={{
+                            padding: "10px 12px",
+                            fontSize: 13,
+                            borderBottom:
+                              idx < aggregatedProducts.length - 1
+                                ? "1px solid #e5e7eb"
+                                : "none",
+                          }}
+                        >
+                          <div style={{ fontWeight: 700, color: "#0f172a" }}>
+                            {product.displayName || product.shortName}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#64748b" }}>
+                            {product.shortName}
+                          </div>
+                        </td>
+                        <td
+                          style={{
+                            padding: "10px 12px",
+                            fontSize: 12,
+                            color: "#64748b",
+                            borderBottom:
+                              idx < aggregatedProducts.length - 1
+                                ? "1px solid #e5e7eb"
+                                : "none",
+                          }}
+                        >
+                          {product.SKU || "—"}
+                        </td>
+                        <td
+                          style={{
+                            padding: "6px 12px",
+                            borderBottom:
+                              idx < aggregatedProducts.length - 1
+                                ? "1px solid #e5e7eb"
+                                : "none",
+                          }}
+                        >
+                          <input
+                            type="number"
+                            min={0}
+                            value={productQuantities[product.rslModelID] ?? ""}
+                            onChange={(e) => updateProductQuantity(product.rslModelID, e.target.value)}
+                            placeholder="0"
+                            style={{
+                              ...inputStyle,
+                              width: "100%",
+                              padding: "8px 10px",
+                            }}
+                            disabled={!canEdit}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Dates */}
           <div style={{ ...cardStyle, marginBottom: 12 }}>
@@ -567,6 +959,17 @@ export default function ShipmentDetailsModal({
                   type="date"
                   value={draft.cargoReadyDate}
                   onChange={(e) => setField("cargoReadyDate", e.target.value)}
+                  style={canEdit ? inputStyle : disabledStyle}
+                  disabled={!canEdit}
+                />
+              </div>
+
+              <div style={{ ...fieldStyle, gridColumn: "span 3" }}>
+                <div style={labelStyle}>Est. Delivery to Origin</div>
+                <input
+                  type="date"
+                  value={draft.estimatedDeliveryToOrigin}
+                  onChange={(e) => setField("estimatedDeliveryToOrigin", e.target.value)}
                   style={canEdit ? inputStyle : disabledStyle}
                   disabled={!canEdit}
                 />
@@ -589,17 +992,6 @@ export default function ShipmentDetailsModal({
                   type="date"
                   value={draft.eta}
                   onChange={(e) => setField("eta", e.target.value)}
-                  style={canEdit ? inputStyle : disabledStyle}
-                  disabled={!canEdit}
-                />
-              </div>
-
-              <div style={{ ...fieldStyle, gridColumn: "span 3" }}>
-                <div style={labelStyle}>Est. Delivery to Origin</div>
-                <input
-                  type="date"
-                  value={draft.estimatedDeliveryToOrigin}
-                  onChange={(e) => setField("estimatedDeliveryToOrigin", e.target.value)}
                   style={canEdit ? inputStyle : disabledStyle}
                   disabled={!canEdit}
                 />
@@ -670,22 +1062,149 @@ export default function ShipmentDetailsModal({
             </div>
           </div>
 
-          {/* Notes */}
-          <div style={cardStyle}>
-            <div style={sectionTitleStyle}>Notes</div>
-            <textarea
-              value={draft.notes}
-              onChange={(e) => setField("notes", e.target.value)}
-              style={{
-                ...((canEdit ? inputStyle : disabledStyle) as any),
-                minHeight: 110,
-                resize: "vertical",
-                fontFamily: "inherit",
-              }}
-              disabled={!canEdit}
-              placeholder="internal notes…"
-            />
-          </div>
+          {/* Initial Notes - shown read-only in update mode if there are initial notes */}
+          {!isCreate && norm((shipment as any).notes) && (
+            <div style={{ ...cardStyle, marginBottom: 12 }}>
+              <div style={sectionTitleStyle}>Initial Notes</div>
+              <div
+                style={{
+                  background: "#f1f5f9",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: 10,
+                  padding: 12,
+                  fontSize: 13,
+                  color: "#475569",
+                  whiteSpace: "pre-wrap",
+                  minHeight: 60,
+                }}
+              >
+                {norm((shipment as any).notes)}
+              </div>
+            </div>
+          )}
+
+          {/* Notes and History side by side (in update mode) or just Notes (in create mode) */}
+          {isCreate ? (
+            <div style={{ ...cardStyle, marginBottom: 12 }}>
+              <div style={sectionTitleStyle}>Initial Notes</div>
+              <textarea
+                value={draft.notes}
+                onChange={(e) => setField("notes", e.target.value)}
+                style={{
+                  ...((canEdit ? inputStyle : disabledStyle) as any),
+                  minHeight: 110,
+                  resize: "vertical",
+                  fontFamily: "inherit",
+                }}
+                disabled={!canEdit}
+                placeholder="Initial notes for this shipment…"
+              />
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 12 }}>
+              {/* Notes - left side */}
+              <div style={{ ...cardStyle, flex: "0 0 300px" }}>
+                <div style={sectionTitleStyle}>Notes</div>
+                <textarea
+                  value={draft.notes}
+                  onChange={(e) => setField("notes", e.target.value)}
+                  style={{
+                    ...((canEdit ? inputStyle : disabledStyle) as any),
+                    minHeight: 200,
+                    resize: "vertical",
+                    fontFamily: "inherit",
+                  }}
+                  disabled={!canEdit}
+                  placeholder="Add notes about this update…"
+                />
+              </div>
+
+              {/* History - right side */}
+              <div style={{ ...cardStyle, flex: 1, minWidth: 0 }}>
+                <div style={sectionTitleStyle}>
+                  <span>History</span>
+                  <span style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
+                    {((shipment as any).history || []).length} update{((shipment as any).history || []).length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+
+                {((shipment as any).history || []).length === 0 ? (
+                  <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
+                    No update history yet.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: 300, overflowY: "auto" }}>
+                    {((shipment as any).history || []).map((entry: any) => {
+                      const changes = entry.changes ? JSON.parse(entry.changes) : [];
+                      const timestamp = entry.timestamp
+                        ? new Date(entry.timestamp).toLocaleString()
+                        : "";
+                      const userName = entry.user || "Unknown User";
+
+                      return (
+                        <div
+                          key={entry.id}
+                          style={{
+                            background: "#f8fafc",
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 10,
+                            padding: 12,
+                          }}
+                        >
+                          {/* Header: User name (left) and Date (right) */}
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              marginBottom: 8,
+                              paddingBottom: 8,
+                              borderBottom: "1px solid #e5e7eb",
+                            }}
+                          >
+                            <span style={{ fontSize: 13, fontWeight: 800, color: "#0f172a" }}>
+                              {userName}
+                            </span>
+                            <span style={{ fontSize: 12, color: "#64748b" }}>
+                              {timestamp}
+                            </span>
+                          </div>
+
+                          {/* Changes */}
+                          {changes.length > 0 && (
+                            <div style={{ marginBottom: entry.content ? 8 : 0 }}>
+                              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12, color: "#374151" }}>
+                                {changes.map((change: any, idx: number) => (
+                                  <li key={idx} style={{ marginBottom: 2 }}>
+                                    <strong>{change.field}:</strong>{" "}
+                                    <span style={{ color: "#dc2626" }}>{change.from}</span>
+                                    {" → "}
+                                    <span style={{ color: "#16a34a" }}>{change.to}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {/* Notes content */}
+                          {entry.content && (
+                            <div>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: "#475569", marginBottom: 4 }}>
+                                Notes:
+                              </div>
+                              <div style={{ fontSize: 13, color: "#0f172a", whiteSpace: "pre-wrap" }}>
+                                {entry.content}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
       </div>

@@ -135,6 +135,13 @@ export async function loader({ request }) {
             tbl_purchaseOrder: { select: { purchaseOrderGID: true, shortName: true } },
           },
         },
+        // schema: tbl_shipment.tbl_shipmentNotes[]
+        tbl_shipmentNotes: {
+          orderBy: { createdAt: "desc" },
+          include: {
+            tbl_logisticsUser: { select: { displayName: true } },
+          },
+        },
       },
     },
     "tbl_shipment"
@@ -274,6 +281,18 @@ export async function loader({ request }) {
   // Map shipments
   shipments = (shipmentRows || []).map((s) => {
     const po = pickPurchaseOrdersInfoFromShipment(s);
+
+    // Map shipment notes/history
+    const history = Array.isArray(s.tbl_shipmentNotes)
+      ? s.tbl_shipmentNotes.map((n) => ({
+          id: String(n.id),
+          timestamp: n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString(),
+          content: n.content || "",
+          changes: n.changes || null,
+          user: n.tbl_logisticsUser?.displayName || null,
+        }))
+      : [];
+
     return {
       id: String(s.id),
       supplierId: s.companyId,
@@ -305,6 +324,8 @@ export async function loader({ request }) {
 
       purchaseOrderGIDs: po.purchaseOrderGIDs,
       purchaseOrderShortNames: po.purchaseOrderShortNames,
+
+      history,
     };
   });
 

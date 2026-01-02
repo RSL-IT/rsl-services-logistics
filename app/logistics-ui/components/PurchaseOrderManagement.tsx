@@ -18,6 +18,8 @@ type CurrentUser = {
   name?: string | null;
   displayName?: string | null;
   email?: string;
+  companyName?: string | null;
+  supplierId?: string | null;
 };
 
 interface PurchaseOrderManagementProps {
@@ -27,6 +29,9 @@ interface PurchaseOrderManagementProps {
   companies: CompanyOption[];
   rslModels: RslModelOption[];
   currentUser?: CurrentUser | null;
+
+  // View-only mode for suppliers
+  viewOnly?: boolean;
 
   onBack: () => void;
   onLogout: () => void;
@@ -239,6 +244,7 @@ export function PurchaseOrderManagement({
                                           companies,
                                           rslModels,
                                           currentUser,
+                                          viewOnly = false,
                                           onBack,
                                           onLogout,
                                         }: PurchaseOrderManagementProps) {
@@ -339,8 +345,17 @@ export function PurchaseOrderManagement({
     })();
   }, [onPurchaseOrdersChange]);
 
+  // Get supplier company ID for filtering when in viewOnly mode
+  const supplierCompanyId = safeStr(currentUser?.companyName || currentUser?.supplierId);
+
   const normalized = useMemo(() => {
-    const list = Array.isArray(purchaseOrders) ? purchaseOrders.slice() : [];
+    let list = Array.isArray(purchaseOrders) ? purchaseOrders.slice() : [];
+
+    // Filter by supplier company when in viewOnly mode (supplier users)
+    if (viewOnly && supplierCompanyId) {
+      list = list.filter((po) => safeStr(po.companyID) === supplierCompanyId);
+    }
+
     return list.map((po, idx) => {
       const idRaw = safeStr((po as any)?.id);
       const gid = safeStr((po as any)?.purchaseOrderGID);
@@ -356,7 +371,7 @@ export function PurchaseOrderManagement({
 
       return { ...po, id };
     });
-  }, [purchaseOrders]);
+  }, [purchaseOrders, viewOnly, supplierCompanyId]);
 
   const filteredSorted = useMemo(() => {
     const needle = safeStr(q).toLowerCase();
@@ -568,10 +583,12 @@ export function PurchaseOrderManagement({
             />
           </div>
 
-          <button type="button" style={primaryBtnStyle} onClick={openCreate} disabled={isSaving}>
-            <Plus size={16} />
-            Create Purchase Order
-          </button>
+          {!viewOnly && (
+            <button type="button" style={primaryBtnStyle} onClick={openCreate} disabled={isSaving}>
+              <Plus size={16} />
+              Create Purchase Order
+            </button>
+          )}
 
           <button type="button" style={btnStyle} onClick={onLogout} disabled={isSaving}>
             <LogOut size={16} />
@@ -635,11 +652,12 @@ export function PurchaseOrderManagement({
           companies={companies}
           rslModels={rslModels}
           currentUser={currentUser}
+          viewOnly={viewOnly}
           isSaving={isSaving}
           error={error}
           onClose={closeModal}
           onSave={handleSave}
-          onDelete={mode === "view" ? handleDelete : undefined}
+          onDelete={mode === "view" && !viewOnly ? handleDelete : undefined}
         />
       ) : null}
     </div>

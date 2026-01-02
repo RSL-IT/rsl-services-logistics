@@ -50,6 +50,7 @@ model tbl_logisticsUser {
   tlkp_company                   tlkp_company                     @relation(fields: [companyID], references: [shortName])
   tbl_purchaseOrderNotes         tbl_purchaseOrderNotes[]
   tbljn_logisticsUser_permission tbljn_logisticsUser_permission[]
+  tbl_shipmentNotes              tbl_shipmentNotes[]
 }
 
 model tbl_purchaseOrder {
@@ -114,6 +115,23 @@ model tbl_shipment {
   tlkp_destinationPort         tlkp_destinationPort?          @relation(fields: [destinationPort], references: [shortName])
   tlkp_originPort              tlkp_originPort?               @relation(fields: [portOfOrigin], references: [shortName])
   tbljn_shipment_purchaseOrder tbljn_shipment_purchaseOrder[]
+  tbljn_shipment_rslProduct    tbljn_shipment_rslProduct[]
+  tbl_shipmentNotes            tbl_shipmentNotes[]
+}
+
+model tbl_shipmentNotes {
+  id            Int                @id @default(autoincrement())
+  shipmentId    Int
+  userId        Int?
+  createdAt     DateTime           @default(now())
+  content       String
+  changes       String?            @db.Text
+  tbl_shipment      tbl_shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  tbl_logisticsUser tbl_logisticsUser? @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([shipmentId])
+  @@index([userId])
 }
 
 model tbljn_logisticsUser_permission {
@@ -237,4 +255,18 @@ model tlkp_rslProduct {
   displayName                    String
   SKU                            String                           @unique(map: "tlkp_rslproduct_sku_key")
   tbljn_purchaseOrder_rslProduct tbljn_purchaseOrder_rslProduct[]
+  tbljn_shipment_rslProduct      tbljn_shipment_rslProduct[]
+}
+
+model tbljn_shipment_rslProduct {
+  id              Int             @id @default(autoincrement())
+  shipmentId      Int
+  rslProductID    String
+  quantity        Int             @default(0)
+  tbl_shipment    tbl_shipment    @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  tlkp_rslProduct tlkp_rslProduct @relation(fields: [rslProductID], references: [shortName], onDelete: Cascade)
+
+  @@unique([shipmentId, rslProductID])
+  @@index([shipmentId])
+  @@index([rslProductID])
 }

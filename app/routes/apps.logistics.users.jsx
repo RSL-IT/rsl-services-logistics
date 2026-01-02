@@ -81,8 +81,8 @@ function mapUiPermissionsToDbShortNames(uiPerms = {}) {
     out.add("shipment_update");
   }
 
-  // Best-fit mapping for legacy UI permission (no dedicated DB key)
-  if (p.modifyShipper) out.add("shipment_update");
+  // Modify Shipper permission (for supplier users to update shipments)
+  if (p.modifyShipper) out.add("shipper_modify");
 
   return Array.from(out);
 }
@@ -93,7 +93,7 @@ function mapDbPermissionSetToUi(dbShortNameSet) {
   return {
     viewUserManagement: has("user_view"),
     createEditUser: has("user_create") || has("user_update") || has("user_delete"),
-    modifyShipper: has("shipment_update"),
+    modifyShipper: has("shipper_modify"),
 
     viewDashboard: has("dashboard_view"),
     editDashboard: has("dashboard_update"),
@@ -129,8 +129,8 @@ function mapDbUserToUi(dbUser) {
   const supplierId = role === "supplier" ? dbUser.companyID ?? null : null;
 
   const dbPerms = new Set(
-    (dbUser.permissionLinks || [])
-      .map((x) => x.permission?.shortName)
+    (dbUser.tbljn_logisticsUser_permission || [])
+      .map((x) => x.tlkp_permission?.shortName)
       .filter(Boolean),
   );
 
@@ -207,7 +207,7 @@ export async function action({ request }) {
       }
 
       // Validate company exists
-      const company = await logisticsDb.tbl_company.findUnique({ where: { shortName: companyID } });
+      const company = await logisticsDb.tlkp_company.findUnique({ where: { shortName: companyID } });
       if (!company) {
         return json(
           { success: false, error: `Unknown company shortName: ${companyID}`, debug },
@@ -246,6 +246,7 @@ export async function action({ request }) {
             isActive,
             userType: userTypeDb,
             companyID,
+            updatedAt: new Date(),
           },
         });
 
@@ -258,7 +259,7 @@ export async function action({ request }) {
 
         return tx.tbl_logisticsUser.findUnique({
           where: { id: dbUser.id },
-          include: { permissionLinks: { include: { permission: true } } },
+          include: { tbljn_logisticsUser_permission: { include: { tlkp_permission: true } } },
         });
       });
 
@@ -275,7 +276,7 @@ export async function action({ request }) {
 
       const existing = await logisticsDb.tbl_logisticsUser.findUnique({
         where: { id },
-        include: { permissionLinks: { include: { permission: true } } },
+        include: { tbljn_logisticsUser_permission: { include: { tlkp_permission: true } } },
       });
 
       if (!existing) {
@@ -302,7 +303,7 @@ export async function action({ request }) {
       }
 
       // Validate company exists
-      const company = await logisticsDb.tbl_company.findUnique({ where: { shortName: companyID } });
+      const company = await logisticsDb.tlkp_company.findUnique({ where: { shortName: companyID } });
       if (!company) {
         return json(
           { success: false, error: `Unknown company shortName: ${companyID}`, debug },
@@ -356,7 +357,7 @@ export async function action({ request }) {
 
         return tx.tbl_logisticsUser.findUnique({
           where: { id },
-          include: { permissionLinks: { include: { permission: true } } },
+          include: { tbljn_logisticsUser_permission: { include: { tlkp_permission: true } } },
         });
       });
 

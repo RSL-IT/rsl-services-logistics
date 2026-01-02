@@ -55,10 +55,25 @@ export type CompanyOption = {
   displayName: string;
 };
 
+// Product associated with a purchase order
+export type PurchaseOrderProduct = {
+  rslModelID: string;
+  shortName?: string;
+  displayName?: string;
+  SKU?: string | null;
+  quantity?: number;
+};
+
 // Purchase order option for shipment PO selection
 export type PurchaseOrderOption = {
   purchaseOrderGID: string;
   shortName: string;
+  // Products associated with this purchase order
+  products?: PurchaseOrderProduct[];
+  // URL to the PDF for this purchase order (if available)
+  purchaseOrderPdfUrl?: string | null;
+  // Company/supplier associated with this purchase order
+  companyID?: string | null;
 };
 
 export type OnLogin = (role: Role, user: UIUser, supplierId?: string | null) => void;
