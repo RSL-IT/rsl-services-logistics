@@ -26,7 +26,7 @@ interface ShipmentDetailsModalProps {
   error?: string | null;
 
   onClose: () => void;
-  onSave: (mode: SaveMode, shipment: Shipment) => void;
+  onSave: (mode: SaveMode, shipment: Shipment, piFile?: File | null) => void;
   onDelete: (shipment: Shipment) => void;
 }
 
@@ -191,6 +191,55 @@ function companyLabel(c: CompanyOption) {
   return d ? `${c.shortName} — ${d}` : c.shortName;
 }
 
+// Helper to render Pro Forma Invoice change values as links
+function renderChangeValue(field: string, value: string, color: string): React.ReactNode {
+  if (field === "Pro Forma Invoice" && value && value !== "(none)") {
+    try {
+      // Try to parse as JSON first
+      const parsed = JSON.parse(value);
+      if (parsed.url && parsed.name) {
+        return (
+          <a
+            href={parsed.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color, textDecoration: "underline" }}
+          >
+            {parsed.name}
+          </a>
+        );
+      }
+      // If JSON but missing url/name, just show the name or value
+      return parsed.name || value;
+    } catch {
+      // Not valid JSON - check if it's a URL
+      if (value.startsWith("http://") || value.startsWith("https://")) {
+        // Extract filename from URL
+        try {
+          const url = new URL(value);
+          const pathParts = url.pathname.split("/");
+          const filename = pathParts[pathParts.length - 1] || "file";
+          return (
+            <a
+              href={value}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color, textDecoration: "underline" }}
+            >
+              {decodeURIComponent(filename)}
+            </a>
+          );
+        } catch {
+          return value;
+        }
+      }
+      // Plain filename or other text
+      return value;
+    }
+  }
+  return value;
+}
+
 export default function ShipmentDetailsModal({
                                                shipment,
                                                companies,
@@ -245,12 +294,9 @@ export default function ShipmentDetailsModal({
       destinationPort: norm((shipment as any).destinationPort),
 
       cargoReadyDate: norm((shipment as any).cargoReadyDate),
-      // ETD maps to estimatedDeliveryToOrigin in the database
-      etd: norm((shipment as any).etd) || norm((shipment as any).estimatedDeliveryToOrigin),
+      etd: norm((shipment as any).etd),
       eta: norm((shipment as any).eta),
-      estimatedDeliveryToOrigin: norm((shipment as any).estimatedDeliveryToOrigin),
 
-      supplierPi: norm((shipment as any).supplierPi),
       quantity: norm((shipment as any).quantity), // keep as string for UI
       // For create mode, show any existing notes; for update mode, start empty (notes go to history)
       notes: isNewShipment ? norm((shipment as any).notes) : "",
@@ -273,10 +319,8 @@ export default function ShipmentDetailsModal({
     portOfOrigin: norm((shipment as any).portOfOrigin),
     destinationPort: norm((shipment as any).destinationPort),
     cargoReadyDate: norm((shipment as any).cargoReadyDate),
-    etd: norm((shipment as any).etd) || norm((shipment as any).estimatedDeliveryToOrigin),
+    etd: norm((shipment as any).etd),
     eta: norm((shipment as any).eta),
-    estimatedDeliveryToOrigin: norm((shipment as any).estimatedDeliveryToOrigin),
-    supplierPi: norm((shipment as any).supplierPi),
     quantity: norm((shipment as any).quantity),
     notes: isCreate ? norm((shipment as any).notes) : "",
     bookingAgent: norm((shipment as any).bookingAgent),
@@ -286,20 +330,21 @@ export default function ShipmentDetailsModal({
     purchaseOrderGIDs: Array.isArray(initialPoGids) ? [...initialPoGids] : [],
   });
 
-  const initialProductQuantitiesRef = React.useRef<Record<string, string>>(() => {
-    const saved = (shipment as any).productQuantities;
-    if (saved && typeof saved === "object") {
-      const result: Record<string, string> = {};
-      for (const [key, val] of Object.entries(saved)) {
-        result[key] = String(val ?? 0);
+  const initialProductQuantitiesRef = React.useRef<Record<string, string>>(
+    (() => {
+      const saved = (shipment as any).productQuantities;
+      if (saved && typeof saved === "object") {
+        const result: Record<string, string> = {};
+        for (const [key, val] of Object.entries(saved)) {
+          result[key] = String(val ?? 0);
+        }
+        return result;
       }
-      return result;
-    }
-    return {};
-  });
+      return {};
+    })()
+  );
 
   const title = isCreate ? "Create Shipment" : "Shipment Details";
-  const subtitle = isCreate ? "New shipment" : `ID: ${String(shipment.id)}`;
 
   // Filter purchase orders by selected supplier (for both create and edit mode)
   const filteredPurchaseOrders = useMemo(() => {
@@ -342,6 +387,9 @@ export default function ShipmentDetailsModal({
       });
     }
   }, [isCreate, draft.supplierId, purchaseOrdersSafe]);
+
+  // PI Form file state
+  const [piFile, setPiFile] = useState<File | null>(null);
 
   // Track quantities for each product (keyed by rslModelID)
   // Initialize from saved shipment product quantities if editing existing shipment
@@ -430,8 +478,6 @@ export default function ShipmentDetailsModal({
     if (draft.cargoReadyDate !== initial.cargoReadyDate) return true;
     if (draft.etd !== initial.etd) return true;
     if (draft.eta !== initial.eta) return true;
-    if (draft.estimatedDeliveryToOrigin !== initial.estimatedDeliveryToOrigin) return true;
-    if (draft.supplierPi !== initial.supplierPi) return true;
     if (draft.bookingAgent !== initial.bookingAgent) return true;
     if (draft.bookingNumber !== initial.bookingNumber) return true;
     if (draft.vesselName !== initial.vesselName) return true;
@@ -455,8 +501,11 @@ export default function ShipmentDetailsModal({
       if ((productQuantities[key] || "0") !== (initialPQ[key] || "0")) return true;
     }
 
+    // Check if a new PI file was selected
+    if (piFile) return true;
+
     return false;
-  }, [draft, productQuantities]);
+  }, [draft, productQuantities, piFile]);
 
   const handleCancel = () => {
     if (isSaving) return;
@@ -510,9 +559,7 @@ export default function ShipmentDetailsModal({
       cargoReadyDate: draft.cargoReadyDate,
       etd: draft.etd,
       eta: draft.eta,
-      estimatedDeliveryToOrigin: draft.estimatedDeliveryToOrigin,
 
-      supplierPi: draft.supplierPi,
       quantity: draft.quantity, // string; server parses BigInt
       notes: draft.notes,
 
@@ -525,7 +572,7 @@ export default function ShipmentDetailsModal({
       productQuantities: productQuantities,
     } as Shipment;
 
-    onSave(mode, next);
+    onSave(mode, next, piFile);
   };
 
   return (
@@ -686,23 +733,127 @@ export default function ShipmentDetailsModal({
                   <option value="">—</option>
                   {destinationPortsSafe.map((o: LookupOption) => (
                     <option key={o.shortName} value={o.shortName}>
-                      {o.displayName ? `${o.shortName} — ${o.displayName}` : o.shortName}
+                      {o.displayName || o.shortName}
                     </option>
                   ))}
                 </select>
               </div>
 
-              {/* Supplier PI */}
-              <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
-                <div style={labelStyle}>Supplier PI</div>
-                <input
-                  value={draft.supplierPi}
-                  onChange={(e) => setField("supplierPi", e.target.value)}
-                  style={canEdit ? inputStyle : disabledStyle}
-                  disabled={!canEdit}
-                  placeholder="Update PI when available."
-                />
-              </div>
+            </div>
+          </div>
+
+          {/* Pro Forma Invoice Upload */}
+          <div style={{ ...cardStyle, marginBottom: 12 }}>
+            <div style={sectionTitleStyle}>Pro Forma Invoice</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {/* Show existing PI Form if available */}
+              {(shipment as any).supplierPiUrl && !piFile && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    background: "#f0fdf4",
+                    border: "1px solid #bbf7d0",
+                    borderRadius: 10,
+                    padding: "10px 14px",
+                  }}
+                >
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#166534", flex: 1 }}>
+                    {(shipment as any).supplierPiFileName || "PI Form uploaded"}
+                  </span>
+                  <a
+                    href={(shipment as any).supplierPiUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: "#16a34a",
+                      background: "#fff",
+                      border: "1px solid #16a34a",
+                      borderRadius: 8,
+                      textDecoration: "none",
+                      cursor: "pointer",
+                    }}
+                  >
+                    View PI
+                  </a>
+                </div>
+              )}
+
+              {/* Show selected file */}
+              {piFile && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    background: "#eff6ff",
+                    border: "1px solid #bfdbfe",
+                    borderRadius: 10,
+                    padding: "10px 14px",
+                  }}
+                >
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#1d4ed8", flex: 1 }}>
+                    New file: {piFile.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPiFile(null)}
+                    style={{
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: "#dc2626",
+                      background: "#fff",
+                      border: "1px solid #dc2626",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                    }}
+                    disabled={isSaving}
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
+
+              {/* File input */}
+              {canEdit && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    disabled={isSaving}
+                    onChange={(e) => {
+                      const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+                      setPiFile(f);
+                    }}
+                    style={{
+                      fontSize: 13,
+                    }}
+                  />
+                  <span style={{ fontSize: 12, color: "#64748b" }}>
+                    PDF only, max 20MB
+                  </span>
+                </div>
+              )}
+
+              {!canEdit && !(shipment as any).supplierPiUrl && (
+                <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
+                  Upload your Pro Forma Invoice when available.
+                </div>
+              )}
             </div>
           </div>
 
@@ -953,7 +1104,7 @@ export default function ShipmentDetailsModal({
             <div style={sectionTitleStyle}>Dates</div>
 
             <div style={gridStyle}>
-              <div style={{ ...fieldStyle, gridColumn: "span 3" }}>
+              <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
                 <div style={labelStyle}>Cargo-ready Date</div>
                 <input
                   type="date"
@@ -964,18 +1115,7 @@ export default function ShipmentDetailsModal({
                 />
               </div>
 
-              <div style={{ ...fieldStyle, gridColumn: "span 3" }}>
-                <div style={labelStyle}>Est. Delivery to Origin</div>
-                <input
-                  type="date"
-                  value={draft.estimatedDeliveryToOrigin}
-                  onChange={(e) => setField("estimatedDeliveryToOrigin", e.target.value)}
-                  style={canEdit ? inputStyle : disabledStyle}
-                  disabled={!canEdit}
-                />
-              </div>
-
-              <div style={{ ...fieldStyle, gridColumn: "span 3" }}>
+              <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
                 <div style={labelStyle}>ETD</div>
                 <input
                   type="date"
@@ -986,7 +1126,7 @@ export default function ShipmentDetailsModal({
                 />
               </div>
 
-              <div style={{ ...fieldStyle, gridColumn: "span 3" }}>
+              <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
                 <div style={labelStyle}>ETA</div>
                 <input
                   type="date"
@@ -1177,9 +1317,13 @@ export default function ShipmentDetailsModal({
                                 {changes.map((change: any, idx: number) => (
                                   <li key={idx} style={{ marginBottom: 2 }}>
                                     <strong>{change.field}:</strong>{" "}
-                                    <span style={{ color: "#dc2626" }}>{change.from}</span>
+                                    <span style={{ color: "#dc2626" }}>
+                                      {renderChangeValue(change.field, change.from, "#dc2626")}
+                                    </span>
                                     {" → "}
-                                    <span style={{ color: "#16a34a" }}>{change.to}</span>
+                                    <span style={{ color: "#16a34a" }}>
+                                      {renderChangeValue(change.field, change.to, "#16a34a")}
+                                    </span>
                                   </li>
                                 ))}
                               </ul>

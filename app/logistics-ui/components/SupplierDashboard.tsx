@@ -299,16 +299,31 @@ export function SupplierDashboard({
     setShipmentError(null);
   };
 
-  const saveShipment = async (mode: "create" | "update", s: Shipment) => {
+  const saveShipment = async (mode: "create" | "update", s: Shipment, piFile?: File | null) => {
     setSavingShipment(true);
     setShipmentError(null);
 
     try {
-      const res = await fetch("/apps/logistics/shipments", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ intent: mode, shipment: s }),
-      });
+      let res: Response;
+
+      // Use multipart form data if there's a file to upload
+      if (piFile) {
+        const fd = new FormData();
+        fd.append("intent", mode);
+        fd.append("shipment", JSON.stringify(s));
+        fd.append("piForm", piFile);
+
+        res = await fetch("/apps/logistics/shipments", {
+          method: "POST",
+          body: fd,
+        });
+      } else {
+        res = await fetch("/apps/logistics/shipments", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ intent: mode, shipment: s }),
+        });
+      }
 
       const data = await res.json();
 

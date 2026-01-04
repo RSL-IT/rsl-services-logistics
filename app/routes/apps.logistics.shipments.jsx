@@ -2,6 +2,8 @@
 import { json } from "@remix-run/node";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
+import { prisma } from "~/db.server";
+import { runAdminQuery } from "~/shopify-admin.server";
 import { getLogisticsUser } from "~/logistics-auth.server";
 
 // Field labels for human-readable change descriptions
@@ -16,6 +18,7 @@ const FIELD_LABELS = {
   cargoReadyDate: "Cargo Ready Date",
   estimatedDeliveryToOrigin: "Est. Delivery to Origin",
   supplierPi: "Supplier PI",
+  supplierPiFileName: "Pro Forma Invoice",
   quantity: "Quantity",
   bookingNumber: "Booking #",
   bookingAgent: "Booking Agent",
@@ -65,11 +68,22 @@ function detectChanges(existing, newData) {
     }
 
     if (oldCompare !== newCompare) {
-      changes.push({
-        field: FIELD_LABELS[field] || field,
-        from: formatValueForDisplay(field, oldVal),
-        to: formatValueForDisplay(field, newVal),
-      });
+      // For Pro Forma Invoice, include the URL with the filename as JSON
+      if (field === "supplierPiFileName") {
+        const oldUrl = existing.supplierPiUrl || null;
+        const newUrl = newData.supplierPiUrl || null;
+        changes.push({
+          field: FIELD_LABELS[field] || field,
+          from: oldVal ? JSON.stringify({ name: oldVal, url: oldUrl }) : "(none)",
+          to: newVal ? JSON.stringify({ name: newVal, url: newUrl }) : "(none)",
+        });
+      } else {
+        changes.push({
+          field: FIELD_LABELS[field] || field,
+          from: formatValueForDisplay(field, oldVal),
+          to: formatValueForDisplay(field, newVal),
+        });
+      }
     }
   }
 
@@ -193,6 +207,8 @@ function mapDbShipmentToUi(s) {
     cargoReadyDate: toYyyyMmDd(s.cargoReadyDate),
     estimatedDeliveryToOrigin: toYyyyMmDd(s.estimatedDeliveryToOrigin),
     supplierPi: s.supplierPi ?? "",
+    supplierPiUrl: s.supplierPiUrl ?? "",
+    supplierPiFileName: s.supplierPiFileName ?? "",
     quantity: s.quantity != null ? String(s.quantity) : "",
     bookingNumber: s.bookingNumber ?? "",
     bookingAgent: s.bookingAgent ?? "",
@@ -285,6 +301,129 @@ function normalizeProductQuantitiesFromPayload(shipment) {
   return result;
 }
 
+function shopFromUrlString(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    const shop = u.searchParams.get("shop");
+    return shop ? String(shop).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveShopForAdmin(request) {
+  const shopFromQuery = shopFromUrlString(request.url);
+  const shopFromHeader = request.headers.get("x-shopify-shop-domain");
+
+  if (shopFromQuery) return shopFromQuery;
+  if (shopFromHeader) return shopFromHeader;
+
+  // Fallback: most recent offline session in the Session table
+  const sess = await prisma.session.findFirst({
+    where: { isOnline: false },
+    orderBy: [{ expires: "desc" }],
+  });
+
+  return sess?.shop || null;
+}
+
+/**
+ * Upload PI Form PDF to Shopify Files.
+ */
+async function uploadPiFormToShopifyFiles({ shop, file }) {
+  const filename = file.name || "pi-form.pdf";
+  const mimeType = file.type || "application/pdf";
+  const fileSize = typeof file.size === "number" ? String(file.size) : undefined;
+
+  const STAGED_UPLOAD = `
+    mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
+      stagedUploadsCreate(input: $input) {
+        stagedTargets {
+          url
+          resourceUrl
+          parameters { name value }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const stagedResp = await runAdminQuery(shop, STAGED_UPLOAD, {
+    input: [
+      {
+        filename,
+        mimeType,
+        resource: "FILE",
+        ...(fileSize ? { fileSize } : {}),
+      },
+    ],
+  });
+
+  const stagedErrs = stagedResp?.data?.stagedUploadsCreate?.userErrors || [];
+  if (stagedErrs.length) throw new Error(stagedErrs[0]?.message || "stagedUploadsCreate failed.");
+
+  const target = stagedResp?.data?.stagedUploadsCreate?.stagedTargets?.[0];
+  if (!target?.url || !target?.resourceUrl) throw new Error("Missing staged upload target.");
+
+  // --- Upload to staged target ---
+  const buf = Buffer.from(await file.arrayBuffer());
+
+  const uploadRes = await fetch(String(target.url), {
+    method: "PUT",
+    body: buf,
+    // NO headers - signature only covers 'host' header which is added automatically
+  });
+
+  if (!uploadRes.ok) {
+    const text = await uploadRes.text().catch(() => "");
+    throw new Error(`Staged upload failed: ${uploadRes.status} ${text}`.trim());
+  }
+
+  // --- Create Shopify file record pointing at staged resourceUrl ---
+  const FILE_CREATE = `
+    mutation fileCreate($files: [FileCreateInput!]!) {
+      fileCreate(files: $files) {
+        files {
+          ... on GenericFile { id url }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const createResp = await runAdminQuery(shop, FILE_CREATE, {
+    files: [{ originalSource: target.resourceUrl, contentType: "FILE" }],
+  });
+
+  const createErrs = createResp?.data?.fileCreate?.userErrors || [];
+  if (createErrs.length) throw new Error(createErrs[0]?.message || "fileCreate failed.");
+
+  const created = createResp?.data?.fileCreate?.files?.[0];
+  const fileId = created?.id || null;
+  let url = created?.url || null;
+
+  // Sometimes url can lag briefly; do a short poll if needed
+  if (fileId && !url) {
+    const NODE_QUERY = `
+      query node($id: ID!) {
+        node(id: $id) {
+          ... on GenericFile { url }
+        }
+      }
+    `;
+
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 450));
+      const n = await runAdminQuery(shop, NODE_QUERY, { id: fileId });
+      url = n?.data?.node?.url || null;
+      if (url) break;
+    }
+  }
+
+  if (!url) throw new Error("Upload completed but no CDN URL available yet.");
+  return url;
+}
+
 export async function action({ request }) {
   const debug = { stage: "start", proxyVerified: false };
 
@@ -305,9 +444,41 @@ export async function action({ request }) {
     debug.stage = "parse-body";
     const contentType = request.headers.get("content-type") || "";
     let payload;
+    let piFormFile = null;
 
     if (contentType.includes("application/json")) {
       payload = await request.json();
+    } else if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      const intent = cleanStrOrNull(formData.get("intent"));
+      const shipmentRaw = cleanStrOrNull(formData.get("shipment"));
+      let shipmentData = {};
+      try {
+        shipmentData = shipmentRaw ? JSON.parse(shipmentRaw) : {};
+      } catch {
+        // ignore
+      }
+
+      // Get the PI form file if present
+      const piForm = formData.get("piForm");
+      const hasPiForm = piForm && typeof piForm === "object" && typeof piForm.arrayBuffer === "function";
+      piFormFile = hasPiForm ? piForm : null;
+
+      // Validate PI form if present
+      if (piFormFile) {
+        const name = String(piFormFile.name || "");
+        const type = String(piFormFile.type || "");
+        const looksPdf = type === "application/pdf" || name.toLowerCase().endsWith(".pdf");
+        if (!looksPdf) {
+          return json({ success: false, error: "Only PDF uploads are supported for PI Form." }, { status: 200 });
+        }
+        const maxBytes = 20 * 1024 * 1024;
+        if (typeof piFormFile.size === "number" && piFormFile.size > maxBytes) {
+          return json({ success: false, error: "PI Form PDF is too large (max 20MB)." }, { status: 200 });
+        }
+      }
+
+      payload = { intent, shipment: shipmentData };
     } else {
       const formData = await request.formData();
       payload = Object.fromEntries(formData);
@@ -376,6 +547,23 @@ export async function action({ request }) {
       const companyName =
         (company?.displayName && String(company.displayName).trim()) || supplierId;
 
+      // Upload PI form if present
+      let supplierPiUrl = null;
+      let supplierPiFileName = null;
+      if (piFormFile) {
+        const shop = await resolveShopForAdmin(request);
+        if (!shop) {
+          return json({ success: false, error: "Could not resolve shop for file upload.", debug }, { status: 200 });
+        }
+        try {
+          supplierPiUrl = await uploadPiFormToShopifyFiles({ shop, file: piFormFile });
+          supplierPiFileName = String(piFormFile.name || "pi-form.pdf");
+        } catch (uploadErr) {
+          console.error("[logistics shipments] PI form upload error:", uploadErr);
+          return json({ success: false, error: `PI Form upload failed: ${uploadErr.message}`, debug }, { status: 200 });
+        }
+      }
+
       let createdId;
 
       try {
@@ -395,6 +583,8 @@ export async function action({ request }) {
               cargoReadyDate,
               estimatedDeliveryToOrigin,
               supplierPi,
+              supplierPiUrl,
+              supplierPiFileName,
               quantity,
               bookingNumber,
               bookingAgent,
@@ -499,6 +689,23 @@ export async function action({ request }) {
       const vesselName = cleanStrOrNull(shipment.vesselName);
       const deliveryAddress = cleanStrOrNull(shipment.deliveryAddress);
 
+      // Upload PI form if present
+      let supplierPiUrl = undefined; // undefined = don't update
+      let supplierPiFileName = undefined;
+      if (piFormFile) {
+        const shop = await resolveShopForAdmin(request);
+        if (!shop) {
+          return json({ success: false, error: "Could not resolve shop for file upload.", debug }, { status: 200 });
+        }
+        try {
+          supplierPiUrl = await uploadPiFormToShopifyFiles({ shop, file: piFormFile });
+          supplierPiFileName = String(piFormFile.name || "pi-form.pdf");
+        } catch (uploadErr) {
+          console.error("[logistics shipments] PI form upload error:", uploadErr);
+          return json({ success: false, error: `PI Form upload failed: ${uploadErr.message}`, debug }, { status: 200 });
+        }
+      }
+
       // Notes entered during update go to tbl_shipmentNotes, not to the shipment record
       const updateNotes = cleanStrOrNull(shipment.notes);
 
@@ -552,6 +759,12 @@ export async function action({ request }) {
 
       if (quantity !== undefined) {
         data.quantity = quantity;
+      }
+
+      // Add PI form fields if uploaded
+      if (supplierPiUrl !== undefined) {
+        data.supplierPiUrl = supplierPiUrl;
+        data.supplierPiFileName = supplierPiFileName;
       }
 
       // Detect changes for the history log

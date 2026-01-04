@@ -99,6 +99,8 @@ model tbl_shipment {
   cargoReadyDate               DateTime?
   estimatedDeliveryToOrigin    DateTime?
   supplierPi                   String?
+  supplierPiUrl                String?
+  supplierPiFileName           String?            @db.VarChar(255)
   quantity                     BigInt?
   bookingNumber                String?
   status                       String?

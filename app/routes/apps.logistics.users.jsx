@@ -82,7 +82,7 @@ function mapUiPermissionsToDbShortNames(uiPerms = {}) {
   }
 
   // Modify Shipper permission (for supplier users to update shipments)
-  if (p.modifyShipper) out.add("shipper_modify");
+  if (p.modifyShipper) out.add("company_crud");
 
   return Array.from(out);
 }
@@ -93,7 +93,7 @@ function mapDbPermissionSetToUi(dbShortNameSet) {
   return {
     viewUserManagement: has("user_view"),
     createEditUser: has("user_create") || has("user_update") || has("user_delete"),
-    modifyShipper: has("shipper_modify"),
+    modifyShipper: has("company_crud"),
 
     viewDashboard: has("dashboard_view"),
     editDashboard: has("dashboard_update"),
