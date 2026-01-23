@@ -14,7 +14,9 @@ export const meta = () => [
 export default function App() {
   return (
     <html lang="en">
-    <head><Meta /><Links /></head>
+    <head>
+      <script type="text/javascript" src="https://www.bugherd.com/sidebarv2.js?apikey=hihghceqgla8kqp3gpjmqq" async="true"></script>
+      <Meta /><Links /></head>
     <body>
     <AppProvider i18n={en}><Outlet /></AppProvider>
     <ScrollRestoration /><Scripts />

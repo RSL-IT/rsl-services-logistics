@@ -220,7 +220,7 @@ function isSupplier(user: UIUser): boolean {
 }
 
 function companyLabel(companyId: string | null | undefined, companies: CompanyOption[]) {
-  if (!companyId) return "-";
+  if (!companyId) return "-BLAH";
   const found = companies.find((c) => c.shortName === companyId);
   if (!found) return companyId;
   const display = String(found.displayName || "").trim();
