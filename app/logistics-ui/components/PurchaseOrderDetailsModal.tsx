@@ -332,21 +332,22 @@ const checkboxWrapStyle: React.CSSProperties = {
   overflow: "auto",
 };
 
-const checkboxGridStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-  gap: 10,
+const checkboxListStyle: React.CSSProperties = {
+  columnCount: 2,
+  columnGap: 16,
+  columnWidth: 260,
 };
 
 const checkboxItemStyle: React.CSSProperties = {
   display: "flex",
   gap: 10,
   alignItems: "flex-start",
-  border: "1px solid #e2e8f0",
-  borderRadius: 12,
-  padding: 10,
-  background: "#ffffff",
+  padding: "8px 6px",
+  borderBottom: "1px solid #e2e8f0",
+  background: "transparent",
   cursor: "pointer",
+  breakInside: "avoid",
+  width: "100%",
 };
 
 export function PurchaseOrderDetailsModal({
@@ -508,10 +509,26 @@ export function PurchaseOrderDetailsModal({
           </button>
         </div>
 
-        <div style={bodyStyle}>
+        <div style={bodyStyle} className="po-details-body">
+          <style>{`
+            @media (max-width: 720px) {
+              .po-details-grid {
+                grid-template-columns: 1fr !important;
+              }
+
+              .po-products-list {
+                column-count: 1 !important;
+                column-width: auto !important;
+              }
+
+              .po-details-body {
+                overflow-x: hidden;
+              }
+            }
+          `}</style>
           {error ? <div style={errorStyle}>{error}</div> : null}
 
-          <div style={gridStyle}>
+          <div style={gridStyle} className="po-details-grid">
             {/* Purchase Order */}
             <div style={fieldStyle}>
               <div style={labelStyle}>Purchase Order</div>
@@ -634,7 +651,7 @@ export function PurchaseOrderDetailsModal({
               ) : null}
 
               <div style={checkboxWrapStyle}>
-                <div style={checkboxGridStyle}>
+                <div style={checkboxListStyle} className="po-products-list">
                   {allModelsSorted.length === 0 ? (
                     <div style={helperStyle}>No products found in the product table.</div>
                   ) : (
@@ -660,14 +677,9 @@ export function PurchaseOrderDetailsModal({
                             disabled={isSaving || viewOnly}
                             style={{ marginTop: 2, ...(viewOnly ? { display: "none" } : {}) }}
                           />
-                          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                            <div style={{ fontWeight: 900, fontSize: 12, color: "#0f172a" }}>
-                              {safeStr(m.displayName) || id}
-                            </div>
-                            <div style={{ fontSize: 11, color: "#64748b" }}>
-                              {id}
-                              {safeStr(m.SKU) ? ` • ${safeStr(m.SKU)}` : ""}
-                            </div>
+                          <div style={{ fontWeight: 900, fontSize: 12, color: "#0f172a" }}>
+                            {id}
+                            {safeStr(m.SKU) ? ` • ${safeStr(m.SKU)}` : ""}
                           </div>
                         </label>
                       );

@@ -576,9 +576,9 @@ export default function ShipmentDetailsModal({
   };
 
   return (
-    <div style={overlayStyle} role="dialog" aria-modal="true">
-      <div style={modalStyle}>
-        <div style={headerStyle}>
+    <div style={overlayStyle} role="dialog" aria-modal="true" className="shipment-details-overlay">
+      <div style={modalStyle} className="shipment-details-modal">
+        <div style={headerStyle} className="shipment-details-header">
           <div>
             <div style={headerTitleStyle}>{title}</div>
             <div style={headerSubStyle}>
@@ -586,7 +586,7 @@ export default function ShipmentDetailsModal({
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }} className="shipment-details-actions">
             {!isCreate ? (
               <button
                 type="button"
@@ -599,6 +599,7 @@ export default function ShipmentDetailsModal({
                 disabled={!canEdit || isSaving}
                 style={!canEdit || isSaving ? btnDisabled : btnDanger}
                 title={!canEdit ? "You do not have permission to delete shipments." : ""}
+                className="shipment-details-delete"
               >
                 Delete
               </button>
@@ -609,6 +610,7 @@ export default function ShipmentDetailsModal({
               onClick={handleCancel}
               disabled={isSaving}
               style={isSaving ? btnDisabled : btnMuted}
+              className="shipment-details-cancel"
             >
               Cancel
             </button>
@@ -625,20 +627,148 @@ export default function ShipmentDetailsModal({
                   ? "No changes to save."
                   : ""
               }
+              className="shipment-details-save"
             >
               {isSaving ? "Saving…" : isCreate ? "Create Shipment" : "Update Shipment"}
             </button>
           </div>
         </div>
 
-        <div style={bodyStyle}>
+        <div style={bodyStyle} className="shipment-details-body">
+          <style>{`
+            @media (max-width: 720px) {
+              .shipment-details-overlay {
+                padding: 10px !important;
+              }
+
+              .shipment-details-modal {
+                width: calc(100vw - 20px) !important;
+                max-width: calc(100vw - 20px) !important;
+                margin: 0 auto;
+                box-sizing: border-box;
+              }
+
+              .shipment-details-header {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 10px;
+                text-align: center;
+              }
+
+              .shipment-details-actions {
+                width: 100%;
+                flex-wrap: wrap;
+                justify-content: space-between;
+              }
+
+              .shipment-details-actions button {
+                flex: 0 0 auto;
+                padding: 8px 10px;
+                font-size: 12px;
+              }
+
+              .shipment-details-cancel {
+                margin-right: auto;
+                order: 2;
+              }
+
+              .shipment-details-save {
+                margin-left: auto;
+                order: 3;
+              }
+
+              .shipment-details-delete {
+                order: 1;
+              }
+
+              .shipment-details-body * {
+                box-sizing: border-box;
+              }
+
+              .shipment-details-body {
+                padding: 12px;
+              }
+
+              .shipment-details-card {
+                padding: 12px !important;
+                width: 100% !important;
+                max-width: 100% !important;
+              }
+
+              .shipment-details-grid {
+                grid-template-columns: 1fr !important;
+              }
+
+              .shipment-details-grid > * {
+                grid-column: 1 / -1 !important;
+                min-width: 0 !important;
+              }
+
+              .shipment-po-grid {
+                grid-template-columns: 1fr !important;
+              }
+
+              .shipment-details-body {
+                overflow-x: hidden;
+              }
+
+              .shipment-details-body input,
+              .shipment-details-body select,
+              .shipment-details-body textarea {
+                width: 100%;
+                max-width: 100%;
+              }
+
+              .shipment-products-table thead {
+                display: none;
+              }
+
+              .shipment-products-table,
+              .shipment-products-table tbody,
+              .shipment-products-table tr,
+              .shipment-products-table td {
+                display: block;
+                width: 100%;
+              }
+
+              .shipment-products-table tr {
+                border-bottom: 1px solid #e5e7eb;
+              }
+
+              .shipment-products-table td {
+                border: none !important;
+                padding: 8px 12px !important;
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                gap: 12px;
+              }
+
+              .shipment-products-table td::before {
+                content: attr(data-label);
+                font-size: 11px;
+                color: #64748b;
+                font-weight: 700;
+                flex: 0 0 90px;
+              }
+
+              .shipment-notes-wrap {
+                flex-direction: column;
+              }
+
+              .shipment-notes-wrap > .shipment-details-card {
+                width: 100% !important;
+                max-width: 100% !important;
+              }
+            }
+          `}</style>
           {error ? <div style={errorStyle}>{error}</div> : null}
 
           {/* Basics */}
-          <div style={{ ...cardStyle, marginBottom: 12 }}>
+          <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
             <div style={sectionTitleStyle}>Basics</div>
 
-            <div style={gridStyle}>
+            <div style={gridStyle} className="shipment-details-grid">
               {/* Supplier - read-only after create OR for supplier users */}
               <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
                 <div style={labelStyle}>Supplier</div>
@@ -743,7 +873,7 @@ export default function ShipmentDetailsModal({
           </div>
 
           {/* Pro Forma Invoice Upload */}
-          <div style={{ ...cardStyle, marginBottom: 12 }}>
+          <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
             <div style={sectionTitleStyle}>Pro Forma Invoice</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {/* Show existing PI Form if available */}
@@ -858,7 +988,7 @@ export default function ShipmentDetailsModal({
           </div>
 
           {/* Purchase Orders */}
-          <div style={{ ...cardStyle, marginBottom: 12 }}>
+          <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
             <div style={sectionTitleStyle}>
               <span>Purchase Orders</span>
               <span style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
@@ -881,6 +1011,7 @@ export default function ShipmentDetailsModal({
                   gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
                   gap: 10,
                 }}
+                className="shipment-po-grid"
               >
                 {filteredPurchaseOrders.map((po: PurchaseOrderOption) => {
                   const checked =
@@ -972,7 +1103,7 @@ export default function ShipmentDetailsModal({
 
           {/* Products from Selected Purchase Orders */}
           {aggregatedProducts.length > 0 && (
-            <div style={{ ...cardStyle, marginBottom: 12 }}>
+            <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
               <div style={sectionTitleStyle}>
                 <span>Products from Selected Purchase Orders</span>
                 <span style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
@@ -987,7 +1118,7 @@ export default function ShipmentDetailsModal({
                   overflow: "hidden",
                 }}
               >
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }} className="shipment-products-table">
                   <thead>
                     <tr style={{ background: "#f8fafc" }}>
                       <th
@@ -1039,6 +1170,7 @@ export default function ShipmentDetailsModal({
                         }}
                       >
                         <td
+                          data-label="Product"
                           style={{
                             padding: "10px 12px",
                             fontSize: 13,
@@ -1056,6 +1188,7 @@ export default function ShipmentDetailsModal({
                           </div>
                         </td>
                         <td
+                          data-label="SKU"
                           style={{
                             padding: "10px 12px",
                             fontSize: 12,
@@ -1069,6 +1202,7 @@ export default function ShipmentDetailsModal({
                           {product.SKU || "—"}
                         </td>
                         <td
+                          data-label="Quantity"
                           style={{
                             padding: "6px 12px",
                             borderBottom:
@@ -1100,10 +1234,10 @@ export default function ShipmentDetailsModal({
           )}
 
           {/* Dates */}
-          <div style={{ ...cardStyle, marginBottom: 12 }}>
+          <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
             <div style={sectionTitleStyle}>Dates</div>
 
-            <div style={gridStyle}>
+            <div style={gridStyle} className="shipment-details-grid">
               <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
                 <div style={labelStyle}>Cargo-ready Date</div>
                 <input
@@ -1140,10 +1274,10 @@ export default function ShipmentDetailsModal({
           </div>
 
           {/* Booking (moved BELOW Dates as requested) */}
-          <div style={{ ...cardStyle, marginBottom: 12 }}>
+          <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
             <div style={sectionTitleStyle}>Booking</div>
 
-            <div style={gridStyle}>
+            <div style={gridStyle} className="shipment-details-grid">
               <div style={{ ...fieldStyle, gridColumn: "span 4" }}>
                 <div style={labelStyle}>Booking Agent</div>
                 <select
@@ -1204,7 +1338,7 @@ export default function ShipmentDetailsModal({
 
           {/* Initial Notes - shown read-only in update mode if there are initial notes */}
           {!isCreate && norm((shipment as any).notes) && (
-            <div style={{ ...cardStyle, marginBottom: 12 }}>
+            <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
               <div style={sectionTitleStyle}>Initial Notes</div>
               <div
                 style={{
@@ -1225,7 +1359,7 @@ export default function ShipmentDetailsModal({
 
           {/* Notes and History side by side (in update mode) or just Notes (in create mode) */}
           {isCreate ? (
-            <div style={{ ...cardStyle, marginBottom: 12 }}>
+            <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
               <div style={sectionTitleStyle}>Initial Notes</div>
               <textarea
                 value={draft.notes}
@@ -1241,9 +1375,9 @@ export default function ShipmentDetailsModal({
               />
             </div>
           ) : (
-            <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ display: "flex", gap: 12 }} className="shipment-notes-wrap">
               {/* Notes - left side */}
-              <div style={{ ...cardStyle, flex: "0 0 300px" }}>
+              <div style={{ ...cardStyle, flex: "0 0 300px" }} className="shipment-details-card">
                 <div style={sectionTitleStyle}>Notes</div>
                 <textarea
                   value={draft.notes}
@@ -1260,7 +1394,7 @@ export default function ShipmentDetailsModal({
               </div>
 
               {/* History - right side */}
-              <div style={{ ...cardStyle, flex: 1, minWidth: 0 }}>
+              <div style={{ ...cardStyle, flex: 1, minWidth: 0 }} className="shipment-details-card">
                 <div style={sectionTitleStyle}>
                   <span>History</span>
                   <span style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
