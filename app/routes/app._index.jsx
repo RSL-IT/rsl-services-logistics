@@ -47,6 +47,9 @@ export default function AppIndex() {
                     <strong>Serial Numbers (DEV)</strong> - Feature to make serial numbers more
                     accessible.
                   </li>
+                  <li>
+                    <strong>Logistics (DEV)</strong> - Logistics features to track.
+                  </li>
                 </ul>
               </div>
             </div>

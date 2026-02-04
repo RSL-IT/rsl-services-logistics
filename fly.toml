@@ -1,10 +1,15 @@
-# fly.toml app configuration file generated for rsl-services-logistics on 2025-12-15T19:10:21Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
 app = 'rsl-services-logistics'
-primary_region = 'iad'
+primary_region = 'ord'
+
+[build]
+# Dockerfile handles the build
+
+[env]
+PORT = '3000'
+HOST = '0.0.0.0'
+NODE_ENV = "production"
+SHOPIFY_APP_URL = "https://rsl-services-logistics.fly.dev"
+SHOPIFY_AUTH_CALLBACK_PATH = "/auth/callback"
 
 [build]
 

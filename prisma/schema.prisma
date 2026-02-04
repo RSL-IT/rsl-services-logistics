@@ -1,23 +1,12 @@
 generator client {
   provider   = "prisma-client-js"
-  engineType = "library" // or "binary" (either is fine on Node)
+  engineType = "library"
 }
 
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
-}
-
-enum DiscountType {
-  percentage
-  fixed
-}
-
-enum DiscountCodeType {
-  alpha
-  numeric
-  mixed
 }
 
 model Session {
@@ -37,255 +26,249 @@ model Session {
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
 
-  @@index([shop]) // speeds up lookups by shop
-  @@index([expires]) // helps periodic cleanup of expired sessions
+  @@index([expires])
+  @@index([shop])
 }
 
-model tblkp_RepairEntryConditionReceived {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("repair_entry_condition_received")
-}
-
-model tblkp_RepairEntryPhotos {
-  id    Int     @id @default(autoincrement())
-  value Boolean
-
-  @@map("repair_entry_photos")
-}
-
-model tblkp_RepairEntryDiagnosis {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("repair_entry_diagnosis")
-}
-
-model tblkp_RepairEntryDisposition {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("repair_entry_disposition")
-}
-
-model tblkp_RepairEntryReplacedItems {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("repair_entry_replaced_items")
-}
-
-model tblkp_RepairEntryFeedbackToCsd {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("repair_entry_feedback_to_csd")
-}
-
-model tblkp_RepairEntryReturnsRepairStatus {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("repair_entry_returns_repair_status")
-}
-
-model tblkp_RepairEntryReplacementItemDeliveryDate {
-  id    Int      @id @default(autoincrement())
-  value DateTime @db.Timestamptz(6)
-
-  @@map("repair_entry_replacement_item_delivery_date")
-}
-
-model tblkp_CsdPrimaryCustomerReportedReasonForReturnWarranty {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  // back-relation → ReturnEntry.reasonCategory
-  returnEntries ReturnEntry[] @relation("ReasonEntries")
-
-  @@map("csd_primary_customer_reported_reason_for_return_warranty")
-}
-
-model tblkp_CsdItem {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("csd_item")
-}
-
-model tblkp_CsdReturnType {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  // back-relation → ReturnEntry.returnType
-  returnEntries ReturnEntry[] @relation("ReturnTypeEntries")
-
-  @@map("csd_return_type")
-}
-
-model tblkp_CsdTroubleshootingNotes {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("csd_troubleshooting_notes")
-}
-
-model tblkp_CsdCustomerServiceStatus {
-  id    Int    @id @default(autoincrement())
-  value String
-
-  @@map("csd_customer_service_status")
-}
-
-model tblkp_staff {
+model rsl_staff {
   id   Int     @id @default(autoincrement())
   name String? @db.VarChar(60)
   role String? @db.VarChar(60)
   gid  String? @db.VarChar(60)
-
-  @@map("rsl_staff")
 }
 
-model tblkp_CsdReturnItemRequired {
-  id    Int     @id @default(autoincrement())
-  value Boolean
-
-  @@map("csd_return_item_required")
+model tbl_logisticsUser {
+  id                             Int                              @id @default(autoincrement())
+  email                          String                           @unique
+  displayName                    String?
+  userType                       String
+  isActive                       Boolean                          @default(true)
+  companyID                      String
+  password                       String?
+  createdAt                      DateTime                         @default(now())
+  updatedAt                      DateTime
+  tlkp_company                   tlkp_company                     @relation(fields: [companyID], references: [shortName])
+  tbl_purchaseOrderNotes         tbl_purchaseOrderNotes[]
+  tbljn_logisticsUser_permission tbljn_logisticsUser_permission[]
+  tbl_shipmentNotes              tbl_shipmentNotes[]
 }
 
-model tblkp_CsdRefundEligible {
-  id    Int    @id @default(autoincrement())
-  value String
+model tbl_purchaseOrder {
+  id                             Int                              @id @default(autoincrement())
+  shortName                      String                           @unique
+  purchaseOrderGID               String                           @unique
+  purchaseOrderPdfUrl            String?
+  createdAt                      DateTime                         @default(now())
+  updatedAt                      DateTime
+  statusShortName                String?
+  tlkp_purchaseOrderStatus       tlkp_purchaseOrderStatus?        @relation(fields: [statusShortName], references: [shortName])
+  tbl_purchaseOrderNotes         tbl_purchaseOrderNotes[]
+  tbljn_purchaseOrder_company    tbljn_purchaseOrder_company[]
+  tbljn_purchaseOrder_rslProduct tbljn_purchaseOrder_rslProduct[]
+  tbljn_shipment_purchaseOrder   tbljn_shipment_purchaseOrder[]
 
-  @@map("csd_refund_eligible")
+  @@index([statusShortName])
 }
 
-model note {
-  id              Int     @id @default(autoincrement())
-  user_gid        String? @db.Text
-  note            String? @db.Text
-  return_entry_id Int?
+model tbl_purchaseOrderNotes {
+  id                Int                @id @default(autoincrement())
+  purchaseOrderGID  String
+  userId            Int?
+  createdAt         DateTime           @default(now())
+  content           String
+  pdfUrl            String?
+  pdfFileName       String?            @db.VarChar(255)
+  eventType         String?            @db.VarChar(30)
+  tbl_purchaseOrder tbl_purchaseOrder  @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID], onDelete: Cascade)
+  tbl_logisticsUser tbl_logisticsUser? @relation(fields: [userId], references: [id])
 
-  @@map("tbljn_note_departmentUserReturnEntry")
+  @@index([createdAt])
+  @@index([purchaseOrderGID])
+  @@index([userId])
 }
 
-/**
- * Canonical Prisma model for DB table "return_entry".
- * (We renamed the Prisma model to PascalCase while keeping @@map so existing data is preserved.)
- */
-model ReturnEntry {
-  id                           Int       @id(map: "return_entry_pk") @default(autoincrement())
-  date_requested               DateTime? @db.Date
-  original_order               String    @db.Text // was @db.Char(1)
-  original_order_gid           String?   @db.Text // was @db.Char(1)
-  customer_name                String    @db.Text // was @db.Char(1)
-  customer_gid                 String?   @db.Text // was @db.Char(1)
-  primary_customer_reason_id   Int?
-  item_id                      Int?
-  return_type_id               Int?
-  customer_service_status_id   Int?
-  rsl_csr                      String?   @db.Text // was @db.Char(1)
-  rsl_csr_gid                  String?   @db.Text // was @db.Char(1)
-  return_item_required         Boolean?
-  final_disposition_id         Int?
-  date_received                DateTime? @db.Date
-  repair_condition_received_id Int?
-  date_inspected               DateTime? @db.Date
-  rsl_rd_staff                 String?   @db.Text // was @db.Char(1)
-  rsl_rd_staff_gid             String?   @db.Text
-  replacement_order            String?   @db.Text
-  replaced_items_todo          Int?
-  status_id                    Int?
-  serial_number                String?   @db.Text // was @db.Char(1)
-  tracking_number              String?   @db.Text
-  return_closed                Boolean?
-  shopify_return_gid           String?   @db.Text
-
-  // Named relations (unchanged)
-  returnType     tblkp_CsdReturnType?                                     @relation("ReturnTypeEntries", fields: [return_type_id], references: [id])
-  reasonCategory tblkp_CsdPrimaryCustomerReportedReasonForReturnWarranty? @relation("ReasonEntries", fields: [primary_customer_reason_id], references: [id])
-
-  @@index([return_type_id])
-  @@index([primary_customer_reason_id])
-  @@map("return_entry")
+model tbl_shipment {
+  id                           Int                            @id @default(autoincrement())
+  companyId                    String
+  companyName                  String
+  containerNumber              String                         @unique
+  containerSize                String?
+  portOfOrigin                 String?
+  destinationPort              String?
+  etaDate                      DateTime?
+  cargoReadyDate               DateTime?
+  estimatedDeliveryToOrigin    DateTime?
+  supplierPi                   String?
+  supplierPiUrl                String?
+  supplierPiFileName           String?            @db.VarChar(255)
+  quantity                     BigInt?
+  bookingNumber                String?
+  status                       String?
+  notes                        String?
+  createdAt                    DateTime                       @default(now())
+  updatedAt                    DateTime
+  bookingAgent                 String?
+  deliveryAddress              String?
+  vesselName                   String?
+  tlkp_bookingAgent            tlkp_bookingAgent?             @relation(fields: [bookingAgent], references: [shortName])
+  tlkp_company                 tlkp_company                   @relation(fields: [companyId], references: [shortName])
+  tlkp_container               tlkp_container?                @relation(fields: [containerSize], references: [shortName])
+  tlkp_deliveryAddress         tlkp_deliveryAddress?          @relation(fields: [deliveryAddress], references: [shortName])
+  tlkp_destinationPort         tlkp_destinationPort?          @relation(fields: [destinationPort], references: [shortName])
+  tlkp_originPort              tlkp_originPort?               @relation(fields: [portOfOrigin], references: [shortName])
+  tbljn_shipment_purchaseOrder tbljn_shipment_purchaseOrder[]
+  tbljn_shipment_rslProduct    tbljn_shipment_rslProduct[]
+  tbl_shipmentNotes            tbl_shipmentNotes[]
 }
 
-model tbl_powerbuy_config {
-  id                         Int               @id @default(autoincrement())
-  powerbuy_uid               String?
-  date_created               DateTime?         @db.Date
-  created_by                 String?           @db.Text
-  created_by_gid             String?           @db.Text
-  title                      String?           @db.Text
-  code_length                Int?
-  code_type                  DiscountCodeType?
-  short_description          String?           @db.Text
-  long_description           String?           @db.Text
-  request_email_subject      String?           @db.Text
-  request_email_content      String?           @db.Text
-  request_email_template_url String?           @db.Text
-  confirm_email_subject      String?           @db.Text
-  confirm_email_content      String?           @db.Text
-  confirm_email_template_url String?           @db.Text
-  rsl_contact_email_address  String?           @db.Text
-  discount_prefix            String?           @db.Text
-  discount_combines_with     String?           @db.Text
-  start_time                 DateTime?         @db.Date
-  end_time                   DateTime?         @db.Date
-  duration                   String?           @db.VarChar()
-  number_of_uses             Int?
-  powerbuy_product_id        String?           @db.Text
-  powerbuy_variant_ids       String?           @db.Text
-  mailer_smtp_host           String?           @db.Text
-  mailer_smtp_port           Int?
-  mailer_smtp_user           String?           @db.Text
-  mailer_smtp_pass           String?           @db.Text
-  mailer_smtp_from_default   String?           @db.Text
-  mailer_from_header         String?           @db.Text
-  use_request_email_override Boolean?          @db.Boolean
-  request_email_override     String?           @db.Text
-  // NEW (optional)
-  discount_type              DiscountType?
-  discount_value             Decimal?          @db.Decimal(10, 2)
-  allowed_stores             String?           @db.Text
+model tbl_shipmentNotes {
+  id            Int                @id @default(autoincrement())
+  shipmentId    Int
+  userId        Int?
+  createdAt     DateTime           @default(now())
+  content       String
+  changes       String?            @db.Text
+  tbl_shipment      tbl_shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  tbl_logisticsUser tbl_logisticsUser? @relation(fields: [userId], references: [id])
 
-  codes                 tbl_powerbuy_codes[]
-  tbl_powerbuy_requests tbl_powerbuy_requests[]
+  @@index([createdAt])
+  @@index([shipmentId])
+  @@index([userId])
 }
 
-model tbl_powerbuy_codes {
-  id                        Int                     @id @default(autoincrement())
-  powerbuy_id               Int
-  powerbuy                  tbl_powerbuy_config     @relation(fields: [powerbuy_id], references: [id])
-  discount_code             String                  @db.Text
-  discount_code_gid         String                  @db.Text
-  rsl_contact_email_address String?                 @db.Text
-  start_time                DateTime?               @db.Timestamptz(6)
-  end_time                  DateTime?               @db.Timestamptz(6)
-  number_of_uses            Int?
-  powerbuy_product_id       String?                 @db.Text
-  requests                  tbl_powerbuy_requests[]
+model tbljn_logisticsUser_permission {
+  id                Int               @id @default(autoincrement())
+  logisticsUserID   Int
+  permissionID      Int
+  tbl_logisticsUser tbl_logisticsUser @relation(fields: [logisticsUserID], references: [id])
+  tlkp_permission   tlkp_permission   @relation(fields: [permissionID], references: [id])
 
-  @@index([powerbuy_id])
-  @@index([discount_code])
+  @@index([logisticsUserID])
+  @@index([permissionID])
 }
 
-model tbl_powerbuy_requests {
-  id            Int                 @id @default(autoincrement())
-  created_at    DateTime            @default(now())
-  name          String
-  email         String
-  product_id    String
-  powerbuy_id   Int
-  token         String              @unique
-  token_expires DateTime
-  confirmed_at  DateTime?
-  request_ip    String?
-  code_id       Int?
-  code          tbl_powerbuy_codes? @relation(fields: [code_id], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  powerbuy      tbl_powerbuy_config @relation(fields: [powerbuy_id], references: [id])
+model tbljn_purchaseOrder_company {
+  id                Int               @id @default(autoincrement())
+  purchaseOrderGID  String
+  companyID         String
+  tlkp_company      tlkp_company      @relation(fields: [companyID], references: [shortName], onDelete: Cascade)
+  tbl_purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID], onDelete: Cascade)
 
-  @@index([email, powerbuy_id])
-  @@index([code_id]) // optional but handy
+  @@unique([purchaseOrderGID, companyID])
+  @@index([companyID])
+  @@index([purchaseOrderGID])
+}
+
+model tbljn_purchaseOrder_rslProduct {
+  id                Int               @id @default(autoincrement())
+  purchaseOrderGID  String
+  rslProductID      String
+  quantity          Int               @default(0)
+  tbl_purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID], onDelete: Cascade)
+  tlkp_rslProduct   tlkp_rslProduct   @relation(fields: [rslProductID], references: [shortName], onDelete: Cascade)
+
+  @@unique([purchaseOrderGID, rslProductID], map: "tbljn_purchaseOrder_rslProduct_purchaseOrderGID_rslProductID_ke")
+  @@index([purchaseOrderGID])
+  @@index([rslProductID])
+}
+
+model tbljn_shipment_purchaseOrder {
+  id                Int               @id @default(autoincrement())
+  shipmentID        String
+  purchaseOrderGID  String
+  tbl_purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID])
+  tbl_shipment      tbl_shipment      @relation(fields: [shipmentID], references: [containerNumber])
+
+  @@index([purchaseOrderGID])
+  @@index([shipmentID])
+}
+
+model tlkp_bookingAgent {
+  id           Int            @id @default(autoincrement())
+  shortName    String         @unique
+  displayName  String?
+  tbl_shipment tbl_shipment[]
+}
+
+model tlkp_company {
+  id                          Int                           @id(map: "tbl_company_pkey") @default(autoincrement())
+  shortName                   String                        @unique(map: "tbl_company_shortName_key")
+  displayName                 String?
+  address1                    String?
+  address2                    String?
+  city                        String?
+  province                    String?
+  postalCode                  String?
+  country                     String?
+  primaryContact              String?
+  primaryPhone                String?
+  primaryEmail                String?
+  supplierCurrency            String?
+  tbl_logisticsUser           tbl_logisticsUser[]
+  tbl_shipment                tbl_shipment[]
+  tbljn_purchaseOrder_company tbljn_purchaseOrder_company[]
+}
+
+model tlkp_container {
+  id           Int            @id @default(autoincrement())
+  shortName    String         @unique
+  displayName  String
+  tbl_shipment tbl_shipment[]
+}
+
+model tlkp_deliveryAddress {
+  id           Int            @id @default(autoincrement())
+  shortName    String         @unique
+  displayName  String?
+  tbl_shipment tbl_shipment[]
+}
+
+model tlkp_destinationPort {
+  id           Int            @id @default(autoincrement())
+  shortName    String         @unique
+  displayName  String?
+  tbl_shipment tbl_shipment[]
+}
+
+model tlkp_originPort {
+  id           Int            @id @default(autoincrement())
+  shortName    String         @unique
+  displayName  String?
+  tbl_shipment tbl_shipment[]
+}
+
+model tlkp_permission {
+  id                             Int                              @id @default(autoincrement())
+  shortName                      String                           @unique
+  displayName                    String
+  tbljn_logisticsUser_permission tbljn_logisticsUser_permission[]
+}
+
+model tlkp_purchaseOrderStatus {
+  id                Int                 @id @default(autoincrement())
+  shortName         String              @unique
+  displayName       String
+  tbl_purchaseOrder tbl_purchaseOrder[]
+}
+
+model tlkp_rslProduct {
+  id                             Int                              @id(map: "tlkp_rslproduct_pkey") @default(autoincrement())
+  shortName                      String                           @unique(map: "tlkp_rslproduct_shortname_key")
+  displayName                    String
+  SKU                            String                           @unique(map: "tlkp_rslproduct_sku_key")
+  tbljn_purchaseOrder_rslProduct tbljn_purchaseOrder_rslProduct[]
+  tbljn_shipment_rslProduct      tbljn_shipment_rslProduct[]
+}
+
+model tbljn_shipment_rslProduct {
+  id              Int             @id @default(autoincrement())
+  shipmentId      Int
+  rslProductID    String
+  quantity        Int             @default(0)
+  tbl_shipment    tbl_shipment    @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  tlkp_rslProduct tlkp_rslProduct @relation(fields: [rslProductID], references: [shortName], onDelete: Cascade)
+
+  @@unique([shipmentId, rslProductID])
+  @@index([shipmentId])
+  @@index([rslProductID])
 }
