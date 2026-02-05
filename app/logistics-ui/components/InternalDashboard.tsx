@@ -22,6 +22,7 @@ interface InternalDashboardProps {
   onShipmentsChange: (next: Shipment[] | ((prev: Shipment[]) => Shipment[])) => void;
 
   onLogout: () => void | Promise<void>;
+  showLogout?: boolean;
   onNavigateToUsers: () => void;
   onNavigateToPurchaseOrders: () => void;
 }
@@ -145,7 +146,7 @@ const cardStyle: React.CSSProperties = {
 
 const controlsRowStyle: React.CSSProperties = {
   display: "flex",
-  alignItems: "flex-end",
+  alignItems: "flex-start",
   gap: 12,
   flexWrap: "wrap",
 };
@@ -229,6 +230,7 @@ export function InternalDashboard({
                                     purchaseOrders,
                                     onShipmentsChange,
                                     onLogout,
+                                    showLogout = true,
                                     onNavigateToUsers,
                                     onNavigateToPurchaseOrders,
                                   }: InternalDashboardProps) {
@@ -441,9 +443,11 @@ export function InternalDashboard({
             Manage Purchase Orders
           </button>
 
-          <button onClick={() => void onLogout()} style={btnDanger}>
-            Log Out
-          </button>
+          {showLogout ? (
+            <button onClick={() => void onLogout()} style={btnDanger}>
+              Log Out
+            </button>
+          ) : null}
         </div>
       </div>
 

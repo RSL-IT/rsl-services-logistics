@@ -15,11 +15,7 @@ export default function AppLayout() {
       <NavMenu>
         {/* First link labels the group and should point to your layout's home */}
         <a href="/app" rel="home">RSL Services</a>
-
-        {/* Keep ONLY these three entries */}
-        <a href="/app/returns">Returns</a>
-        <a href="/app/inprocess">In-Process</a>
-        <a href="/app/serialnumbers">Serial Number Services</a>
+        <a href="/apps/logistics/portal">Logistics Portal</a>
       </NavMenu>
 
       {/* Child pages under /app/* render here */}

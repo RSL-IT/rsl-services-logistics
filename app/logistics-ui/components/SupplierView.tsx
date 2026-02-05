@@ -6,12 +6,14 @@ interface SupplierViewProps {
   supplierId: string;
   shipments: Shipment[];   // ⬅ exactly what LogisticsApp passes
   onLogout: () => void;
+  showLogout?: boolean;
 }
 
 export function SupplierView({
                                supplierId,
                                shipments,
                                onLogout,
+                               showLogout = true,
                              }: SupplierViewProps) {
   // Only show shipments for this supplier
   const supplierShipments = useMemo(
@@ -33,12 +35,14 @@ export function SupplierView({
         <h1 className="text-2xl font-bold text-gray-800">
           Supplier Portal – Shipments
         </h1>
-        <button
-          onClick={onLogout}
-          className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-        >
-          Log Out
-        </button>
+        {showLogout ? (
+          <button
+            onClick={onLogout}
+            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+          >
+            Log Out
+          </button>
+        ) : null}
       </div>
 
       {/* Details panel or table */}

@@ -10,6 +10,201 @@ function cleanStrOrNull(v) {
   return s ? s : null;
 }
 
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
+
+function shortNameForVariant(node) {
+  const productTitle = cleanStr(node?.product?.title) || "Unknown";
+  const firstOption = cleanStr(node?.selectedOptions?.[0]?.value) || cleanStr(node?.title);
+  return `${productTitle}/${firstOption || "Default"}`;
+}
+
+function displayNameForVariant(node) {
+  const productTitle = cleanStr(node?.product?.title) || "Unknown";
+  const variantTitle = cleanStr(node?.title) || "Default";
+  return `${productTitle} — ${variantTitle}`;
+}
+
+function extractShopifyErrorMessages(rawErrors) {
+  if (!rawErrors) return [];
+  const list = Array.isArray(rawErrors) ? rawErrors : [rawErrors];
+  const messages = [];
+
+  for (const e of list) {
+    if (!e) continue;
+    if (typeof e === "string") {
+      if (e.trim()) messages.push(e.trim());
+      continue;
+    }
+    if (typeof e?.message === "string" && e.message.trim()) {
+      messages.push(e.message.trim());
+      continue;
+    }
+    if (typeof e?.error === "string" && e.error.trim()) {
+      messages.push(e.error.trim());
+      continue;
+    }
+    try {
+      const s = JSON.stringify(e);
+      if (s && s !== "{}") messages.push(s);
+    } catch {
+      // ignore
+    }
+  }
+
+  return messages;
+}
+
+async function syncRslProductsFromShopify(shop) {
+  const gql = `#graphql
+    query Variants($first: Int!, $after: String) {
+      productVariants(first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            id
+            sku
+            title
+            product { title }
+            selectedOptions { name value }
+            metafield(namespace: "custom", key: "surface_to_logistics") {
+              value
+              type
+            }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+
+  const toDeleteShortNames = new Set();
+  const toDeleteVariantGids = new Set();
+  const missingSku = [];
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  let after = null;
+  for (let page = 0; page < 1000; page += 1) {
+    const resp = await runAdminQuery(shop, gql, { first: 100, after });
+    const errorMessages = extractShopifyErrorMessages(resp?.errors);
+    if (errorMessages.length) {
+      throw new Error(`Shopify error: ${errorMessages.join("; ")}`);
+    }
+
+    const variantsBlock = resp?.data?.productVariants;
+    if (!variantsBlock) {
+      throw new Error("Shopify error: productVariants missing in response.");
+    }
+
+    const edges = variantsBlock.edges || [];
+    for (const edge of edges) {
+      const node = edge?.node;
+      if (!node) continue;
+
+      const metaVal = cleanStr(node?.metafield?.value).toLowerCase();
+      const isSurface = metaVal === "true";
+
+      const shortName = shortNameForVariant(node);
+      const variantGID = cleanStr(node?.id);
+
+      if (!isSurface) {
+        if (shortName) toDeleteShortNames.add(shortName);
+        if (variantGID) toDeleteVariantGids.add(variantGID);
+        continue;
+      }
+
+      const sku = cleanStr(node?.sku);
+      if (!sku) {
+        missingSku.push({ id: variantGID, shortName, title: node?.title || "" });
+        skipped += 1;
+        continue;
+      }
+
+      const displayName = displayNameForVariant(node);
+
+      const existing = await logisticsDb.tlkp_rslProduct.findUnique({
+        where: { shortName },
+        select: { id: true, shortName: true },
+      });
+
+      if (existing) {
+        await logisticsDb.tlkp_rslProduct.update({
+          where: { shortName },
+          data: {
+            displayName,
+            SKU: sku,
+            variantGID,
+          },
+        });
+        updated += 1;
+      } else {
+        const existingBySku = await logisticsDb.tlkp_rslProduct.findFirst({
+          where: { SKU: sku },
+          select: { id: true, shortName: true },
+        });
+
+        if (existingBySku) {
+          const data = { displayName, variantGID };
+          if (existingBySku.shortName !== shortName) {
+            const shortNameTaken = await logisticsDb.tlkp_rslProduct.findUnique({
+              where: { shortName },
+              select: { id: true },
+            });
+            if (!shortNameTaken) data.shortName = shortName;
+          }
+          await logisticsDb.tlkp_rslProduct.update({
+            where: { id: existingBySku.id },
+            data,
+          });
+          updated += 1;
+        } else {
+          await logisticsDb.tlkp_rslProduct.create({
+            data: {
+              shortName,
+              displayName,
+              SKU: sku,
+                variantGID,
+              },
+            });
+            created += 1;
+          }
+      }
+    }
+
+    const pageInfo = variantsBlock.pageInfo;
+    if (!pageInfo?.hasNextPage) break;
+    after = pageInfo.endCursor;
+  }
+
+  const deleteShorts = Array.from(toDeleteShortNames).filter(Boolean);
+  const deleteVariantGids = Array.from(toDeleteVariantGids).filter(Boolean);
+
+  let deleted = 0;
+  if (deleteShorts.length || deleteVariantGids.length) {
+    const res = await logisticsDb.tlkp_rslProduct.deleteMany({
+      where: {
+        OR: [
+          deleteShorts.length ? { shortName: { in: deleteShorts } } : undefined,
+          deleteVariantGids.length ? { variantGID: { in: deleteVariantGids } } : undefined,
+        ].filter(Boolean),
+      },
+    });
+    deleted = res.count || 0;
+  }
+
+  return {
+    created,
+    updated,
+    deleted,
+    skipped,
+    missingSkuCount: missingSku.length,
+  };
+}
+
 function shopFromUrlString(urlStr) {
   try {
     const u = new URL(urlStr);
@@ -619,14 +814,32 @@ export async function action({ request }) {
     }
 
     // ----- JSON: delete -----
-    const payload = await request.json().catch(() => null);
-    const intent = cleanStrOrNull(payload?.intent);
+  const payload = await request.json().catch(() => null);
+  const intent = cleanStrOrNull(payload?.intent);
 
-    if (!intent) return json({ ok: false, error: "Missing intent." }, { status: 400 });
+  if (!intent) return json({ ok: false, error: "Missing intent." }, { status: 400 });
 
-    if (intent === "delete") {
-      const purchaseOrderGID =
-        cleanStrOrNull(payload?.purchaseOrderGID) || cleanStrOrNull(payload?.purchaseOrder?.purchaseOrderGID);
+  if (intent === "refresh-products") {
+    const rawUserType = String(user?.userType || "").trim().toLowerCase();
+    if (rawUserType.includes("supplier")) {
+      return json({ ok: false, error: "Not authorized." }, { status: 403 });
+    }
+
+    const shop = await resolveShopForAdmin(request);
+    if (!shop) {
+      return json(
+        { ok: false, error: "Missing shop context for Shopify Admin API." },
+        { status: 400 },
+      );
+    }
+
+    const result = await syncRslProductsFromShopify(shop);
+    return json({ ok: true, ...result });
+  }
+
+  if (intent === "delete") {
+    const purchaseOrderGID =
+      cleanStrOrNull(payload?.purchaseOrderGID) || cleanStrOrNull(payload?.purchaseOrder?.purchaseOrderGID);
 
       if (!purchaseOrderGID) {
         return json({ ok: false, error: "purchaseOrderGID is required for delete." }, { status: 400 });

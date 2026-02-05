@@ -1,13 +1,29 @@
 // app/routes/app._index.jsx
-import { Page, Layout, Card, Text, Box } from "@shopify/polaris";
-import { addDocumentResponseHeaders, getShopify } from "~/shopify.server";
-
-export const headers = addDocumentResponseHeaders;
+import { Page, Layout, Card, Text } from "@shopify/polaris";
+import { redirect } from "@remix-run/node";
+import { authenticate } from "~/shopify.server";
 export const meta = () => [{ title: "RSL Services" }];
 
-export const loader = async (args) => {
-  await getShopify().authenticate.public.appRoute(args);
-  return null; // or json({})
+export const loader = async ({ request }) => {
+  let authResult;
+  try {
+    authResult = await authenticate.admin(request);
+  } catch (err) {
+    if (err instanceof Response) return err;
+    throw err;
+  }
+  if (authResult instanceof Response) return authResult;
+
+  const url = new URL(request.url);
+  const params = new URLSearchParams(url.searchParams);
+  const query = params.toString();
+  const target = query ? `/apps/logistics/portal?${query}` : "/apps/logistics/portal";
+  try {
+    return authResult.redirect(target);
+  } catch (err) {
+    if (err instanceof Response) return err;
+    throw err;
+  }
 };
 
 export default function AppIndex() {

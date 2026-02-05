@@ -90,6 +90,7 @@ interface LogisticsAppProps {
 
   currentUser?: UIUser | null;
   initialError?: string | null;
+  isEmbedded?: boolean;
 }
 
 function normalizeLookup(list: RawLookup[] | null | undefined): LookupOption[] {
@@ -159,6 +160,7 @@ export default function LogisticsApp({
                                        rslModels,
                                        currentUser,
                                        initialError,
+                                       isEmbedded = false,
                                      }: LogisticsAppProps) {
   // Support both naming conventions: shipments/initialShipments, users/initialUsers
   const shipmentsData = shipments ?? initialShipments;
@@ -218,6 +220,8 @@ export default function LogisticsApp({
     }
     return null;
   });
+
+  const showLogout = !isEmbedded;
 
   const [shipmentsState, setShipmentsState] = useState<Shipment[]>(
     Array.isArray(shipmentsData) ? shipmentsData : [],
@@ -337,6 +341,7 @@ export default function LogisticsApp({
           supplierId={supplierId}
           shipments={shipmentsState}
           onLogout={logout}
+          showLogout={showLogout}
         />
       )}
 
@@ -355,6 +360,7 @@ export default function LogisticsApp({
           onNavigateToUsers={() => setCurrentView("users")}
           onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
           onLogout={logout}
+          showLogout={showLogout}
         />
       )}
 
@@ -372,6 +378,7 @@ export default function LogisticsApp({
           currentUser={currentUserState}
           onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
           onLogout={logout}
+          showLogout={showLogout}
         />
       )}
 
@@ -382,6 +389,8 @@ export default function LogisticsApp({
           companies={companiesSafe}
           onBack={() => setCurrentView("dashboard")}
           onLogout={logout}
+          showLogout={showLogout}
+          currentUser={currentUserState}
         />
       )}
 
@@ -395,6 +404,7 @@ export default function LogisticsApp({
           viewOnly={getDefaultDashboardView(currentUserState) === "supplierDashboard"}
           onBack={() => setCurrentView(getDefaultDashboardView(currentUserState))}
           onLogout={logout}
+          showLogout={showLogout}
         />
       )}
     </div>

@@ -3,7 +3,9 @@ import { json } from "@remix-run/node";
 import { useLoaderData } from "@remix-run/react";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
-import { getLogisticsUser } from "~/logistics-auth.server";
+import { prisma } from "~/db.server";
+import { getLogisticsUser, commitLogisticsUserSession } from "~/logistics-auth.server";
+import { authenticate } from "~/shopify.server";
 import LogisticsApp from "~/logistics-ui/LogisticsApp";
 
 function normalizeUserTypeForUi(dbUserType) {
@@ -89,6 +91,12 @@ async function safeFindMany(model, args, label) {
 
 export async function loader({ request }) {
   const debug = { proxyVerified: false };
+  const url = new URL(request.url);
+  const shopParam = url.searchParams.get("shop");
+  const isEmbedded =
+    url.searchParams.get("embedded") === "1" ||
+    url.searchParams.has("host");
+  let setCookieHeader = null;
 
   // 1) Best-effort proxy verification
   try {
@@ -105,9 +113,100 @@ export async function loader({ request }) {
   }
 
   // 2) Session user (if any)
-  const sessionUser = await getLogisticsUser(request);
-  const sessionUserId = sessionUser?.id ?? null;
-  const sessionEmail = sessionUser?.email ?? null;
+  let sessionUser = await getLogisticsUser(request);
+  let sessionUserId = sessionUser?.id ?? null;
+  let sessionEmail = sessionUser?.email ?? null;
+
+  // 2b) If opened from Shopify Admin, auto-login as current staff member (fallback to IT admin)
+  if (!sessionUserId && isEmbedded && shopParam) {
+    const fallbackEmail = "itadmin@rslspeakers.com";
+    let staffEmail = null;
+    try {
+      const offlineSession = await prisma.session.findFirst({
+        where: { shop: shopParam, isOnline: false },
+        orderBy: [{ expires: "desc" }],
+        select: { scope: true },
+      });
+      const scopeList = String(offlineSession?.scope || "")
+        .split(/[,\s]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const hasReadUsers = scopeList.includes("read_users");
+
+      if (!hasReadUsers) {
+        debug.autoLogin = {
+          ok: false,
+          reason: "missing_scope",
+          required: "read_users",
+          scopes: scopeList,
+        };
+      } else {
+        const authResult = await authenticate.admin(request);
+        if (authResult instanceof Response) return authResult;
+
+        const { admin } = authResult;
+        if (admin?.graphql) {
+          const query = `#graphql
+            query CurrentStaffMember {
+              currentStaffMember {
+                id
+                email
+                firstName
+                lastName
+              }
+            }
+          `;
+          const resp = await admin.graphql(query);
+          const body = await resp.json();
+          if (resp.ok && !body?.errors?.length) {
+            staffEmail = body?.data?.currentStaffMember?.email || null;
+          } else {
+            debug.autoLogin = {
+              ok: false,
+              reason: "staff_query_failed",
+              errors: body?.errors ?? null,
+            };
+          }
+        }
+      }
+    } catch (err) {
+      debug.autoLogin = {
+        ok: false,
+        reason: "staff_query_exception",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const emailToUse = staffEmail || fallbackEmail;
+    const matched = await logisticsDb.tbl_logisticsUser.findFirst({
+      where: {
+        email: { equals: emailToUse, mode: "insensitive" },
+      },
+      select: { id: true, email: true },
+    });
+
+    if (matched?.id) {
+      sessionUserId = matched.id;
+      sessionEmail = matched.email;
+      sessionUser = { id: matched.id, email: matched.email };
+      setCookieHeader = await commitLogisticsUserSession(request, matched.id);
+      debug.autoLogin = {
+        ok: true,
+        shop: shopParam,
+        staffEmail: staffEmail || null,
+        emailUsed: emailToUse,
+        fallbackUsed: !staffEmail,
+      };
+    } else {
+      debug.autoLogin = {
+        ok: false,
+        reason: "no_matching_logistics_user",
+        emailUsed: emailToUse,
+        staffEmail: staffEmail || null,
+        shop: shopParam,
+      };
+    }
+  }
 
   // 3) Fetch shipments + users + lookups
   let shipments = [];
@@ -416,7 +515,7 @@ export async function loader({ request }) {
     ? users.find((u) => String(u.id) === String(sessionUserId)) || null
     : null;
 
-  return json({
+  const payload = {
     initialShipments: shipments,
     initialUsers: users,
     companies,
@@ -428,8 +527,11 @@ export async function loader({ request }) {
     purchaseOrders,
     rslModels,
     currentUser,
+    isEmbedded,
     debug,
-  });
+  };
+
+  return json(payload, setCookieHeader ? { headers: { "Set-Cookie": setCookieHeader } } : undefined);
 }
 
 export default function LogisticsPortalRoute() {
@@ -445,6 +547,7 @@ export default function LogisticsPortalRoute() {
     purchaseOrders,
     rslModels,
     currentUser,
+    isEmbedded,
   } = useLoaderData();
 
   return (
@@ -467,6 +570,7 @@ export default function LogisticsPortalRoute() {
         purchaseOrders={purchaseOrders}
         rslModels={rslModels}
         currentUser={currentUser}
+        isEmbedded={isEmbedded}
       />
     </div>
     </body>

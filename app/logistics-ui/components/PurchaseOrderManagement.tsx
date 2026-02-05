@@ -1,6 +1,6 @@
 // app/logistics-ui/components/PurchaseOrderManagement.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Eye, LogOut, Plus, Search } from "lucide-react";
+import { Eye, LogOut, Search } from "lucide-react";
 
 import PurchaseOrderDetailsModal, {
   CompanyOption,
@@ -20,6 +20,8 @@ type CurrentUser = {
   email?: string;
   companyName?: string | null;
   supplierId?: string | null;
+  role?: string | null;
+  userType?: string | null;
 };
 
 interface PurchaseOrderManagementProps {
@@ -35,6 +37,7 @@ interface PurchaseOrderManagementProps {
 
   onBack: () => void;
   onLogout: () => void;
+  showLogout?: boolean;
 }
 
 function safeStr(v: unknown) {
@@ -98,31 +101,6 @@ function timeSinceNatural(isoOrDate?: string | Date | null) {
 
 const wrapStyle: React.CSSProperties = { padding: 18 };
 
-const headerRowStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  gap: 12,
-  flexWrap: "wrap",
-  marginBottom: 14,
-};
-
-const titleStyle: React.CSSProperties = {
-  fontSize: 16,
-  fontWeight: 900,
-  color: "#0f172a",
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-};
-
-const toolbarStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 10,
-  alignItems: "center",
-  flexWrap: "wrap",
-};
-
 const btnStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
@@ -137,11 +115,75 @@ const btnStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
-const primaryBtnStyle: React.CSSProperties = {
-  ...btnStyle,
-  border: "none",
+const headerStyle: React.CSSProperties = {
+  background: "#1e40af",
+  color: "#fff",
+  borderRadius: 14,
+  padding: "14px 16px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  boxShadow: "0 12px 30px rgba(15,23,42,0.15)",
+  marginBottom: 14,
+};
+
+const headerTitleStyle: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 800,
+  letterSpacing: 0.2,
+};
+
+const headerSubStyle: React.CSSProperties = {
+  fontSize: 12,
+  opacity: 0.92,
+  marginTop: 2,
+};
+
+const headerRightStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 10,
+  alignItems: "center",
+};
+
+const btnBase: React.CSSProperties = {
+  borderRadius: 10,
+  padding: "10px 12px",
+  fontSize: 13,
+  fontWeight: 700,
+  border: "1px solid transparent",
+  cursor: "pointer",
+  lineHeight: 1,
+};
+
+const btnPrimary: React.CSSProperties = {
+  ...btnBase,
   background: "#2563eb",
   color: "#fff",
+};
+
+const btnDanger: React.CSSProperties = {
+  ...btnBase,
+  background: "#dc2626",
+  color: "#fff",
+};
+
+const btnSuccess: React.CSSProperties = {
+  ...btnBase,
+  background: "#16a34a",
+  color: "#fff",
+};
+
+const btnWarning: React.CSSProperties = {
+  ...btnBase,
+  background: "#f59e0b",
+  color: "#1f2937",
+};
+
+const btnDisabled: React.CSSProperties = {
+  ...btnBase,
+  background: "#cbd5e1",
+  color: "#475569",
+  cursor: "not-allowed",
 };
 
 const searchWrapStyle: React.CSSProperties = {
@@ -170,6 +212,22 @@ const inputStyle: React.CSSProperties = {
   width: 260,
 };
 
+const cardStyle: React.CSSProperties = {
+  background: "#fff",
+  border: "1px solid #e5e7eb",
+  borderRadius: 14,
+  boxShadow: "0 10px 24px rgba(15,23,42,0.06)",
+  padding: 14,
+  marginBottom: 14,
+};
+
+const controlsRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
 const tableWrapStyle: React.CSSProperties = {
   border: "1px solid #e2e8f0",
   borderRadius: 12,
@@ -184,12 +242,12 @@ const tableStyle: React.CSSProperties = {
 
 const thStyle: React.CSSProperties = {
   textAlign: "left",
-  padding: "10px 12px",
+  padding: "12px 12px",
   fontSize: 12,
-  fontWeight: 900,
-  color: "#0f172a",
-  background: "#f8fafc",
-  borderBottom: "1px solid #e2e8f0",
+  fontWeight: 800,
+  color: "#475569",
+  background: "#f1f5f9",
+  borderBottom: "1px solid #e5e7eb",
   userSelect: "none",
   cursor: "pointer",
   whiteSpace: "nowrap",
@@ -232,6 +290,16 @@ const errorStyle: React.CSSProperties = {
   marginBottom: 12,
 };
 
+const successStyle: React.CSSProperties = {
+  padding: "10px 12px",
+  borderRadius: 10,
+  background: "#ecfdf3",
+  border: "1px solid #bbf7d0",
+  color: "#166534",
+  fontSize: 12,
+  marginBottom: 12,
+};
+
 // -----------------------------------------------------------------------------
 // Component
 // -----------------------------------------------------------------------------
@@ -247,6 +315,7 @@ export function PurchaseOrderManagement({
                                           viewOnly = false,
                                           onBack,
                                           onLogout,
+                                          showLogout = true,
                                         }: PurchaseOrderManagementProps) {
   // Helper to get initial modal state from sessionStorage
   const getInitialModalState = () => {
@@ -284,7 +353,9 @@ export function PurchaseOrderManagement({
   });
 
   const [isSaving, setIsSaving] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
 
   const didInitialFetch = useRef(false);
 
@@ -389,7 +460,21 @@ export function PurchaseOrderManagement({
       const shortName = safeStr(po.shortName).toLowerCase();
       const gid = safeStr(po.purchaseOrderGID).toLowerCase();
       const company = companyText(po).toLowerCase();
-      return shortName.includes(needle) || gid.includes(needle) || company.includes(needle);
+      if (shortName.includes(needle) || gid.includes(needle) || company.includes(needle)) {
+        return true;
+      }
+
+      const products = Array.isArray(po.products) ? po.products : [];
+      return products.some((p) => {
+        const sku = safeStr(p?.SKU).toLowerCase();
+        const display = safeStr(p?.displayName).toLowerCase();
+        const short = safeStr(p?.shortName).toLowerCase();
+        return (
+          (sku && sku.includes(needle)) ||
+          (display && display.includes(needle)) ||
+          (short && short.includes(needle))
+        );
+      });
     });
 
     const getCreated = (po: UIPurchaseOrder) => {
@@ -432,6 +517,7 @@ export function PurchaseOrderManagement({
 
   const openCreate = () => {
     setError(null);
+    setRefreshMessage(null);
     setMode("create");
     setSelectedPO({
       id: "new",
@@ -449,6 +535,7 @@ export function PurchaseOrderManagement({
 
   const openView = (po: UIPurchaseOrder) => {
     setError(null);
+    setRefreshMessage(null);
     setMode("view");
     setSelectedPO(po);
   };
@@ -472,6 +559,7 @@ export function PurchaseOrderManagement({
   ) => {
     setIsSaving(true);
     setError(null);
+    setRefreshMessage(null);
 
     try {
       const url = withShopParam("/apps/logistics/purchase-orders");
@@ -507,6 +595,36 @@ export function PurchaseOrderManagement({
       setError(e?.message || "Save failed.");
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleRefreshProducts = async () => {
+    setIsRefreshing(true);
+    setError(null);
+    setRefreshMessage(null);
+
+    try {
+      const url = withShopParam("/apps/logistics/purchase-orders");
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent: "refresh-products" }),
+      });
+      const data: any = await res.json().catch(() => null);
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Refresh failed.");
+      }
+
+      const skipped = typeof data.skipped === "number" ? data.skipped : 0;
+      const msg = `Products refreshed. Created ${data.created ?? 0}, updated ${data.updated ?? 0}, ` +
+        `deleted ${data.deleted ?? 0}, skipped ${skipped}.` +
+        (data.missingSkuCount ? ` Missing SKU: ${data.missingSkuCount}.` : "");
+      setRefreshMessage(msg);
+    } catch (e: any) {
+      setError(e?.message || "Refresh failed.");
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -559,17 +677,43 @@ export function PurchaseOrderManagement({
   return (
     <div style={wrapStyle}>
       {error ? <div style={errorStyle}>{error}</div> : null}
+      {refreshMessage ? <div style={successStyle}>{refreshMessage}</div> : null}
 
-      <div style={headerRowStyle}>
-        <div style={titleStyle}>
-          <button type="button" style={btnStyle} onClick={onBack} disabled={isSaving}>
-            <ArrowLeft size={16} />
-            Back
-          </button>
-          Purchase Orders
+      <div style={headerStyle}>
+        <div>
+          <div style={headerTitleStyle}>RSL Logistics Purchase Orders</div>
+          <div style={headerSubStyle}>
+            Logged in as <b>{String((currentUser as any)?.name || currentUser?.email || "User")}</b>
+          </div>
         </div>
 
-        <div style={toolbarStyle}>
+        <div style={headerRightStyle}>
+          {!viewOnly && (
+            <button
+              type="button"
+              onClick={handleRefreshProducts}
+              disabled={isSaving || isRefreshing}
+              style={(isSaving || isRefreshing) ? btnDisabled : btnWarning}
+              title="Refresh products from Shopify"
+            >
+              {isRefreshing ? "Refreshing…" : "Refresh Products"}
+            </button>
+          )}
+
+          <button type="button" onClick={onBack} disabled={isSaving} style={btnPrimary}>
+            Back
+          </button>
+
+          {showLogout ? (
+            <button type="button" onClick={onLogout} disabled={isSaving} style={btnDanger}>
+              Log Out
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div style={cardStyle}>
+        <div style={controlsRowStyle}>
           <div style={searchWrapStyle}>
             <span style={iconBoxStyle}>
               <Search size={16} />
@@ -577,72 +721,75 @@ export function PurchaseOrderManagement({
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search PO / GID / company…"
+              placeholder="Search PO / GID / company / SKU / product…"
               style={inputStyle}
               disabled={isSaving}
             />
           </div>
 
+          <div style={{ flex: 1 }} />
+
           {!viewOnly && (
-            <button type="button" style={primaryBtnStyle} onClick={openCreate} disabled={isSaving}>
-              <Plus size={16} />
+            <button
+              type="button"
+              style={(isSaving || isRefreshing) ? btnDisabled : btnSuccess}
+              onClick={openCreate}
+              disabled={isSaving || isRefreshing}
+            >
               Create Purchase Order
             </button>
           )}
-
-          <button type="button" style={btnStyle} onClick={onLogout} disabled={isSaving}>
-            <LogOut size={16} />
-            Logout
-          </button>
         </div>
-      </div>
 
-      <div style={tableWrapStyle}>
-        <table style={tableStyle}>
-          <thead>
-          <tr>
-            <th style={thStyle} onClick={() => toggleSort("purchaseOrder")}>Purchase Order</th>
-            <th style={thStyle} onClick={() => toggleSort("company")}>Company</th>
-            <th style={thStyle} onClick={() => toggleSort("created")}>Created</th>
-            <th style={thStyle} onClick={() => toggleSort("updated")}>Updated</th>
-            <th style={{ ...thStyle, cursor: "default" }}>Action</th>
-          </tr>
-          </thead>
-
-          <tbody>
-          {filteredSorted.length === 0 ? (
-            <tr>
-              <td style={tdStyle} colSpan={5}>
-                <div style={subtleStyle}>No purchase orders found.</div>
-              </td>
-            </tr>
-          ) : (
-            filteredSorted.map((po) => (
-              <tr key={safeStr(po.id) || safeStr(po.purchaseOrderGID) || safeStr(po.shortName)}>
-                <td style={tdStyle}>
-                  <a
-                    href={adminPurchaseOrderUrl(po.purchaseOrderGID)}
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
-                  >
-                    #{safeStr(po.shortName) || "-"}
-                  </a>
-                </td>
-                <td style={tdStyle}>{companyTextForRow(po)}</td>
-                <td style={tdStyle}>{createdTextForRow(po)}</td>
-                <td style={tdStyle}>{updatedTextForRow(po)}</td>
-                <td style={tdStyle}>
-                  <button type="button" style={linkBtnStyle} onClick={() => openView(po)} disabled={isSaving}>
-                    <Eye size={14} />
-                    View
-                  </button>
-                </td>
+        <div style={{ marginTop: 14 }}>
+          <div style={tableWrapStyle}>
+            <table style={tableStyle}>
+              <thead>
+              <tr>
+                <th style={thStyle} onClick={() => toggleSort("purchaseOrder")}>Purchase Order</th>
+                <th style={thStyle} onClick={() => toggleSort("company")}>Company</th>
+                <th style={thStyle} onClick={() => toggleSort("created")}>Created</th>
+                <th style={thStyle} onClick={() => toggleSort("updated")}>Updated</th>
+                <th style={{ ...thStyle, cursor: "default" }}>Action</th>
               </tr>
-            ))
-          )}
-          </tbody>
-        </table>
+              </thead>
+
+              <tbody>
+              {filteredSorted.length === 0 ? (
+                <tr>
+                  <td style={tdStyle} colSpan={5}>
+                    <div style={subtleStyle}>No purchase orders found.</div>
+                  </td>
+                </tr>
+              ) : (
+                filteredSorted.map((po) => (
+                  <tr key={safeStr(po.id) || safeStr(po.purchaseOrderGID) || safeStr(po.shortName)}>
+                    <td style={tdStyle}>
+                      <a
+                        href={adminPurchaseOrderUrl(po.purchaseOrderGID)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
+                      >
+                        #{safeStr(po.shortName) || "-"}
+                      </a>
+                    </td>
+                    <td style={tdStyle}>{companyTextForRow(po)}</td>
+                    <td style={tdStyle}>{createdTextForRow(po)}</td>
+                    <td style={tdStyle}>{updatedTextForRow(po)}</td>
+                    <td style={tdStyle}>
+                      <button type="button" style={linkBtnStyle} onClick={() => openView(po)} disabled={isSaving}>
+                        <Eye size={14} />
+                        View
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       {selectedPO ? (

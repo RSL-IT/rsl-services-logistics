@@ -1,6 +1,6 @@
 // app/logistics-ui/components/UserManagement.tsx
 import React, { useMemo, useState } from "react";
-import { Search, Plus, ChevronLeft, Shield, Factory, Eye } from "lucide-react";
+import { Search, Shield, Factory, Eye } from "lucide-react";
 
 import UserDetailsModal from "./UserDetailsModal";
 import type { Role, UIUser, UIPermissions, CompanyOption } from "./types";
@@ -11,6 +11,8 @@ interface UserManagementProps {
   onUsersChange: (nextUsers: UIUser[]) => void;
   onBack: () => void;
   onLogout: () => void;
+  showLogout?: boolean;
+  currentUser?: UIUser | null;
 }
 
 type FilterOption = "all" | "internal" | "supplier" | "active" | "inactive";
@@ -19,118 +21,138 @@ type FilterOption = "all" | "internal" | "supplier" | "active" | "inactive";
 
 const pageStyle: React.CSSProperties = {
   minHeight: "100vh",
-  backgroundColor: "#f5f7fb",
+  backgroundColor: "#f8fafc",
   fontFamily:
     'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
   color: "#111827",
+  padding: 18,
 };
 
-const headerOuterStyle: React.CSSProperties = {
-  backgroundColor: "#ffffff",
-  borderBottom: "1px solid #e5e7eb",
-};
-
-const headerInnerStyle: React.CSSProperties = {
-  maxWidth: 1120,
-  margin: "0 auto",
-  padding: "12px 24px",
+const headerStyle: React.CSSProperties = {
+  background: "#1e40af",
+  color: "#fff",
+  borderRadius: 14,
+  padding: "14px 16px",
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
+  boxShadow: "0 12px 30px rgba(15,23,42,0.15)",
+  marginBottom: 14,
 };
 
-const headerLeftStyle: React.CSSProperties = {
+const headerTitleStyle: React.CSSProperties = {
+  fontSize: 18,
+  fontWeight: 800,
+  letterSpacing: 0.2,
+};
+
+const headerSubStyle: React.CSSProperties = {
+  fontSize: 12,
+  opacity: 0.92,
+  marginTop: 2,
+};
+
+const headerRightStyle: React.CSSProperties = {
   display: "flex",
+  gap: 10,
   alignItems: "center",
-  gap: 12,
 };
 
-const backButtonStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "6px 10px",
-  borderRadius: 999,
-  border: "1px solid transparent",
-  background: "none",
-  cursor: "pointer",
-  color: "#4b5563",
-};
-
-const logoutButtonStyle: React.CSSProperties = {
+const btnBase: React.CSSProperties = {
+  borderRadius: 10,
+  padding: "10px 12px",
   fontSize: 13,
-  color: "#6b7280",
-  background: "none",
-  border: "none",
+  fontWeight: 700,
+  border: "1px solid transparent",
   cursor: "pointer",
+  lineHeight: 1,
+};
+
+const btnPrimary: React.CSSProperties = {
+  ...btnBase,
+  background: "#2563eb",
+  color: "#fff",
+};
+
+const btnDanger: React.CSSProperties = {
+  ...btnBase,
+  background: "#dc2626",
+  color: "#fff",
+};
+
+const btnSuccess: React.CSSProperties = {
+  ...btnBase,
+  background: "#16a34a",
+  color: "#fff",
+};
+
+const btnDisabled: React.CSSProperties = {
+  ...btnBase,
+  background: "#cbd5e1",
+  color: "#475569",
+  cursor: "not-allowed",
 };
 
 const mainStyle: React.CSSProperties = {
-  maxWidth: 1120,
-  margin: "0 auto",
-  padding: "20px 16px 32px",
+  paddingBottom: 32,
+};
+
+const cardStyle: React.CSSProperties = {
+  background: "#fff",
+  border: "1px solid #e5e7eb",
+  borderRadius: 14,
+  boxShadow: "0 10px 24px rgba(15,23,42,0.06)",
+  padding: 14,
+  marginBottom: 14,
 };
 
 const controlsRowStyle: React.CSSProperties = {
   display: "flex",
-  flexWrap: "wrap",
-  gap: 12,
   alignItems: "center",
-  justifyContent: "space-between",
-  marginBottom: 16,
+  gap: 12,
+  flexWrap: "wrap",
 };
 
-const searchContainerStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 220,
+const searchWrapStyle: React.CSSProperties = {
   display: "flex",
-  gap: 8,
+  alignItems: "center",
+  border: "1px solid #e2e8f0",
+  borderRadius: 10,
+  overflow: "hidden",
+  background: "#fff",
 };
 
-const searchWrapperStyle: React.CSSProperties = {
-  position: "relative",
-  flex: 1,
+const iconBoxStyle: React.CSSProperties = {
+  padding: "9px 10px",
+  borderRight: "1px solid #e2e8f0",
+  color: "#64748b",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
 };
 
 const searchInputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "8px 10px 8px 30px",
-  borderRadius: 6,
-  border: "1px solid #d1d5db",
+  border: "none",
+  outline: "none",
+  padding: "9px 12px",
   fontSize: 13,
+  width: 260,
 };
 
 const selectStyle: React.CSSProperties = {
-  minWidth: 150,
-  padding: "8px 10px",
-  borderRadius: 6,
-  border: "1px solid #d1d5db",
-  fontSize: 13,
-  backgroundColor: "#ffffff",
-};
-
-const createButtonStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 8,
-  padding: "8px 14px",
-  borderRadius: 8,
-  border: "none",
-  backgroundColor: "#2563eb",
-  color: "#ffffff",
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-  boxShadow: "0 10px 15px -3px rgba(37,99,235,0.25)",
-};
-
-const tableCardStyle: React.CSSProperties = {
-  backgroundColor: "#ffffff",
+  minWidth: 180,
+  padding: "9px 12px",
   borderRadius: 10,
+  border: "1px solid #e2e8f0",
+  fontSize: 13,
+  backgroundColor: "#ffffff",
+};
+
+const tableWrapStyle: React.CSSProperties = {
   border: "1px solid #e5e7eb",
-  boxShadow: "0 10px 30px rgba(15,23,42,0.06)",
+  borderRadius: 12,
   overflow: "hidden",
+  background: "#fff",
 };
 
 const tableStyle: React.CSSProperties = {
@@ -141,17 +163,18 @@ const tableStyle: React.CSSProperties = {
 
 const thStyle: React.CSSProperties = {
   textAlign: "left",
-  padding: "10px 16px",
-  fontWeight: 500,
-  color: "#6b7280",
-  backgroundColor: "#f9fafb",
+  padding: "12px 12px",
+  fontWeight: 800,
+  color: "#475569",
+  background: "#f1f5f9",
   borderBottom: "1px solid #e5e7eb",
 };
 
 const tdStyle: React.CSSProperties = {
-  padding: "10px 16px",
-  borderBottom: "1px solid #f3f4f6",
+  padding: "12px 12px",
+  borderBottom: "1px solid #eef2f7",
   verticalAlign: "middle",
+  color: "#0f172a",
 };
 
 const statusPillBase: React.CSSProperties = {
@@ -174,31 +197,6 @@ const linkButtonStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
-const statsRowStyle: React.CSSProperties = {
-  marginTop: 18,
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-  gap: 12,
-};
-
-const statCardStyle: React.CSSProperties = {
-  backgroundColor: "#ffffff",
-  borderRadius: 10,
-  border: "1px solid #e5e7eb",
-  padding: "10px 14px",
-  fontSize: 12,
-};
-
-const statLabelStyle: React.CSSProperties = {
-  color: "#6b7280",
-  marginBottom: 4,
-};
-
-const statValueStyle: React.CSSProperties = {
-  fontSize: 18,
-  fontWeight: 600,
-  color: "#111827",
-};
 
 // --- helpers ------------------------------------------------------------------
 
@@ -246,6 +244,8 @@ export function UserManagement({
                                  onUsersChange,
                                  onBack,
                                  onLogout,
+                                 showLogout = true,
+                                 currentUser = null,
                                }: UserManagementProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<FilterOption>("all");
@@ -279,14 +279,6 @@ export function UserManagement({
       return matchesSearch && matchesFilter;
     });
   }, [users, search, filter]);
-
-  const stats = useMemo(() => {
-    const total = users.length;
-    const active = users.filter((u) => u.isActive !== false).length;
-    const internal = users.filter((u) => isInternal(u)).length;
-    const supplier = users.filter((u) => isSupplier(u)).length;
-    return { total, active, internal, supplier };
-  }, [users]);
 
   const openDetails = (user: UIUser) => {
     setModalError(null);
@@ -377,43 +369,32 @@ export function UserManagement({
 
   return (
     <div style={pageStyle}>
-      <header style={headerOuterStyle}>
-        <div style={headerInnerStyle}>
-          <div style={headerLeftStyle}>
-            <button type="button" onClick={onBack} style={backButtonStyle}>
-              <ChevronLeft size={16} />
-              <span style={{ fontSize: 13 }}>Back to dashboard</span>
-            </button>
-            <div style={{ width: 1, height: 24, backgroundColor: "#e5e7eb" }} />
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 2 }}>
-                User Management
-              </div>
-              <div style={{ fontSize: 12, color: "#6b7280" }}>
-                Manage system users and their permissions
-              </div>
-            </div>
+      <div style={headerStyle}>
+        <div>
+          <div style={headerTitleStyle}>RSL Logistics Manage Users</div>
+          <div style={headerSubStyle}>
+            Logged in as <b>{String((currentUser as any)?.name || currentUser?.email || "User")}</b>
           </div>
-          <button type="button" onClick={onLogout} style={logoutButtonStyle}>
-            Log out
-          </button>
         </div>
-      </header>
+        <div style={headerRightStyle}>
+          <button type="button" onClick={onBack} disabled={isSaving} style={btnPrimary}>
+            Back
+          </button>
+          {showLogout ? (
+            <button type="button" onClick={onLogout} disabled={isSaving} style={btnDanger}>
+              Log out
+            </button>
+          ) : null}
+        </div>
+      </div>
 
       <main style={mainStyle}>
-        <div style={controlsRowStyle}>
-          <div style={searchContainerStyle}>
-            <div style={searchWrapperStyle}>
-              <Search
-                size={16}
-                style={{
-                  position: "absolute",
-                  left: 8,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  color: "#9ca3af",
-                }}
-              />
+        <div style={cardStyle}>
+          <div style={controlsRowStyle}>
+            <div style={searchWrapStyle}>
+              <span style={iconBoxStyle}>
+                <Search size={16} />
+              </span>
               <input
                 type="search"
                 value={search}
@@ -434,116 +415,101 @@ export function UserManagement({
               <option value="active">Active only</option>
               <option value="inactive">Inactive only</option>
             </select>
+
+            <div style={{ flex: 1 }} />
+
+            <button
+              type="button"
+              onClick={handleCreateClick}
+              style={isSaving ? btnDisabled : btnSuccess}
+              disabled={isSaving}
+            >
+              Create user
+            </button>
           </div>
 
-          <button
-            type="button"
-            onClick={handleCreateClick}
-            style={createButtonStyle}
-            disabled={isSaving}
-          >
-            <Plus size={16} />
-            <span>Create user</span>
-          </button>
-        </div>
-
-        <div style={tableCardStyle}>
-          <table style={tableStyle}>
-            <thead>
-            <tr>
-              <th style={thStyle}>Name</th>
-              <th style={thStyle}>Email</th>
-              <th style={thStyle}>Role</th>
-              <th style={thStyle}>Company</th>
-              <th style={thStyle}>Status</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Actions</th>
-            </tr>
-            </thead>
-            <tbody>
-            {filteredUsers.length === 0 ? (
-              <tr>
-                <td
-                  colSpan={6}
-                  style={{
-                    ...tdStyle,
-                    textAlign: "center",
-                    padding: "24px 16px",
-                    color: "#6b7280",
-                  }}
-                >
-                  No users found.
-                </td>
-              </tr>
-            ) : (
-              filteredUsers.map((user) => (
-                <tr
-                  key={user.id}
-                  style={{ cursor: "pointer" }}
-                  onClick={() => openDetails(user)}
-                >
-                  <td style={tdStyle}>{user.name || user.email}</td>
-                  <td style={tdStyle}>{user.email}</td>
-                  <td style={tdStyle}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                        <Shield size={14} color="#9ca3af" />
-                        <span>{roleLabel(user)}</span>
-                      </span>
-                  </td>
-                  <td style={tdStyle}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                        <Factory size={14} color="#9ca3af" />
-                        <span>{companyLabel(user.supplierId, companies)}</span>
-                      </span>
-                  </td>
-                  <td style={tdStyle}>
-                      <span
-                        style={{
-                          ...statusPillBase,
-                          backgroundColor: user.isActive !== false ? "#dcfce7" : "#fee2e2",
-                          color: user.isActive !== false ? "#166534" : "#b91c1c",
-                        }}
-                      >
-                        {user.isActive !== false ? "Active" : "Inactive"}
-                      </span>
-                  </td>
-                  <td style={{ ...tdStyle, textAlign: "right" }}>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openDetails(user);
-                      }}
-                      style={linkButtonStyle}
-                    >
-                      <Eye size={14} />
-                      <span>View</span>
-                    </button>
-                  </td>
+          <div style={{ marginTop: 14 }}>
+            <div style={tableWrapStyle}>
+              <table style={tableStyle}>
+                <thead>
+                <tr>
+                  <th style={thStyle}>Name</th>
+                  <th style={thStyle}>Email</th>
+                  <th style={thStyle}>Role</th>
+                  <th style={thStyle}>Company</th>
+                  <th style={thStyle}>Status</th>
+                  <th style={{ ...thStyle, textAlign: "right" }}>Actions</th>
                 </tr>
-              ))
-            )}
-            </tbody>
-          </table>
+                </thead>
+                <tbody>
+                {filteredUsers.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      style={{
+                        ...tdStyle,
+                        textAlign: "center",
+                        padding: "24px 16px",
+                        color: "#6b7280",
+                      }}
+                    >
+                      No users found.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredUsers.map((user) => (
+                    <tr
+                      key={user.id}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => openDetails(user)}
+                    >
+                      <td style={tdStyle}>{user.name || user.email}</td>
+                      <td style={tdStyle}>{user.email}</td>
+                      <td style={tdStyle}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          <Shield size={14} color="#9ca3af" />
+                          <span>{roleLabel(user)}</span>
+                        </span>
+                      </td>
+                      <td style={tdStyle}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          <Factory size={14} color="#9ca3af" />
+                          <span>{companyLabel(user.supplierId, companies)}</span>
+                        </span>
+                      </td>
+                      <td style={tdStyle}>
+                        <span
+                          style={{
+                            ...statusPillBase,
+                            backgroundColor: user.isActive !== false ? "#dcfce7" : "#fee2e2",
+                            color: user.isActive !== false ? "#166534" : "#b91c1c",
+                          }}
+                        >
+                          {user.isActive !== false ? "Active" : "Inactive"}
+                        </span>
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: "right" }}>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openDetails(user);
+                          }}
+                          style={linkButtonStyle}
+                        >
+                          <Eye size={14} />
+                          <span>View</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
 
-        <div style={statsRowStyle}>
-          <div style={statCardStyle}>
-            <div style={statLabelStyle}>Total Users</div>
-            <div style={statValueStyle}>{stats.total}</div>
-          </div>
-          <div style={statCardStyle}>
-            <div style={statLabelStyle}>Active Users</div>
-            <div style={statValueStyle}>{stats.active}</div>
-          </div>
-          <div style={statCardStyle}>
-            <div style={statLabelStyle}>RSL Internal</div>
-            <div style={statValueStyle}>{stats.internal}</div>
-          </div>
-          <div style={statCardStyle}>
-            <div style={statLabelStyle}>RSL Supplier</div>
-            <div style={statValueStyle}>{stats.supplier}</div>
-          </div>
-        </div>
       </main>
 
       {showDetails && selectedUser && (

@@ -3,6 +3,7 @@ import { RemixServer } from "@remix-run/react";
 import { PassThrough } from "node:stream";
 import server from "react-dom/server"; // CJS-safe default import
 import { createReadableStreamFromReadable } from "@remix-run/node";
+import { addDocumentResponseHeaders } from "~/shopify.server";
 import isbot from "~/utils/isbot.server";
 
 const ABORT_DELAY = 5000;
@@ -26,6 +27,7 @@ function streamForBrowsers(request, status, headers, remixContext) {
         onShellReady() {
           const body = new PassThrough();
           headers.set("Content-Type", "text/html");
+          addDocumentResponseHeaders(request, headers);
           resolve(
             new Response(createReadableStreamFromReadable(body), {
               status: didError ? 500 : status,
@@ -58,6 +60,7 @@ function streamForBots(request, status, headers, remixContext) {
         onAllReady() {
           const body = new PassThrough();
           headers.set("Content-Type", "text/html");
+          addDocumentResponseHeaders(request, headers);
           resolve(
             new Response(createReadableStreamFromReadable(body), {
               status: didError ? 500 : status,

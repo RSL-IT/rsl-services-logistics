@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useFetcher } from "@remix-run/react";
 import { Card, TextField, Button, Text, Banner, BlockStack } from "@shopify/polaris";
 import type { LoginProps } from "./types";
+import { getShopParam, withShopParam } from "../utils/shop";
 
 export function Login({ onLogin, users, initialError }: LoginProps) {
   const fetcher = useFetcher<any>();
@@ -41,6 +42,23 @@ export function Login({ onLogin, users, initialError }: LoginProps) {
     }
 
     onLogin(activeRole, matchedUser, supplierId);
+
+    const shop = getShopParam();
+    if (shop) {
+      const authUrl = withShopParam("/auth");
+      // Shopify OAuth should occur at the top level if embedded.
+      setTimeout(() => {
+        try {
+          if (window.top && window.top !== window.self) {
+            window.top.location.assign(authUrl);
+          } else {
+            window.location.assign(authUrl);
+          }
+        } catch {
+          window.location.assign(authUrl);
+        }
+      }, 0);
+    }
   }, [fetcher.data, onLogin, users]);
 
   return (

@@ -20,6 +20,7 @@ interface SupplierDashboardProps {
   onShipmentsChange: (next: Shipment[] | ((prev: Shipment[]) => Shipment[])) => void;
 
   onLogout: () => void | Promise<void>;
+  showLogout?: boolean;
   onNavigateToPurchaseOrders: () => void;
 }
 
@@ -201,9 +202,10 @@ export function SupplierDashboard({
                                     deliveryAddresses,
                                     purchaseOrders,
                                     onShipmentsChange,
-                                    onLogout,
-                                    onNavigateToPurchaseOrders,
-                                  }: SupplierDashboardProps) {
+                                   onLogout,
+                                   showLogout = true,
+                                   onNavigateToPurchaseOrders,
+                                 }: SupplierDashboardProps) {
   const [selectedStatus, setSelectedStatus] = useState<string>("all");
 
   const [showShipmentModal, setShowShipmentModal] = useState(false);
@@ -396,9 +398,11 @@ export function SupplierDashboard({
             View Purchase Orders
           </button>
 
-          <button onClick={() => void onLogout()} style={btnDanger}>
-            Log Out
-          </button>
+          {showLogout ? (
+            <button onClick={() => void onLogout()} style={btnDanger}>
+              Log Out
+            </button>
+          ) : null}
         </div>
       </div>
 

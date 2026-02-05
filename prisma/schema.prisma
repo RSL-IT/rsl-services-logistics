@@ -255,7 +255,8 @@ model tlkp_rslProduct {
   id                             Int                              @id(map: "tlkp_rslproduct_pkey") @default(autoincrement())
   shortName                      String                           @unique(map: "tlkp_rslproduct_shortname_key")
   displayName                    String
-  SKU                            String                           @unique(map: "tlkp_rslproduct_sku_key")
+  SKU                            String
+  variantGID                     String?                          @unique(map: "tlkp_rslproduct_variantgid_key")
   tbljn_purchaseOrder_rslProduct tbljn_purchaseOrder_rslProduct[]
   tbljn_shipment_rslProduct      tbljn_shipment_rslProduct[]
 }

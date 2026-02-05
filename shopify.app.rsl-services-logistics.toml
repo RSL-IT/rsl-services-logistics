@@ -1,0 +1,23 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "f1a101223713d797d62a5dd4c912d12a"
+name = "RSL Services: Logistics"
+application_url = "https://rsl-services-logistics.fly.dev"
+embedded = true
+
+[webhooks]
+api_version = "2026-01"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "write_app_proxy,read_inventory,read_locales,read_locations,read_orders,read_returns"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ "https://rsl-services-logistics.fly.dev/auth/callback" ]
+
+[app_proxy]
+url = "https://rsl-services-logistics.fly.dev"
+subpath = "logistics"
+prefix = "apps"
