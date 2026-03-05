@@ -25,6 +25,8 @@ interface SupplierDashboardProps {
   canShowDebug?: boolean;
   showDebug?: boolean;
   onToggleDebug?: () => void;
+  onRunApiProbe?: () => void | Promise<void>;
+  isApiProbeRunning?: boolean;
   onNavigateToPurchaseOrders: () => void;
 }
 
@@ -212,6 +214,8 @@ export function SupplierDashboard({
                                    canShowDebug = false,
                                    showDebug = false,
                                    onToggleDebug,
+                                   onRunApiProbe,
+                                   isApiProbeRunning = false,
                                    onNavigateToPurchaseOrders,
                                  }: SupplierDashboardProps) {
   const [selectedStatus, setSelectedStatus] = useState<string>("all");
@@ -400,14 +404,24 @@ export function SupplierDashboard({
 
         <div style={headerRightStyle}>
           {canShowDebug ? (
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-              <input
-                type="checkbox"
-                checked={showDebug}
-                onChange={() => onToggleDebug?.()}
-              />
-              Show Debug
-            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={showDebug}
+                  onChange={() => onToggleDebug?.()}
+                />
+                Show Debug
+              </label>
+              <button
+                type="button"
+                onClick={() => void onRunApiProbe?.()}
+                disabled={isApiProbeRunning}
+                style={isApiProbeRunning ? btnDisabled : btnPrimary}
+              >
+                {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
+              </button>
+            </div>
           ) : null}
 
           <button

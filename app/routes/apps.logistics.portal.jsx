@@ -355,6 +355,13 @@ export async function loader({ request }) {
             tbl_purchaseOrder: { select: { purchaseOrderGID: true, shortName: true } },
           },
         },
+        // schema: tbl_shipment.tbljn_shipment_rslProduct[]
+        tbljn_shipment_rslProduct: {
+          include: {
+            // schema: tbljn_shipment_rslProduct.tlkp_rslProduct
+            tlkp_rslProduct: { select: { shortName: true, displayName: true, SKU: true } },
+          },
+        },
         // schema: tbl_shipment.tbl_shipmentNotes[]
         tbl_shipmentNotes: {
           orderBy: { createdAt: "desc" },
@@ -523,11 +530,27 @@ export async function loader({ request }) {
         }))
       : [];
 
+    const products = Array.isArray(s.tbljn_shipment_rslProduct)
+      ? s.tbljn_shipment_rslProduct.map((p) => ({
+          rslProductID: p.rslProductID,
+          shortName: p.tlkp_rslProduct?.shortName || p.rslProductID,
+          displayName: p.tlkp_rslProduct?.displayName || p.rslProductID,
+          SKU: p.tlkp_rslProduct?.SKU || null,
+          quantity: p.quantity,
+        }))
+      : [];
+
+    const productQuantities = {};
+    for (const p of products) {
+      productQuantities[p.rslProductID] = p.quantity;
+    }
+
     return {
       id: String(s.id),
       supplierId: s.companyId,
       supplierName: s.companyName,
-      products: [],
+      products,
+      productQuantities,
 
       containerNumber: s.containerNumber,
       containerSize: s.containerSize ?? "",

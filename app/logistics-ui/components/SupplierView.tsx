@@ -11,6 +11,8 @@ interface SupplierViewProps {
   canShowDebug?: boolean;
   showDebug?: boolean;
   onToggleDebug?: () => void;
+  onRunApiProbe?: () => void | Promise<void>;
+  isApiProbeRunning?: boolean;
 }
 
 export function SupplierView({
@@ -22,6 +24,8 @@ export function SupplierView({
                                canShowDebug = false,
                                showDebug = false,
                                onToggleDebug,
+                               onRunApiProbe,
+                               isApiProbeRunning = false,
                              }: SupplierViewProps) {
   // Only show shipments for this supplier
   const supplierShipments = useMemo(
@@ -45,14 +49,28 @@ export function SupplierView({
         </h1>
         <div className="flex items-center gap-3">
           {canShowDebug ? (
-            <label className="flex items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={showDebug}
-                onChange={() => onToggleDebug?.()}
-              />
-              Show Debug
-            </label>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={showDebug}
+                  onChange={() => onToggleDebug?.()}
+                />
+                Show Debug
+              </label>
+              <button
+                type="button"
+                onClick={() => void onRunApiProbe?.()}
+                disabled={isApiProbeRunning}
+                className={`px-3 py-2 rounded-lg text-sm font-semibold ${
+                  isApiProbeRunning
+                    ? "bg-slate-300 text-slate-700 cursor-not-allowed"
+                    : "bg-blue-600 text-white hover:bg-blue-700"
+                }`}
+              >
+                {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
+              </button>
+            </div>
           ) : null}
           {showLogout ? (
             <button

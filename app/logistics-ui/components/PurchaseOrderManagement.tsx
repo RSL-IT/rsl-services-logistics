@@ -8,7 +8,7 @@ import PurchaseOrderDetailsModal, {
   UIPurchaseOrder,
 } from "./PurchaseOrderDetailsModal";
 
-import { withShopParam } from "../utils/shop";
+import { adminPurchaseOrderUrlForCurrentShop, withShopParam } from "../utils/shop";
 
 type SortKey = "purchaseOrder" | "company" | "created" | "updated";
 
@@ -42,6 +42,8 @@ interface PurchaseOrderManagementProps {
   canShowDebug?: boolean;
   showDebug?: boolean;
   onToggleDebug?: () => void;
+  onRunApiProbe?: () => void | Promise<void>;
+  isApiProbeRunning?: boolean;
 }
 
 function safeStr(v: unknown) {
@@ -49,8 +51,7 @@ function safeStr(v: unknown) {
 }
 
 function adminPurchaseOrderUrl(gid: string) {
-  const clean = safeStr(gid);
-  return `https://admin.shopify.com/store/rogersoundlabs/purchase_orders/${encodeURIComponent(clean)}`;
+  return adminPurchaseOrderUrlForCurrentShop(safeStr(gid));
 }
 
 function parseCompanyLongName(companyName?: string | null) {
@@ -324,6 +325,8 @@ export function PurchaseOrderManagement({
                                           canShowDebug = false,
                                           showDebug = false,
                                           onToggleDebug,
+                                          onRunApiProbe,
+                                          isApiProbeRunning = false,
                                         }: PurchaseOrderManagementProps) {
   // Helper to get initial modal state from sessionStorage
   const getInitialModalState = () => {
@@ -697,14 +700,24 @@ export function PurchaseOrderManagement({
 
         <div style={headerRightStyle}>
           {canShowDebug ? (
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-              <input
-                type="checkbox"
-                checked={showDebug}
-                onChange={() => onToggleDebug?.()}
-              />
-              Show Debug
-            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={showDebug}
+                  onChange={() => onToggleDebug?.()}
+                />
+                Show Debug
+              </label>
+              <button
+                type="button"
+                onClick={() => void onRunApiProbe?.()}
+                disabled={isApiProbeRunning}
+                style={isApiProbeRunning ? btnDisabled : btnWarning}
+              >
+                {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
+              </button>
+            </div>
           ) : null}
 
           {!viewOnly && (

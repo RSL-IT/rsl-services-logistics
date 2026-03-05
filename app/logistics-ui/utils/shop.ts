@@ -18,6 +18,135 @@ export function getShopParam(): string | null {
   return shop ? String(shop).trim() : null;
 }
 
+const ADMIN_STORE_HANDLE_SESSION_KEY = "logistics_admin_store_handle";
+
+function readRememberedAdminStoreHandle(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = sessionStorage.getItem(ADMIN_STORE_HANDLE_SESSION_KEY);
+    return value ? String(value).trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberAdminStoreHandle(handle?: string | null) {
+  const clean = String(handle || "").trim().toLowerCase();
+  if (!clean || typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(ADMIN_STORE_HANDLE_SESSION_KEY, clean);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function extractStoreHandleFromPathLike(value?: string | null): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const direct = raw.match(/\/store\/([^/?#]+)/i);
+  if (direct && direct[1]) return decodeURIComponent(direct[1]).trim().toLowerCase();
+
+  const hostStyle = raw.match(/admin\.shopify\.com\/store\/([^/?#]+)/i);
+  if (hostStyle && hostStyle[1]) return decodeURIComponent(hostStyle[1]).trim().toLowerCase();
+
+  return null;
+}
+
+function decodeBase64UrlMaybe(value?: string | null): string | null {
+  const raw = String(value || "").trim();
+  if (!raw || typeof window === "undefined") return null;
+  try {
+    const normalized = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = normalized.length % 4;
+    const padded = pad ? normalized + "=".repeat(4 - pad) : normalized;
+    return window.atob(padded);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert a shop domain (e.g. "foo.myshopify.com") to Shopify Admin store handle ("foo").
+ */
+export function toAdminStoreHandle(shopLike?: string | null): string | null {
+  const raw = String(shopLike || "").trim().toLowerCase();
+  if (!raw) return null;
+
+  const noScheme = raw.replace(/^https?:\/\//, "");
+  const host = noScheme.split("/")[0] || "";
+  if (!host) return null;
+
+  if (host.endsWith(".myshopify.com")) {
+    return host.slice(0, -".myshopify.com".length) || null;
+  }
+  return host;
+}
+
+/**
+ * Resolve current Shopify Admin store handle from URL context.
+ * Tries shop param first, then host param, pathname/referrer, then cached value.
+ */
+export function getCurrentAdminStoreHandle(): string | null {
+  if (typeof window === "undefined") return null;
+
+  const fromShopParam = toAdminStoreHandle(getShopParam());
+  if (fromShopParam) {
+    rememberAdminStoreHandle(fromShopParam);
+    return fromShopParam;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const rawHostParam = params.get("host");
+  const fromHostParam = extractStoreHandleFromPathLike(rawHostParam);
+  if (fromHostParam) {
+    rememberAdminStoreHandle(fromHostParam);
+    return fromHostParam;
+  }
+
+  const decodedHost = decodeBase64UrlMaybe(rawHostParam);
+  const fromDecodedHost = extractStoreHandleFromPathLike(decodedHost);
+  if (fromDecodedHost) {
+    rememberAdminStoreHandle(fromDecodedHost);
+    return fromDecodedHost;
+  }
+
+  const fromPath = extractStoreHandleFromPathLike(window.location.pathname);
+  if (fromPath) {
+    rememberAdminStoreHandle(fromPath);
+    return fromPath;
+  }
+
+  const referrer = typeof document !== "undefined" ? document.referrer : "";
+  const fromReferrer = extractStoreHandleFromPathLike(referrer);
+  if (fromReferrer) {
+    rememberAdminStoreHandle(fromReferrer);
+    return fromReferrer;
+  }
+
+  return readRememberedAdminStoreHandle();
+}
+
+/**
+ * Normalize either plain numeric ID or gid://shopify/PurchaseOrder/<id> to <id>.
+ */
+export function normalizePurchaseOrderId(input: string): string {
+  const clean = String(input || "").trim();
+  return clean.replace(/^gid:\/\/shopify\/PurchaseOrder\//, "");
+}
+
+/**
+ * Build Shopify Admin Purchase Order URL using the current URL's ?shop= parameter.
+ */
+export function adminPurchaseOrderUrlForCurrentShop(
+  purchaseOrderId: string,
+  fallbackStore = "rogersoundlabs",
+): string {
+  const poId = normalizePurchaseOrderId(purchaseOrderId);
+  const store = getCurrentAdminStoreHandle() || fallbackStore;
+  return `https://admin.shopify.com/store/${encodeURIComponent(store)}/purchase_orders/${encodeURIComponent(poId)}`;
+}
+
 export function getLogisticsToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -83,6 +212,8 @@ function toPathString(to: unknown): string {
 export function withShopParam(to: ToLike): string {
   const path = toPathString(to);
   const shop = getShopParam();
+  const handle = toAdminStoreHandle(shop);
+  if (handle) rememberAdminStoreHandle(handle);
   const token = isProxyContext() ? getLogisticsToken() : null;
 
   // No shop available: just return a safe relative path

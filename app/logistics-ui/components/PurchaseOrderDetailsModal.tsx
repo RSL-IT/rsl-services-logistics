@@ -1,6 +1,7 @@
 // app/logistics-ui/components/PurchaseOrderDetailsModal.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { X, Trash2, Save } from "lucide-react";
+import { adminPurchaseOrderUrlForCurrentShop } from "../utils/shop";
 
 export type CompanyOption = {
   shortName: string;
@@ -111,8 +112,7 @@ function fmtDate(isoOrDate?: string | Date | null) {
 }
 
 function adminPurchaseOrderUrl(gid: string) {
-  const clean = safeStr(gid);
-  return `https://admin.shopify.com/store/rogersoundlabs/purchase_orders/${encodeURIComponent(clean)}`;
+  return adminPurchaseOrderUrlForCurrentShop(safeStr(gid));
 }
 
 function displayEventType(t?: string | null) {

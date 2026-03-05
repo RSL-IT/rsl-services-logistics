@@ -17,6 +17,7 @@ import type {
 } from "./components/types";
 
 import type { UIPurchaseOrder, RslModelOption } from "./components/PurchaseOrderDetailsModal";
+import { withShopParam } from "./utils/shop";
 
 // Re-export types that other components import from LogisticsApp
 export type { CompanyOption, LookupOption, PurchaseOrderOption } from "./components/types";
@@ -254,6 +255,11 @@ export default function LogisticsApp({
   );
   const [showDebug, setShowDebug] = useState(false);
   const canShowDebug = Boolean(debugInfo);
+  const [apiProbeRunning, setApiProbeRunning] = useState(false);
+  const [apiProbeResult, setApiProbeResult] = useState<any>(null);
+  const [apiProbeError, setApiProbeError] = useState<string | null>(null);
+  const [apiProbeRanAt, setApiProbeRanAt] = useState<string | null>(null);
+  const [apiProbeShop, setApiProbeShop] = useState<string | null>(null);
 
   const rslModelsSafe = useMemo(() => {
     if (!Array.isArray(rslModels)) return [] as RslModelOption[];
@@ -276,6 +282,70 @@ export default function LogisticsApp({
   useEffect(() => {
     if (!canShowDebug) setShowDebug(false);
   }, [canShowDebug]);
+
+  const runApiProbe = async () => {
+    if (!canShowDebug || apiProbeRunning) return;
+    setShowDebug(true);
+    setApiProbeRunning(true);
+    setApiProbeError(null);
+    setApiProbeResult(null);
+    setApiProbeRanAt(null);
+    setApiProbeShop(null);
+
+    try {
+      const response = await fetch(withShopParam("/apps/logistics/api-probe"), {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok || !payload?.ok) {
+        throw new Error(String(payload?.error || `API probe failed (${response.status}).`));
+      }
+
+      setApiProbeResult(payload?.probe ?? null);
+      setApiProbeRanAt(String(payload?.ranAt || new Date().toISOString()));
+      setApiProbeShop(payload?.shop ? String(payload.shop) : null);
+
+      if (typeof console !== "undefined") {
+        // eslint-disable-next-line no-console
+        console.info("[logistics ui] api probe success", payload);
+      }
+    } catch (err: any) {
+      const message = String(err?.message || "API probe failed.");
+      setApiProbeError(message);
+      setApiProbeRanAt(new Date().toISOString());
+      if (typeof console !== "undefined") {
+        // eslint-disable-next-line no-console
+        console.error("[logistics ui] api probe failed:", err);
+      }
+    } finally {
+      setApiProbeRunning(false);
+    }
+  };
+
+  const debugInfoWithProbe = useMemo(() => {
+    const hasProbeDetails = apiProbeRunning || apiProbeResult !== null || Boolean(apiProbeError) || Boolean(apiProbeRanAt);
+    if (!hasProbeDetails) return debugInfo;
+
+    const base =
+      debugInfo && typeof debugInfo === "object" && !Array.isArray(debugInfo)
+        ? { ...debugInfo }
+        : debugInfo != null
+          ? { debugInfo }
+          : {};
+
+    return {
+      ...base,
+      apiProbe: {
+        running: apiProbeRunning,
+        ranAt: apiProbeRanAt,
+        shop: apiProbeShop,
+        ...(apiProbeError ? { error: apiProbeError } : {}),
+        ...(apiProbeResult !== null ? { result: apiProbeResult } : {}),
+      },
+    };
+  }, [debugInfo, apiProbeRunning, apiProbeResult, apiProbeError, apiProbeRanAt, apiProbeShop]);
+
   if (unauthorizedMessage) {
     return (
       <div style={{ minHeight: "100vh", background: "#f8fafc", padding: 18 }}>
@@ -301,18 +371,37 @@ export default function LogisticsApp({
             </div>
           </div>
           {canShowDebug ? (
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-              <input
-                type="checkbox"
-                checked={showDebug}
-                onChange={() => setShowDebug((prev) => !prev)}
-              />
-              Show Debug
-            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={showDebug}
+                  onChange={() => setShowDebug((prev) => !prev)}
+                />
+                Show Debug
+              </label>
+              <button
+                type="button"
+                onClick={() => void runApiProbe()}
+                disabled={apiProbeRunning}
+                style={{
+                  borderRadius: 10,
+                  padding: "8px 10px",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  border: "1px solid transparent",
+                  cursor: apiProbeRunning ? "not-allowed" : "pointer",
+                  background: apiProbeRunning ? "#cbd5e1" : "#2563eb",
+                  color: apiProbeRunning ? "#475569" : "#fff",
+                }}
+              >
+                {apiProbeRunning ? "Running Probe..." : "Run API Probe"}
+              </button>
+            </div>
           ) : null}
         </div>
 
-        {debugInfo && showDebug ? (
+        {debugInfoWithProbe && showDebug ? (
           <div
             style={{
               marginBottom: 12,
@@ -325,7 +414,7 @@ export default function LogisticsApp({
               whiteSpace: "pre-wrap",
             }}
           >
-            {JSON.stringify(debugInfo, null, 2)}
+            {JSON.stringify(debugInfoWithProbe, null, 2)}
           </div>
         ) : null}
 
@@ -437,10 +526,12 @@ export default function LogisticsApp({
           shipments={shipmentsState}
           onLogout={logout}
           showLogout={showLogout}
-          debugInfo={debugInfo}
+          debugInfo={debugInfoWithProbe}
           canShowDebug={canShowDebug}
           showDebug={showDebug}
           onToggleDebug={() => setShowDebug((prev) => !prev)}
+          onRunApiProbe={() => void runApiProbe()}
+          isApiProbeRunning={apiProbeRunning}
         />
       )}
 
@@ -460,10 +551,12 @@ export default function LogisticsApp({
           onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
           onLogout={logout}
           showLogout={showLogout}
-          debugInfo={debugInfo}
+          debugInfo={debugInfoWithProbe}
           canShowDebug={canShowDebug}
           showDebug={showDebug}
           onToggleDebug={() => setShowDebug((prev) => !prev)}
+          onRunApiProbe={() => void runApiProbe()}
+          isApiProbeRunning={apiProbeRunning}
         />
       )}
 
@@ -482,10 +575,12 @@ export default function LogisticsApp({
           onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
           onLogout={logout}
           showLogout={showLogout}
-          debugInfo={debugInfo}
+          debugInfo={debugInfoWithProbe}
           canShowDebug={canShowDebug}
           showDebug={showDebug}
           onToggleDebug={() => setShowDebug((prev) => !prev)}
+          onRunApiProbe={() => void runApiProbe()}
+          isApiProbeRunning={apiProbeRunning}
         />
       )}
 
@@ -498,10 +593,12 @@ export default function LogisticsApp({
           onLogout={logout}
           showLogout={showLogout}
           currentUser={currentUserState}
-          debugInfo={debugInfo}
+          debugInfo={debugInfoWithProbe}
           canShowDebug={canShowDebug}
           showDebug={showDebug}
           onToggleDebug={() => setShowDebug((prev) => !prev)}
+          onRunApiProbe={() => void runApiProbe()}
+          isApiProbeRunning={apiProbeRunning}
         />
       )}
 
@@ -516,10 +613,12 @@ export default function LogisticsApp({
           onBack={() => setCurrentView(getDefaultDashboardView(currentUserState))}
           onLogout={logout}
           showLogout={showLogout}
-          debugInfo={debugInfo}
+          debugInfo={debugInfoWithProbe}
           canShowDebug={canShowDebug}
           showDebug={showDebug}
           onToggleDebug={() => setShowDebug((prev) => !prev)}
+          onRunApiProbe={() => void runApiProbe()}
+          isApiProbeRunning={apiProbeRunning}
         />
       )}
     </div>
