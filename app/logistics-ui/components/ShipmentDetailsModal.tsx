@@ -390,6 +390,8 @@ export default function ShipmentDetailsModal({
 
   // PI Form file state
   const [piFile, setPiFile] = useState<File | null>(null);
+  const existingPiUrl = norm((shipment as any).supplierPiUrl);
+  const existingPiFileName = norm((shipment as any).supplierPiFileName);
 
   // Track quantities for each product (keyed by rslModelID)
   // Initialize from saved shipment product quantities if editing existing shipment
@@ -876,113 +878,137 @@ export default function ShipmentDetailsModal({
           <div style={{ ...cardStyle, marginBottom: 12 }} className="shipment-details-card">
             <div style={sectionTitleStyle}>Pro Forma Invoice</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {/* Show existing PI Form if available */}
-              {(shipment as any).supplierPiUrl && !piFile && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                    background: "#f0fdf4",
-                    border: "1px solid #bbf7d0",
-                    borderRadius: 10,
-                    padding: "10px 14px",
-                  }}
-                >
-                  <span style={{ fontSize: 13, fontWeight: 700, color: "#166534", flex: 1 }}>
-                    {(shipment as any).supplierPiFileName || "PI Form uploaded"}
-                  </span>
+              {isSupplier ? (
+                existingPiUrl ? (
                   <a
-                    href={(shipment as any).supplierPiUrl}
+                    href={existingPiUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                      padding: "6px 12px",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      color: "#16a34a",
-                      background: "#fff",
-                      border: "1px solid #16a34a",
-                      borderRadius: 8,
-                      textDecoration: "none",
-                      cursor: "pointer",
-                    }}
-                  >
-                    View PI
-                  </a>
-                </div>
-              )}
-
-              {/* Show selected file */}
-              {piFile && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                    background: "#eff6ff",
-                    border: "1px solid #bfdbfe",
-                    borderRadius: 10,
-                    padding: "10px 14px",
-                  }}
-                >
-                  <span style={{ fontSize: 13, fontWeight: 700, color: "#1d4ed8", flex: 1 }}>
-                    New file: {piFile.name}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setPiFile(null)}
-                    style={{
-                      padding: "6px 12px",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      color: "#dc2626",
-                      background: "#fff",
-                      border: "1px solid #dc2626",
-                      borderRadius: 8,
-                      cursor: "pointer",
-                    }}
-                    disabled={isSaving}
-                  >
-                    Remove
-                  </button>
-                </div>
-              )}
-
-              {/* File input */}
-              {canEdit && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                  }}
-                >
-                  <input
-                    type="file"
-                    accept="application/pdf"
-                    disabled={isSaving}
-                    onChange={(e) => {
-                      const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
-                      setPiFile(f);
-                    }}
-                    style={{
                       fontSize: 13,
+                      fontWeight: 700,
+                      color: "#2563eb",
+                      textDecoration: "underline",
                     }}
-                  />
-                  <span style={{ fontSize: 12, color: "#64748b" }}>
-                    PDF only, max 20MB
-                  </span>
-                </div>
-              )}
+                  >
+                    {existingPiFileName || "View Pro Forma Invoice PDF"}
+                  </a>
+                ) : (
+                  <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
+                    Not yet added.
+                  </div>
+                )
+              ) : (
+                <>
+                  {/* Show existing PI Form if available */}
+                  {existingPiUrl && !piFile && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                        background: "#f0fdf4",
+                        border: "1px solid #bbf7d0",
+                        borderRadius: 10,
+                        padding: "10px 14px",
+                      }}
+                    >
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#166534", flex: 1 }}>
+                        {existingPiFileName || "PI Form uploaded"}
+                      </span>
+                      <a
+                        href={existingPiUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          padding: "6px 12px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: "#16a34a",
+                          background: "#fff",
+                          border: "1px solid #16a34a",
+                          borderRadius: 8,
+                          textDecoration: "none",
+                          cursor: "pointer",
+                        }}
+                      >
+                        View PI
+                      </a>
+                    </div>
+                  )}
 
-              {!canEdit && !(shipment as any).supplierPiUrl && (
-                <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
-                  Upload your Pro Forma Invoice when available.
-                </div>
+                  {/* Show selected file */}
+                  {piFile && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                        background: "#eff6ff",
+                        border: "1px solid #bfdbfe",
+                        borderRadius: 10,
+                        padding: "10px 14px",
+                      }}
+                    >
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#1d4ed8", flex: 1 }}>
+                        New file: {piFile.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setPiFile(null)}
+                        style={{
+                          padding: "6px 12px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: "#dc2626",
+                          background: "#fff",
+                          border: "1px solid #dc2626",
+                          borderRadius: 8,
+                          cursor: "pointer",
+                        }}
+                        disabled={isSaving}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+
+                  {/* File input */}
+                  {canEdit && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                      }}
+                    >
+                      <input
+                        type="file"
+                        accept="application/pdf"
+                        disabled={isSaving}
+                        onChange={(e) => {
+                          const f = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+                          setPiFile(f);
+                        }}
+                        style={{
+                          fontSize: 13,
+                        }}
+                      />
+                      <span style={{ fontSize: 12, color: "#64748b" }}>
+                        PDF only, max 20MB
+                      </span>
+                    </div>
+                  )}
+
+                  {!canEdit && !existingPiUrl && (
+                    <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>
+                      Upload your Pro Forma Invoice when available.
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
