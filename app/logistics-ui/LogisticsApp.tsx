@@ -91,6 +91,8 @@ interface LogisticsAppProps {
   currentUser?: UIUser | null;
   initialError?: string | null;
   isEmbedded?: boolean;
+  isProxy?: boolean;
+  debugInfo?: any;
 }
 
 function normalizeLookup(list: RawLookup[] | null | undefined): LookupOption[] {
@@ -161,10 +163,26 @@ export default function LogisticsApp({
                                        currentUser,
                                        initialError,
                                        isEmbedded = false,
+                                       isProxy = false,
+                                       debugInfo = null,
                                      }: LogisticsAppProps) {
   // Support both naming conventions: shipments/initialShipments, users/initialUsers
   const shipmentsData = shipments ?? initialShipments;
   const usersData = users ?? initialUsers;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const url = new URL(window.location.href);
+      const token = url.searchParams.get("logistics_token");
+      if (!token) return;
+      sessionStorage.setItem("logistics_token", token);
+      url.searchParams.delete("logistics_token");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    } catch {
+      // ignore token handling errors
+    }
+  }, []);
 
   // Session storage keys
   const SESSION_KEY = "logistics_session";
@@ -234,6 +252,8 @@ export default function LogisticsApp({
   const [purchaseOrdersState, setPurchaseOrdersState] = useState<UIPurchaseOrder[]>(
     Array.isArray(purchaseOrders) ? purchaseOrders : [],
   );
+  const [showDebug, setShowDebug] = useState(false);
+  const canShowDebug = Boolean(debugInfo);
 
   const rslModelsSafe = useMemo(() => {
     if (!Array.isArray(rslModels)) return [] as RslModelOption[];
@@ -251,6 +271,80 @@ export default function LogisticsApp({
     if (currentUser) return currentUser;
     return null;
   });
+
+  const unauthorizedMessage = initialError && !currentUserState && isEmbedded;
+  useEffect(() => {
+    if (!canShowDebug) setShowDebug(false);
+  }, [canShowDebug]);
+  if (unauthorizedMessage) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#f8fafc", padding: 18 }}>
+        <div
+          style={{
+            background: "#1e40af",
+            color: "#fff",
+            borderRadius: 14,
+            padding: "14px 16px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            boxShadow: "0 12px 30px rgba(15,23,42,0.15)",
+            marginBottom: 14,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: 0.2 }}>
+              RSL Logistics Internal Dashboard
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.92, marginTop: 2 }}>
+              Not Logged in
+            </div>
+          </div>
+          {canShowDebug ? (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={showDebug}
+                onChange={() => setShowDebug((prev) => !prev)}
+              />
+              Show Debug
+            </label>
+          ) : null}
+        </div>
+
+        {debugInfo && showDebug ? (
+          <div
+            style={{
+              marginBottom: 12,
+              background: "#fef3c7",
+              border: "1px solid #fcd34d",
+              borderRadius: 12,
+              padding: 12,
+              color: "#7c2d12",
+              fontSize: 12,
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {JSON.stringify(debugInfo, null, 2)}
+          </div>
+        ) : null}
+
+        <div
+          style={{
+            background: "#fff",
+            border: "1px solid #e5e7eb",
+            borderRadius: 14,
+            boxShadow: "0 10px 24px rgba(15,23,42,0.06)",
+            padding: 14,
+          }}
+        >
+          <div style={{ fontSize: 13, color: "#991b1b", fontWeight: 700 }}>
+            {initialError}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Persist session state to sessionStorage whenever it changes
   useEffect(() => {
@@ -333,6 +427,7 @@ export default function LogisticsApp({
           onLogin={handleLogin}
           users={usersState}
           initialError={initialError ?? null}
+          isProxy={isProxy}
         />
       )}
 
@@ -342,6 +437,10 @@ export default function LogisticsApp({
           shipments={shipmentsState}
           onLogout={logout}
           showLogout={showLogout}
+          debugInfo={debugInfo}
+          canShowDebug={canShowDebug}
+          showDebug={showDebug}
+          onToggleDebug={() => setShowDebug((prev) => !prev)}
         />
       )}
 
@@ -361,6 +460,10 @@ export default function LogisticsApp({
           onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
           onLogout={logout}
           showLogout={showLogout}
+          debugInfo={debugInfo}
+          canShowDebug={canShowDebug}
+          showDebug={showDebug}
+          onToggleDebug={() => setShowDebug((prev) => !prev)}
         />
       )}
 
@@ -379,6 +482,10 @@ export default function LogisticsApp({
           onNavigateToPurchaseOrders={() => setCurrentView("purchaseOrders")}
           onLogout={logout}
           showLogout={showLogout}
+          debugInfo={debugInfo}
+          canShowDebug={canShowDebug}
+          showDebug={showDebug}
+          onToggleDebug={() => setShowDebug((prev) => !prev)}
         />
       )}
 
@@ -391,6 +498,10 @@ export default function LogisticsApp({
           onLogout={logout}
           showLogout={showLogout}
           currentUser={currentUserState}
+          debugInfo={debugInfo}
+          canShowDebug={canShowDebug}
+          showDebug={showDebug}
+          onToggleDebug={() => setShowDebug((prev) => !prev)}
         />
       )}
 
@@ -405,6 +516,10 @@ export default function LogisticsApp({
           onBack={() => setCurrentView(getDefaultDashboardView(currentUserState))}
           onLogout={logout}
           showLogout={showLogout}
+          debugInfo={debugInfo}
+          canShowDebug={canShowDebug}
+          showDebug={showDebug}
+          onToggleDebug={() => setShowDebug((prev) => !prev)}
         />
       )}
     </div>

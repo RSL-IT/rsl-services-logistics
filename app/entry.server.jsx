@@ -7,14 +7,65 @@ import { addDocumentResponseHeaders } from "~/shopify.server";
 import isbot from "~/utils/isbot.server";
 
 const ABORT_DELAY = 5000;
+const ASSET_BASE = normalizeAssetBase(
+  process.env.LOGISTICS_ASSET_BASE ||
+    (process.env.NODE_ENV === "production" ? "/apps/logistics/" : "/")
+);
+
+function normalizeAssetBase(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "/";
+  const withLeading = raw.startsWith("/") ? raw : `/${raw}`;
+  return withLeading.endsWith("/") ? withLeading : `${withLeading}/`;
+}
+
+function rewriteAssetPath(value) {
+  const raw = String(value || "");
+  if (!raw) return raw;
+  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  if (ASSET_BASE !== "/" && raw.startsWith(ASSET_BASE)) return raw;
+  if (raw.startsWith("/assets/")) return `${ASSET_BASE}assets/${raw.slice("/assets/".length)}`;
+  if (raw.startsWith("/build/")) return `${ASSET_BASE}build/${raw.slice("/build/".length)}`;
+  return raw;
+}
+
+function rewriteManifest(manifest) {
+  if (!manifest || ASSET_BASE === "/") return manifest;
+  const next = {
+    ...manifest,
+    url: rewriteAssetPath(manifest.url),
+    entry: {
+      ...manifest.entry,
+      module: rewriteAssetPath(manifest.entry?.module),
+      imports: (manifest.entry?.imports || []).map(rewriteAssetPath),
+      css: (manifest.entry?.css || []).map(rewriteAssetPath),
+    },
+    routes: {},
+  };
+
+  for (const [key, route] of Object.entries(manifest.routes || {})) {
+    next.routes[key] = {
+      ...route,
+      module: rewriteAssetPath(route.module),
+      imports: (route.imports || []).map(rewriteAssetPath),
+      css: (route.css || []).map(rewriteAssetPath),
+    };
+  }
+
+  return next;
+}
 
 export default function handleRequest(request, status, headers, remixContext) {
   const ua = request.headers.get("user-agent") || "";
   const bot = isbot(ua);
+  const context = {
+    ...remixContext,
+    manifest: rewriteManifest(remixContext.manifest),
+  };
 
   return bot
-    ? streamForBots(request, status, headers, remixContext)
-    : streamForBrowsers(request, status, headers, remixContext);
+    ? streamForBots(request, status, headers, context)
+    : streamForBrowsers(request, status, headers, context);
 }
 
 function streamForBrowsers(request, status, headers, remixContext) {

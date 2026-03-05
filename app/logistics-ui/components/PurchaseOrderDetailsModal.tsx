@@ -565,9 +565,20 @@ export function PurchaseOrderDetailsModal({
               ) : (
                 <div style={readOnlyBoxStyle}>
                   {viewOnly ? (
-                    <span style={{ fontWeight: 900, color: "#0f172a" }}>
-                      #{safeStr(purchaseOrder.shortName) || "-"}
-                    </span>
+                    currentPdfUrl ? (
+                      <a
+                        href={currentPdfUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "#2563eb", fontWeight: 900, textDecoration: "none" }}
+                      >
+                        #{safeStr(purchaseOrder.shortName) || "-"}
+                      </a>
+                    ) : (
+                      <span style={{ fontWeight: 900, color: "#0f172a" }}>
+                        #{safeStr(purchaseOrder.shortName) || "-"}
+                      </span>
+                    )
                   ) : (
                     <a
                       href={adminPurchaseOrderUrl(purchaseOrder.purchaseOrderGID)}

@@ -38,6 +38,10 @@ interface PurchaseOrderManagementProps {
   onBack: () => void;
   onLogout: () => void;
   showLogout?: boolean;
+  debugInfo?: any;
+  canShowDebug?: boolean;
+  showDebug?: boolean;
+  onToggleDebug?: () => void;
 }
 
 function safeStr(v: unknown) {
@@ -316,6 +320,10 @@ export function PurchaseOrderManagement({
                                           onBack,
                                           onLogout,
                                           showLogout = true,
+                                          debugInfo = null,
+                                          canShowDebug = false,
+                                          showDebug = false,
+                                          onToggleDebug,
                                         }: PurchaseOrderManagementProps) {
   // Helper to get initial modal state from sessionStorage
   const getInitialModalState = () => {
@@ -688,6 +696,17 @@ export function PurchaseOrderManagement({
         </div>
 
         <div style={headerRightStyle}>
+          {canShowDebug ? (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={showDebug}
+                onChange={() => onToggleDebug?.()}
+              />
+              Show Debug
+            </label>
+          ) : null}
+
           {!viewOnly && (
             <button
               type="button"
@@ -711,6 +730,23 @@ export function PurchaseOrderManagement({
           ) : null}
         </div>
       </div>
+
+      {debugInfo && showDebug ? (
+        <div
+          style={{
+            marginBottom: 14,
+            background: "#fef3c7",
+            border: "1px solid #fcd34d",
+            borderRadius: 12,
+            padding: 12,
+            color: "#7c2d12",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {JSON.stringify(debugInfo, null, 2)}
+        </div>
+      ) : null}
 
       <div style={cardStyle}>
         <div style={controlsRowStyle}>
@@ -746,43 +782,59 @@ export function PurchaseOrderManagement({
             <table style={tableStyle}>
               <thead>
               <tr>
-                <th style={thStyle} onClick={() => toggleSort("purchaseOrder")}>Purchase Order</th>
+                <th style={thStyle} onClick={() => toggleSort("purchaseOrder")}>Shopify Purchase Order</th>
                 <th style={thStyle} onClick={() => toggleSort("company")}>Company</th>
                 <th style={thStyle} onClick={() => toggleSort("created")}>Created</th>
                 <th style={thStyle} onClick={() => toggleSort("updated")}>Updated</th>
-                <th style={{ ...thStyle, cursor: "default" }}>Action</th>
               </tr>
               </thead>
 
               <tbody>
               {filteredSorted.length === 0 ? (
                 <tr>
-                  <td style={tdStyle} colSpan={5}>
+                  <td style={tdStyle} colSpan={4}>
                     <div style={subtleStyle}>No purchase orders found.</div>
                   </td>
                 </tr>
               ) : (
                 filteredSorted.map((po) => (
-                  <tr key={safeStr(po.id) || safeStr(po.purchaseOrderGID) || safeStr(po.shortName)}>
+                  <tr
+                    key={safeStr(po.id) || safeStr(po.purchaseOrderGID) || safeStr(po.shortName)}
+                    onClick={() => openView(po)}
+                    style={{ cursor: "pointer" }}
+                  >
                     <td style={tdStyle}>
-                      <a
-                        href={adminPurchaseOrderUrl(po.purchaseOrderGID)}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
-                      >
-                        #{safeStr(po.shortName) || "-"}
-                      </a>
+                      {viewOnly ? (
+                        safeStr(po.purchaseOrderPdfUrl) ? (
+                          <a
+                            href={safeStr(po.purchaseOrderPdfUrl)}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => event.stopPropagation()}
+                            style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
+                          >
+                            #{safeStr(po.shortName) || "-"}
+                          </a>
+                        ) : (
+                          <span style={{ fontWeight: 700, color: "#0f172a" }}>
+                            #{safeStr(po.shortName) || "-"}
+                          </span>
+                        )
+                      ) : (
+                        <a
+                          href={adminPurchaseOrderUrl(po.purchaseOrderGID)}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(event) => event.stopPropagation()}
+                          style={{ color: "#2563eb", fontWeight: 700, textDecoration: "none" }}
+                        >
+                          #{safeStr(po.shortName) || "-"}
+                        </a>
+                      )}
                     </td>
                     <td style={tdStyle}>{companyTextForRow(po)}</td>
                     <td style={tdStyle}>{createdTextForRow(po)}</td>
                     <td style={tdStyle}>{updatedTextForRow(po)}</td>
-                    <td style={tdStyle}>
-                      <button type="button" style={linkBtnStyle} onClick={() => openView(po)} disabled={isSaving}>
-                        <Eye size={14} />
-                        View
-                      </button>
-                    </td>
                   </tr>
                 ))
               )}

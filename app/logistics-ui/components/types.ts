@@ -82,4 +82,5 @@ export interface LoginProps {
   onLogin: OnLogin;
   users: UIUser[];
   initialError?: string | null;
+  isProxy?: boolean;
 }

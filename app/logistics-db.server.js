@@ -1,20 +1,7 @@
 // app/logistics-db.server.js
-
-import { PrismaClient } from "@prisma/client";
-
-let logisticsDb;
-
-/**
- * Avoid creating multiple PrismaClient instances in dev
- * (the standard Remix/Prisma pattern).
- */
-if (process.env.NODE_ENV === "production") {
-  logisticsDb = new PrismaClient();
-} else {
-  if (!global.__logisticsDb) {
-    global.__logisticsDb = new PrismaClient();
-  }
-  logisticsDb = global.__logisticsDb;
-}
+//
+// Reuse the same PrismaClient instance used by Shopify session/auth paths.
+// This avoids maintaining multiple pools against the same Postgres instance.
+import { prisma as logisticsDb } from "./db.server.js";
 
 export { logisticsDb };

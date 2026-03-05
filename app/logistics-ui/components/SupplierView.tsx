@@ -7,6 +7,10 @@ interface SupplierViewProps {
   shipments: Shipment[];   // ⬅ exactly what LogisticsApp passes
   onLogout: () => void;
   showLogout?: boolean;
+  debugInfo?: any;
+  canShowDebug?: boolean;
+  showDebug?: boolean;
+  onToggleDebug?: () => void;
 }
 
 export function SupplierView({
@@ -14,6 +18,10 @@ export function SupplierView({
                                shipments,
                                onLogout,
                                showLogout = true,
+                               debugInfo = null,
+                               canShowDebug = false,
+                               showDebug = false,
+                               onToggleDebug,
                              }: SupplierViewProps) {
   // Only show shipments for this supplier
   const supplierShipments = useMemo(
@@ -35,15 +43,44 @@ export function SupplierView({
         <h1 className="text-2xl font-bold text-gray-800">
           Supplier Portal – Shipments
         </h1>
-        {showLogout ? (
-          <button
-            onClick={onLogout}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-          >
-            Log Out
-          </button>
-        ) : null}
+        <div className="flex items-center gap-3">
+          {canShowDebug ? (
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={showDebug}
+                onChange={() => onToggleDebug?.()}
+              />
+              Show Debug
+            </label>
+          ) : null}
+          {showLogout ? (
+            <button
+              onClick={onLogout}
+              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+            >
+              Log Out
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      {debugInfo && showDebug ? (
+        <div
+          style={{
+            marginBottom: 14,
+            background: "#fef3c7",
+            border: "1px solid #fcd34d",
+            borderRadius: 12,
+            padding: 12,
+            color: "#7c2d12",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {JSON.stringify(debugInfo, null, 2)}
+        </div>
+      ) : null}
 
       {/* Details panel or table */}
       {selectedShipment ? (

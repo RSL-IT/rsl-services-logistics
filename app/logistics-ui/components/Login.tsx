@@ -3,12 +3,15 @@ import { useEffect, useState } from "react";
 import { useFetcher } from "@remix-run/react";
 import { Card, TextField, Button, Text, Banner, BlockStack } from "@shopify/polaris";
 import type { LoginProps } from "./types";
-import { getShopParam, withShopParam } from "../utils/shop";
+import { getShopParam, isProxyContext, withShopParam } from "../utils/shop";
 
-export function Login({ onLogin, users, initialError }: LoginProps) {
+export function Login({ onLogin, users, initialError, isProxy = false }: LoginProps) {
   const fetcher = useFetcher<any>();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [formAction, setFormAction] = useState(
+    "/apps/logistics/login"
+  );
 
   // Put focus into the first field on initial render.
   useEffect(() => {
@@ -19,10 +22,27 @@ export function Login({ onLogin, users, initialError }: LoginProps) {
     return () => clearTimeout(t);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const proxyMode = isProxy || isProxyContext();
+      if (proxyMode) {
+        const actionUrl = new URL(withShopParam("/apps/logistics/login"), window.location.origin);
+        actionUrl.searchParams.set("proxy_origin", window.location.origin);
+        setFormAction(`${actionUrl.pathname}${actionUrl.search}`);
+      } else {
+        setFormAction(withShopParam("/apps/logistics/login"));
+      }
+    } catch {
+      setFormAction("/apps/logistics/login");
+    }
+  }, []);
+
   const errorMessage =
     initialError ||
     (fetcher.data && fetcher.data.ok === false && fetcher.data.error) ||
     null;
+
 
   useEffect(() => {
     if (!fetcher.data) return;
@@ -44,7 +64,8 @@ export function Login({ onLogin, users, initialError }: LoginProps) {
     onLogin(activeRole, matchedUser, supplierId);
 
     const shop = getShopParam();
-    if (shop) {
+    const proxyMode = isProxy || isProxyContext();
+    if (shop && !proxyMode) {
       const authUrl = withShopParam("/auth");
       // Shopify OAuth should occur at the top level if embedded.
       setTimeout(() => {
@@ -57,6 +78,11 @@ export function Login({ onLogin, users, initialError }: LoginProps) {
         } catch {
           window.location.assign(authUrl);
         }
+      }, 0);
+    } else if (proxyMode) {
+      const proxyUrl = withShopParam("/apps/logistics/portal");
+      setTimeout(() => {
+        window.location.assign(proxyUrl);
       }, 0);
     }
   }, [fetcher.data, onLogin, users]);
@@ -75,7 +101,7 @@ export function Login({ onLogin, users, initialError }: LoginProps) {
             </Banner>
           ) : null}
 
-          <fetcher.Form method="post" action="/apps/logistics/login">
+          <fetcher.Form method="post" action={formAction}>
             <BlockStack gap="300">
               <TextField
                 label="Email"
@@ -101,7 +127,7 @@ export function Login({ onLogin, users, initialError }: LoginProps) {
           </fetcher.Form>
 
           <Text as="p" tone="subdued">
-            If your account does not yet have a password set, you can sign in and set it later.
+            If you do not have an account, please contact RSL directly to set up a login and password.
           </Text>
         </BlockStack>
       </Card>

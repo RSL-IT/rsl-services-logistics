@@ -32,8 +32,12 @@ import { json } from "@remix-run/node";
 import bcrypt from "bcryptjs";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
+import { getLogisticsUserFromRequest } from "~/logistics-auth.server";
 
 const INTERNAL_COMPANY_ID = "RSL";
+const TX_OPTIONS = { maxWait: 10_000, timeout: 10_000 };
+const TX_RETRY_ATTEMPTS = 3;
+const TX_RETRY_BASE_DELAY_MS = 150;
 
 function normalizeUserTypeForDb(input) {
   const raw = String(input || "").trim().toLowerCase();
@@ -103,6 +107,33 @@ function mapDbPermissionSetToUi(dbShortNameSet) {
   };
 }
 
+function isTransactionStartTimeout(err) {
+  if (!err || typeof err !== "object") return false;
+  if (err.code !== "P2028") return false;
+
+  const message = String(err?.meta?.error || err?.message || "").toLowerCase();
+  return message.includes("unable to start a transaction");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTransactionStartRetry(run) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await run();
+    } catch (err) {
+      if (!isTransactionStartTimeout(err) || attempt >= TX_RETRY_ATTEMPTS - 1) {
+        throw err;
+      }
+      attempt += 1;
+      await sleep(TX_RETRY_BASE_DELAY_MS * attempt);
+    }
+  }
+}
+
 async function readPayload(request) {
   const contentType = request.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
@@ -149,6 +180,14 @@ function mapDbUserToUi(dbUser) {
 
 export async function action({ request }) {
   const debug = { stage: "start", proxyVerified: false };
+  const actor = await getLogisticsUserFromRequest(request);
+
+  if (!actor) {
+    return json({ success: false, error: "Unauthorized." }, { status: 401 });
+  }
+  if (String(actor.userType || "").toLowerCase().includes("supplier")) {
+    return json({ success: false, error: "Not authorized." }, { status: 403 });
+  }
 
   // Best-effort app proxy verification
   try {
@@ -237,8 +276,8 @@ export async function action({ request }) {
 
       const passwordHash = await bcrypt.hash(password, 10);
 
-      const created = await logisticsDb.$transaction(async (tx) => {
-        const dbUser = await tx.tbl_logisticsUser.create({
+      const created = await withTransactionStartRetry(() =>
+        logisticsDb.tbl_logisticsUser.create({
           data: {
             email,
             displayName: name || null,
@@ -247,21 +286,15 @@ export async function action({ request }) {
             userType: userTypeDb,
             companyID,
             updatedAt: new Date(),
+            tbljn_logisticsUser_permission: {
+              createMany: {
+                data: perms.map((p) => ({ permissionID: p.id })),
+              },
+            },
           },
-        });
-
-        await tx.tbljn_logisticsUser_permission.createMany({
-          data: perms.map((p) => ({
-            logisticsUserID: dbUser.id,
-            permissionID: p.id,
-          })),
-        });
-
-        return tx.tbl_logisticsUser.findUnique({
-          where: { id: dbUser.id },
           include: { tbljn_logisticsUser_permission: { include: { tlkp_permission: true } } },
-        });
-      });
+        }),
+      );
 
       return json({ success: true, user: mapDbUserToUi(created), debug }, { status: 200 });
     }
@@ -331,35 +364,28 @@ export async function action({ request }) {
         );
       }
 
-      const updated = await logisticsDb.$transaction(async (tx) => {
-        const baseData = {
-          email,
-          displayName: name || null,
-          isActive,
-          companyID,
-          userType: existing.userType,
-        };
+      const passwordHash = password ? await bcrypt.hash(password, 10) : null;
 
-        const dataToUpdate = password
-          ? { ...baseData, password: await bcrypt.hash(password, 10) }
-          : baseData;
-
-        await tx.tbl_logisticsUser.update({ where: { id }, data: dataToUpdate });
-
-        // Replace permissions
-        await tx.tbljn_logisticsUser_permission.deleteMany({ where: { logisticsUserID: id } });
-        await tx.tbljn_logisticsUser_permission.createMany({
-          data: perms.map((p) => ({
-            logisticsUserID: id,
-            permissionID: p.id,
-          })),
-        });
-
-        return tx.tbl_logisticsUser.findUnique({
+      const updated = await withTransactionStartRetry(() =>
+        logisticsDb.tbl_logisticsUser.update({
           where: { id },
+          data: {
+            email,
+            displayName: name || null,
+            isActive,
+            companyID,
+            userType: existing.userType,
+            ...(passwordHash ? { password: passwordHash } : {}),
+            tbljn_logisticsUser_permission: {
+              deleteMany: {},
+              createMany: {
+                data: perms.map((p) => ({ permissionID: p.id })),
+              },
+            },
+          },
           include: { tbljn_logisticsUser_permission: { include: { tlkp_permission: true } } },
-        });
-      });
+        }),
+      );
 
       return json({ success: true, user: mapDbUserToUi(updated), debug }, { status: 200 });
     }
@@ -372,10 +398,15 @@ export async function action({ request }) {
         return json({ success: false, error: "Missing user id.", debug }, { status: 200 });
       }
 
-      await logisticsDb.$transaction(async (tx) => {
-        await tx.tbljn_logisticsUser_permission.deleteMany({ where: { logisticsUserID: id } });
-        await tx.tbl_logisticsUser.delete({ where: { id } });
-      });
+      await withTransactionStartRetry(() =>
+        logisticsDb.$transaction(
+          [
+            logisticsDb.tbljn_logisticsUser_permission.deleteMany({ where: { logisticsUserID: id } }),
+            logisticsDb.tbl_logisticsUser.delete({ where: { id } }),
+          ],
+          TX_OPTIONS,
+        ),
+      );
 
       return json({ success: true, deletedId: String(id), debug }, { status: 200 });
     }
@@ -384,6 +415,16 @@ export async function action({ request }) {
     return json({ success: false, error: "Unknown intent.", debug }, { status: 200 });
   } catch (err) {
     console.error("[logistics users] unexpected error:", err, debug);
+    if (isTransactionStartTimeout(err)) {
+      return json(
+        {
+          success: false,
+          error: "Database is busy. Please retry in a few seconds.",
+          debug: { ...debug, caught: true, transientDbBusy: true },
+        },
+        { status: 200 },
+      );
+    }
     return json(
       {
         success: false,

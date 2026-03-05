@@ -21,6 +21,10 @@ interface SupplierDashboardProps {
 
   onLogout: () => void | Promise<void>;
   showLogout?: boolean;
+  debugInfo?: any;
+  canShowDebug?: boolean;
+  showDebug?: boolean;
+  onToggleDebug?: () => void;
   onNavigateToPurchaseOrders: () => void;
 }
 
@@ -192,18 +196,22 @@ const pillBase: React.CSSProperties = {
 };
 
 export function SupplierDashboard({
-                                    currentUser,
-                                    shipments,
-                                    companies,
-                                    containers,
-                                    originPorts,
-                                    destinationPorts,
-                                    bookingAgents,
-                                    deliveryAddresses,
-                                    purchaseOrders,
-                                    onShipmentsChange,
+                                   currentUser,
+                                   shipments,
+                                   companies,
+                                   containers,
+                                   originPorts,
+                                   destinationPorts,
+                                   bookingAgents,
+                                   deliveryAddresses,
+                                   purchaseOrders,
+                                   onShipmentsChange,
                                    onLogout,
                                    showLogout = true,
+                                   debugInfo = null,
+                                   canShowDebug = false,
+                                   showDebug = false,
+                                   onToggleDebug,
                                    onNavigateToPurchaseOrders,
                                  }: SupplierDashboardProps) {
   const [selectedStatus, setSelectedStatus] = useState<string>("all");
@@ -391,6 +399,17 @@ export function SupplierDashboard({
         </div>
 
         <div style={headerRightStyle}>
+          {canShowDebug ? (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={showDebug}
+                onChange={() => onToggleDebug?.()}
+              />
+              Show Debug
+            </label>
+          ) : null}
+
           <button
             onClick={onNavigateToPurchaseOrders}
             style={btnPrimary}
@@ -405,6 +424,23 @@ export function SupplierDashboard({
           ) : null}
         </div>
       </div>
+
+      {debugInfo && showDebug ? (
+        <div
+          style={{
+            marginBottom: 14,
+            background: "#fef3c7",
+            border: "1px solid #fcd34d",
+            borderRadius: 12,
+            padding: 12,
+            color: "#7c2d12",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {JSON.stringify(debugInfo, null, 2)}
+        </div>
+      ) : null}
 
       <div style={cardStyle}>
         <div style={controlsRowStyle}>

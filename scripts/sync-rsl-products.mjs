@@ -262,6 +262,7 @@ async function sync() {
   const toDeleteShortNames = new Set();
   const toDeleteVariantGids = new Set();
   const missingSku = [];
+  let fallbackSkuCount = 0;
 
   let created = 0;
   let updated = 0;

@@ -2,6 +2,7 @@ import { redirect, json } from "@remix-run/node";
 import { createCookieSessionStorage } from "@remix-run/node";
 import bcrypt from "bcryptjs";
 import { logisticsDb } from "~/logistics-db.server";
+import { verifyLogisticsToken } from "~/utils/logistics-token.server";
 
 const LOGISTICS_SESSION_KEY = "logisticsUserId";
 
@@ -32,6 +33,20 @@ export async function getLogisticsUser(request) {
 
   return logisticsDb.tbl_logisticsUser.findUnique({
     where: { id: Number(userId) },
+  });
+}
+
+export async function getLogisticsUserFromRequest(request) {
+  const sessionUser = await getLogisticsUser(request);
+  if (sessionUser) return sessionUser;
+
+  const url = new URL(request.url);
+  const token = url.searchParams.get("logistics_token") || request.headers.get("x-logistics-token");
+  const tokenUserId = verifyLogisticsToken(token);
+  if (!tokenUserId) return null;
+
+  return logisticsDb.tbl_logisticsUser.findUnique({
+    where: { id: Number(tokenUserId) },
   });
 }
 
@@ -94,7 +109,7 @@ export async function logoutLogisticsUser(request) {
 }
 
 export async function ensureLogisticsUserOrJson(request) {
-  const user = await getLogisticsUser(request);
+  const user = await getLogisticsUserFromRequest(request);
   if (!user) return json({ ok: false, error: "Unauthorized" }, { status: 401 });
   return user;
 }

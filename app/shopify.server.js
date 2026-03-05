@@ -46,6 +46,7 @@ const shopify = shopifyApp({
   apiSecretKey: API_SECRET,
   appUrl: APP_URL,              // must match the value in Partners > App setup
   authPathPrefix: "/auth",      // so /auth, /auth/login, /auth/callback, /auth/exit-iframe all work
+  useOnlineTokens: true,
   scopes: (process.env.SCOPES || "")
     .split(",")
     .map((s) => s.trim())

@@ -61,7 +61,7 @@ function resolveShop(shopOrRequest) {
   );
 }
 
-/** Load an offline session/token for the shop (with fallbacks). */
+/** Load a session/token for the shop. Prefer offline, then fall back to online. */
 export async function getOfflineSession(shopOrRequest) {
   const shop = resolveShop(shopOrRequest);
 
@@ -77,11 +77,31 @@ export async function getOfflineSession(shopOrRequest) {
         // ignore and fall through
       }
     }
-    // Fallback: enumerate sessions by shop and pick an offline one
+    // Fallback: enumerate sessions by shop and prefer offline, then online
     if (!session && app.sessionStorage.findSessionsByShop) {
       try {
         const list = await app.sessionStorage.findSessionsByShop(shop);
-        session = (list || []).find((s) => !s.isOnline) || null;
+        const all = list || [];
+        const offline = all.find((s) => !s.isOnline && s.accessToken) || null;
+        if (offline) {
+          session = offline;
+        } else {
+          const online = all
+            .filter((s) => s.isOnline && s.accessToken)
+            .sort((a, b) => {
+              const ax = a?.expires ? new Date(a.expires).getTime() : 0;
+              const bx = b?.expires ? new Date(b.expires).getTime() : 0;
+              return bx - ax;
+            })[0] || null;
+          session = online;
+          if (session) {
+            console.warn("[shopify-admin] using online session fallback from app.sessionStorage", {
+              shop,
+              id: session.id || null,
+              expires: session.expires || null,
+            });
+          }
+        }
       } catch {
         // ignore and fall through
       }
@@ -91,18 +111,32 @@ export async function getOfflineSession(shopOrRequest) {
     }
   }
 
-  // 2) Prisma Session table fallback (your schema defines model Session)
-  const prismaSession = await prisma.session.findFirst({
+  // 2) Prisma Session table fallback (prefer offline, then online)
+  const prismaOffline = await prisma.session.findFirst({
     where: { shop, isOnline: false },
     orderBy: [{ expires: "desc" }],
   });
 
-  if (prismaSession?.accessToken) {
-    return { shop, accessToken: prismaSession.accessToken, raw: prismaSession };
+  if (prismaOffline?.accessToken) {
+    return { shop, accessToken: prismaOffline.accessToken, raw: prismaOffline };
+  }
+
+  const prismaOnline = await prisma.session.findFirst({
+    where: { shop, isOnline: true },
+    orderBy: [{ expires: "desc" }],
+  });
+
+  if (prismaOnline?.accessToken) {
+    console.warn("[shopify-admin] using online session fallback from Prisma", {
+      shop,
+      id: prismaOnline.id,
+      expires: prismaOnline.expires || null,
+    });
+    return { shop, accessToken: prismaOnline.accessToken, raw: prismaOnline };
   }
 
   throw new Error(
-    `No offline session found for ${shop}. Install/authorize the app for this shop first.`
+    `No session found for ${shop}. Install/authorize the app for this shop first.`
   );
 }
 

@@ -2,6 +2,10 @@
 import { json } from "@remix-run/node";
 
 export const loader = ({ request }) => {
+  if (process.env.NODE_ENV === "production") {
+    return json({ ok: false, error: "Not found" }, { status: 404 });
+  }
+
   const url = new URL(request.url);
   const base = process.env.SHOPIFY_APP_URL || "(unset)";
   return json({

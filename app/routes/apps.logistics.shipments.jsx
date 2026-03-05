@@ -4,7 +4,7 @@ import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
 import { prisma } from "~/db.server";
 import { runAdminQuery } from "~/shopify-admin.server";
-import { getLogisticsUser } from "~/logistics-auth.server";
+import { getLogisticsUserFromRequest } from "~/logistics-auth.server";
 
 // Field labels for human-readable change descriptions
 const FIELD_LABELS = {
@@ -205,6 +205,7 @@ function mapDbShipmentToUi(s) {
     destinationPort: s.destinationPort ?? "",
 
     cargoReadyDate: toYyyyMmDd(s.cargoReadyDate),
+    etd: toYyyyMmDd(s.estimatedDeliveryToOrigin),
     estimatedDeliveryToOrigin: toYyyyMmDd(s.estimatedDeliveryToOrigin),
     supplierPi: s.supplierPi ?? "",
     supplierPiUrl: s.supplierPiUrl ?? "",
@@ -223,7 +224,6 @@ function mapDbShipmentToUi(s) {
     purchaseOrderGID: po.purchaseOrderGIDs[0] || "",
     purchaseOrderShortName: po.purchaseOrderShortNames[0] || "",
 
-    etd: "",
     actualDepartureDate: "",
     eta: toYyyyMmDd(s.etaDate),
     sealNumber: "",
@@ -426,6 +426,14 @@ async function uploadPiFormToShopifyFiles({ shop, file }) {
 
 export async function action({ request }) {
   const debug = { stage: "start", proxyVerified: false };
+  const actor = await getLogisticsUserFromRequest(request);
+
+  if (!actor || actor.isActive === false) {
+    return json({ success: false, error: "Unauthorized." }, { status: 401 });
+  }
+
+  const actorIsSupplier = String(actor.userType || "").toLowerCase().includes("supplier");
+  const actorCompanyId = String(actor.companyID || "").trim();
 
   try {
     await verifyProxyIfPresent(request);
@@ -503,7 +511,7 @@ export async function action({ request }) {
     if (intent === "create") {
       debug.stage = "create";
 
-      const supplierId = String(shipment.supplierId || "").trim();
+      const supplierId = actorIsSupplier ? actorCompanyId : String(shipment.supplierId || "").trim();
       const containerNumber = String(shipment.containerNumber || "").trim().toUpperCase();
 
       const containerSize = cleanStrOrNull(shipment.containerSize);
@@ -531,6 +539,10 @@ export async function action({ request }) {
 
       const purchaseOrderGIDs = normalizePurchaseOrderGIDsFromPayload(shipment);
       const productQuantities = normalizeProductQuantitiesFromPayload(shipment);
+
+      if (actorIsSupplier && !supplierId) {
+        return json({ success: false, error: "Supplier account has no company mapping." }, { status: 403 });
+      }
 
       if (!supplierId || !containerNumber) {
         return json(
@@ -617,6 +629,16 @@ export async function action({ request }) {
             });
           }
 
+          // Always add a history entry so create events are visible in the modal timeline.
+          await tx.tbl_shipmentNotes.create({
+            data: {
+              shipmentId: created.id,
+              userId: actor?.id ? Number(actor.id) : null,
+              content: "Shipment created.",
+              changes: null,
+            },
+          });
+
           return created.id;
         });
       } catch (err) {
@@ -644,9 +666,8 @@ export async function action({ request }) {
     if (intent === "update") {
       debug.stage = "update";
 
-      // Get the current user for tracking who made the update
-      const sessionUser = await getLogisticsUser(request);
-      const userId = sessionUser?.id ? Number(sessionUser.id) : null;
+      // Track who made the update
+      const userId = actor?.id ? Number(actor.id) : null;
 
       const id = Number(shipment.id);
       if (!id || Number.isNaN(id)) {
@@ -658,7 +679,13 @@ export async function action({ request }) {
         return json({ success: false, error: "Shipment not found.", debug }, { status: 200 });
       }
 
-      const supplierId = String(shipment.supplierId || "").trim() || existing.companyId;
+      if (actorIsSupplier && String(existing.companyId || "").trim() !== actorCompanyId) {
+        return json({ success: false, error: "Not authorized." }, { status: 403 });
+      }
+
+      const supplierId = actorIsSupplier
+        ? String(existing.companyId || "").trim()
+        : String(shipment.supplierId || "").trim() || existing.companyId;
 
       const company = await logisticsDb.tlkp_company.findUnique({
         where: { shortName: supplierId },
@@ -936,6 +963,10 @@ export async function action({ request }) {
       const existing = await logisticsDb.tbl_shipment.findUnique({ where: { id } });
       if (!existing) {
         return json({ success: false, error: "Shipment not found.", debug }, { status: 200 });
+      }
+
+      if (actorIsSupplier && String(existing.companyId || "").trim() !== actorCompanyId) {
+        return json({ success: false, error: "Not authorized." }, { status: 403 });
       }
 
       await logisticsDb.tbljn_shipment_purchaseOrder.deleteMany({

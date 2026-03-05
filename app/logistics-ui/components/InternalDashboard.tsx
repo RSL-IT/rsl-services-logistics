@@ -23,6 +23,10 @@ interface InternalDashboardProps {
 
   onLogout: () => void | Promise<void>;
   showLogout?: boolean;
+  debugInfo?: any;
+  canShowDebug?: boolean;
+  showDebug?: boolean;
+  onToggleDebug?: () => void;
   onNavigateToUsers: () => void;
   onNavigateToPurchaseOrders: () => void;
 }
@@ -231,6 +235,10 @@ export function InternalDashboard({
                                     onShipmentsChange,
                                     onLogout,
                                     showLogout = true,
+                                    debugInfo = null,
+                                    canShowDebug = false,
+                                    showDebug = false,
+                                    onToggleDebug,
                                     onNavigateToUsers,
                                     onNavigateToPurchaseOrders,
                                   }: InternalDashboardProps) {
@@ -425,6 +433,17 @@ export function InternalDashboard({
         </div>
 
         <div style={headerRightStyle}>
+          {canShowDebug ? (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={showDebug}
+                onChange={() => onToggleDebug?.()}
+              />
+              Show Debug
+            </label>
+          ) : null}
+
           <button
             onClick={onNavigateToUsers}
             disabled={!canManageUsers}
@@ -450,6 +469,23 @@ export function InternalDashboard({
           ) : null}
         </div>
       </div>
+
+      {debugInfo && showDebug ? (
+        <div
+          style={{
+            marginBottom: 14,
+            background: "#fef3c7",
+            border: "1px solid #fcd34d",
+            borderRadius: 12,
+            padding: 12,
+            color: "#7c2d12",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {JSON.stringify(debugInfo, null, 2)}
+        </div>
+      ) : null}
 
       <div style={cardStyle}>
         <div style={controlsRowStyle}>

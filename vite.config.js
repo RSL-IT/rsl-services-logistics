@@ -3,7 +3,20 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import { vitePlugin as remix } from "@remix-run/dev";
 
+function normalizeAssetBase(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "/";
+  const withLeading = raw.startsWith("/") ? raw : `/${raw}`;
+  return withLeading.endsWith("/") ? withLeading : `${withLeading}/`;
+}
+
+const assetBase = normalizeAssetBase(
+  process.env.LOGISTICS_ASSET_BASE ||
+    (process.env.NODE_ENV === "production" ? "/apps/logistics/" : "/")
+);
+
 export default defineConfig({
+  base: assetBase,
   plugins: [
     // Remix + Vite
     remix(),

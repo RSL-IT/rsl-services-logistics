@@ -13,6 +13,10 @@ interface UserManagementProps {
   onLogout: () => void;
   showLogout?: boolean;
   currentUser?: UIUser | null;
+  debugInfo?: any;
+  canShowDebug?: boolean;
+  showDebug?: boolean;
+  onToggleDebug?: () => void;
 }
 
 type FilterOption = "all" | "internal" | "supplier" | "active" | "inactive";
@@ -218,7 +222,7 @@ function isSupplier(user: UIUser): boolean {
 }
 
 function companyLabel(companyId: string | null | undefined, companies: CompanyOption[]) {
-  if (!companyId) return "-BLAH";
+  if (!companyId) return "RSL";
   const found = companies.find((c) => c.shortName === companyId);
   if (!found) return companyId;
   const display = String(found.displayName || "").trim();
@@ -246,6 +250,10 @@ export function UserManagement({
                                  onLogout,
                                  showLogout = true,
                                  currentUser = null,
+                                 debugInfo = null,
+                                 canShowDebug = false,
+                                 showDebug = false,
+                                 onToggleDebug,
                                }: UserManagementProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<FilterOption>("all");
@@ -377,6 +385,17 @@ export function UserManagement({
           </div>
         </div>
         <div style={headerRightStyle}>
+          {canShowDebug ? (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                checked={showDebug}
+                onChange={() => onToggleDebug?.()}
+              />
+              Show Debug
+            </label>
+          ) : null}
+
           <button type="button" onClick={onBack} disabled={isSaving} style={btnPrimary}>
             Back
           </button>
@@ -387,6 +406,23 @@ export function UserManagement({
           ) : null}
         </div>
       </div>
+
+      {debugInfo && showDebug ? (
+        <div
+          style={{
+            marginBottom: 14,
+            background: "#fef3c7",
+            border: "1px solid #fcd34d",
+            borderRadius: 12,
+            padding: 12,
+            color: "#7c2d12",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {JSON.stringify(debugInfo, null, 2)}
+        </div>
+      ) : null}
 
       <main style={mainStyle}>
         <div style={cardStyle}>

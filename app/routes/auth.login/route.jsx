@@ -8,6 +8,7 @@ export async function loader({ request }) {
   if (!shop) {
     return new Response("Missing ?shop", { status: 400 });
   }
-  return redirect(`/auth?shop=${encodeURIComponent(shop)}`);
+  const params = new URLSearchParams(url.searchParams);
+  params.set("shop", shop);
+  return redirect(`/auth?${params.toString()}`);
 }
-

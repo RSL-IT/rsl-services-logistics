@@ -167,11 +167,11 @@ async function syncRslProductsFromShopify(shop) {
               shortName,
               displayName,
               SKU: sku,
-                variantGID,
-              },
-            });
-            created += 1;
-          }
+              variantGID,
+            },
+          });
+          created += 1;
+        }
       }
     }
 
@@ -408,6 +408,16 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
     ],
   });
 
+  const stagedApiErrors = Array.isArray(stagedResp?.errors)
+    ? stagedResp.errors
+    : stagedResp?.errors
+      ? [stagedResp.errors]
+      : [];
+  if (stagedApiErrors.length) {
+    const msg = stagedApiErrors.map((e) => e?.message || "Shopify error").join("; ");
+    throw new Error(msg || "stagedUploadsCreate failed.");
+  }
+
   const stagedErrs = stagedResp?.data?.stagedUploadsCreate?.userErrors || [];
   if (stagedErrs.length) throw new Error(stagedErrs[0]?.message || "stagedUploadsCreate failed.");
 
@@ -416,7 +426,6 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
 
   // --- Upload to staged target ---
   const buf = Buffer.from(await file.arrayBuffer());
-
   const uploadRes = await fetch(String(target.url), {
     method: "PUT",
     body: buf,
@@ -477,13 +486,25 @@ async function uploadPdfToShopifyFiles({ shop, file }) {
 export async function loader({ request }) {
   const userOrRes = await ensureLogisticsUserOrJson(request);
   if (userOrRes instanceof Response) return userOrRes;
+  const user = userOrRes;
 
   const url = new URL(request.url);
   const intent = String(url.searchParams.get("intent") || "").trim();
+  const rawUserType = String(user?.userType || "").trim().toLowerCase();
+  const isSupplier = rawUserType.includes("supplier");
+  const supplierCompanyID = cleanStrOrNull(user?.companyID);
 
   // default to list
   if (!intent || intent === "list") {
     const rows = await logisticsDb.tbl_purchaseOrder.findMany({
+      where:
+        isSupplier
+          ? {
+              tbljn_purchaseOrder_company: {
+                some: { companyID: supplierCompanyID || "__NO_SUPPLIER_COMPANY__" },
+              },
+            }
+          : undefined,
       orderBy: [{ createdAt: "desc" }],
       select: {
         id: true,
@@ -534,6 +555,12 @@ export async function action({ request }) {
   const userOrRes = await ensureLogisticsUserOrJson(request);
   if (userOrRes instanceof Response) return userOrRes;
   const user = userOrRes;
+  const rawUserType = String(user?.userType || "").trim().toLowerCase();
+  const isSupplier = rawUserType.includes("supplier");
+
+  if (isSupplier) {
+    return json({ ok: false, error: "Not authorized." }, { status: 403 });
+  }
 
   try {
     const contentType = request.headers.get("content-type") || "";
@@ -621,7 +648,12 @@ export async function action({ request }) {
           if (pdfFile) pdfUrl = await uploadPdfToShopifyFiles({ shop, file: pdfFile });
 
           const po = await tx.tbl_purchaseOrder.create({
-            data: { shortName, purchaseOrderGID, purchaseOrderPdfUrl: pdfUrl },
+            data: {
+              shortName,
+              purchaseOrderGID,
+              purchaseOrderPdfUrl: pdfUrl,
+              updatedAt: new Date(),
+            },
             select: {
               id: true,
               shortName: true,
@@ -741,6 +773,7 @@ export async function action({ request }) {
         const po = await tx.tbl_purchaseOrder.update({
           where: { purchaseOrderGID },
           data: {
+            updatedAt: new Date(),
             ...(shortName ? { shortName } : {}),
             ...(newPdfUrl ? { purchaseOrderPdfUrl: newPdfUrl } : {}),
           },
@@ -820,11 +853,6 @@ export async function action({ request }) {
   if (!intent) return json({ ok: false, error: "Missing intent." }, { status: 400 });
 
   if (intent === "refresh-products") {
-    const rawUserType = String(user?.userType || "").trim().toLowerCase();
-    if (rawUserType.includes("supplier")) {
-      return json({ ok: false, error: "Not authorized." }, { status: 403 });
-    }
-
     const shop = await resolveShopForAdmin(request);
     if (!shop) {
       return json(

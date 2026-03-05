@@ -1,9 +1,15 @@
 // app/routes/apps.logistics.login.jsx
-import { json } from "@remix-run/node";
+import { json, redirect } from "@remix-run/node";
 import bcrypt from "bcryptjs";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
 import { commitLogisticsUserSession } from "~/logistics-auth.server";
+import { createLogisticsToken } from "~/utils/logistics-token.server";
+
+export async function loader({ request }) {
+  const url = new URL(request.url);
+  return redirect(`/apps/logistics/portal${url.search}`);
+}
 
 // API endpoint used by the Logistics UI login form.
 // - Allows passwordless login for legacy users with password=NULL.
@@ -45,7 +51,7 @@ export async function action({ request }) {
     const passwordPresent = password.trim().length > 0;
 
     if (!email) {
-      return json({ ok: false, error: "Email is required.", debug }, { status: 200 });
+      return json({ ok: false, error: "Email is required." }, { status: 200 });
     }
 
     debug.stage = "lookup-user";
@@ -69,7 +75,7 @@ export async function action({ request }) {
     });
 
     if (!candidate || candidate.isActive === false) {
-      return json({ ok: false, error: "Invalid credentials.", debug }, { status: 401 });
+      return json({ ok: false, error: "Invalid credentials." }, { status: 401 });
     }
 
     const hasPasswordHash = Boolean(candidate.password && String(candidate.password).trim());
@@ -77,16 +83,13 @@ export async function action({ request }) {
     // If user has a password set, require it and validate it.
     if (hasPasswordHash) {
       if (!passwordPresent) {
-        return json(
-          { ok: false, error: "Password is required for this account.", debug, stage: "missing_password" },
-          { status: 401 },
-        );
+        return json({ ok: false, error: "Password is required for this account." }, { status: 401 });
       }
 
       debug.stage = "check-password";
       const ok = await bcrypt.compare(password, String(candidate.password));
       if (!ok) {
-        return json({ ok: false, error: "Invalid credentials.", debug, stage: "bad_password" }, { status: 401 });
+        return json({ ok: false, error: "Invalid credentials." }, { status: 401 });
       }
     } else {
       // Legacy account: password=NULL → allow login (but signal it so you can later enforce).
@@ -112,6 +115,51 @@ export async function action({ request }) {
       needsPasswordSetup: debug.needsPasswordSetup || false,
     });
 
+    const url = new URL(request.url);
+    const isProxyRequest =
+      url.searchParams.has("signature") ||
+      url.searchParams.has("path_prefix") ||
+      url.searchParams.has("logged_in_customer_id") ||
+      Boolean(request.headers.get("x-shopify-shop-domain")) ||
+      request.headers.get("x-logistics-proxy") === "1" ||
+      (request.headers.get("referer") || "").includes("/apps/logistics");
+    const accept = request.headers.get("accept") || "";
+    const wantsHtml = accept.includes("text/html");
+
+    if (isProxyRequest) {
+      const token = createLogisticsToken(candidate.id);
+      const search = new URLSearchParams(url.search);
+      search.set("logistics_token", token);
+
+      const redirectPath = `/apps/logistics/portal?${search.toString()}`;
+      const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charSet="utf-8" />
+    <meta http-equiv="refresh" content="0;url=${redirectPath}" />
+    <title>Redirecting…</title>
+  </head>
+  <body>
+    <script>window.location.assign(${JSON.stringify(redirectPath)});</script>
+  </body>
+</html>`;
+
+      return new Response(html, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+          "Set-Cookie": setCookie,
+        },
+      });
+    }
+
+    if (wantsHtml) {
+      return redirect(`/apps/logistics/portal${url.search}`, {
+        headers: { "Set-Cookie": setCookie },
+      });
+    }
+
     return json(
       {
         ok: true,
@@ -119,7 +167,6 @@ export async function action({ request }) {
         role,
         supplierId,
         needsPasswordSetup: Boolean(debug.needsPasswordSetup),
-        debug,
       },
       {
         status: 200,
@@ -128,6 +175,6 @@ export async function action({ request }) {
     );
   } catch (err) {
     console.error("[logistics login] unexpected error:", err, debug);
-    return json({ ok: false, error: "Server error during login.", debug }, { status: 200 });
+    return json({ ok: false, error: "Server error during login." }, { status: 200 });
   }
 }

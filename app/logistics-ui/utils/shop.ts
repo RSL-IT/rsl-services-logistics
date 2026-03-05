@@ -18,6 +18,29 @@ export function getShopParam(): string | null {
   return shop ? String(shop).trim() : null;
 }
 
+export function getLogisticsToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return sessionStorage.getItem("logistics_token");
+  } catch {
+    return null;
+  }
+}
+
+export function isProxyContext(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+    if (params.has("signature") || params.has("path_prefix") || params.has("logged_in_customer_id")) {
+      return true;
+    }
+    return url.pathname.startsWith("/apps/logistics") && url.hostname.endsWith("rslspeakers.com");
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Convert either a string path, a {pathname,search,hash} object, or window.location into a path string.
  * If something unexpected is passed (e.g. a click event), return "/" instead of "/[object Object]".
@@ -60,6 +83,7 @@ function toPathString(to: unknown): string {
 export function withShopParam(to: ToLike): string {
   const path = toPathString(to);
   const shop = getShopParam();
+  const token = isProxyContext() ? getLogisticsToken() : null;
 
   // No shop available: just return a safe relative path
   if (!shop) {
@@ -74,6 +98,9 @@ export function withShopParam(to: ToLike): string {
   // If shop already present on the provided URL, keep it
   if (!u.searchParams.get("shop")) {
     u.searchParams.set("shop", shop);
+  }
+  if (token && !u.searchParams.get("logistics_token")) {
+    u.searchParams.set("logistics_token", token);
   }
 
   // Prefer returning a relative URL for same-origin navigation/fetch
