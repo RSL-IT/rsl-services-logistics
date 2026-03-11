@@ -33,6 +33,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Bring built assets
 COPY --from=build /app/build  ./build
 COPY --from=build /app/public ./public
+RUN mkdir -p ./app/assets
+COPY --from=build /app/app/assets/validation_PO.pdf ./app/assets/validation_PO.pdf
 
 EXPOSE 3000
 CMD ["npm", "run", "docker-start"]

@@ -18,7 +18,8 @@ const FIELD_LABELS = {
   cargoReadyDate: "Cargo Ready Date",
   estimatedDeliveryToOrigin: "Est. Delivery to Origin",
   supplierPi: "Supplier PI",
-  supplierPiFileName: "Pro Forma Invoice",
+  packingListFileName: "Packing List",
+  commercialInvoiceFileName: "Commercial Invoice",
   quantity: "Quantity",
   bookingNumber: "Booking #",
   bookingAgent: "Booking Agent",
@@ -26,6 +27,23 @@ const FIELD_LABELS = {
   deliveryAddress: "Delivery Address",
   status: "Status",
 };
+
+const FILE_CHANGE_FIELD_CONFIG = {
+  packingListFileName: { urlField: "packingListUrl" },
+  commercialInvoiceFileName: { urlField: "commercialInvoiceUrl" },
+};
+
+const PENDING_CONTAINER_PREFIX = "PENDING-";
+
+function buildPendingContainerPlaceholder() {
+  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `${PENDING_CONTAINER_PREFIX}${Date.now()}-${rand}`.toUpperCase();
+}
+
+function isPendingContainerPlaceholder(value) {
+  const s = String(value || "").trim().toUpperCase();
+  return s.startsWith(PENDING_CONTAINER_PREFIX);
+}
 
 function formatDateForDisplay(d) {
   if (!d) return "(empty)";
@@ -68,10 +86,10 @@ function detectChanges(existing, newData) {
     }
 
     if (oldCompare !== newCompare) {
-      // For Pro Forma Invoice, include the URL with the filename as JSON
-      if (field === "supplierPiFileName") {
-        const oldUrl = existing.supplierPiUrl || null;
-        const newUrl = newData.supplierPiUrl || null;
+      const fileChangeConfig = FILE_CHANGE_FIELD_CONFIG[field];
+      if (fileChangeConfig) {
+        const oldUrl = existing[fileChangeConfig.urlField] || null;
+        const newUrl = newData[fileChangeConfig.urlField] || null;
         changes.push({
           field: FIELD_LABELS[field] || field,
           from: oldVal ? JSON.stringify({ name: oldVal, url: oldUrl }) : "(none)",
@@ -115,6 +133,22 @@ function toYyyyMmDd(d) {
 function cleanStrOrNull(v) {
   const s = String(v ?? "").trim();
   return s ? s : null;
+}
+
+function validateUploadedPdf(file, label) {
+  if (!file) return null;
+
+  const name = String(file.name || "");
+  const type = String(file.type || "");
+  const looksPdf = type === "application/pdf" || name.toLowerCase().endsWith(".pdf");
+  if (!looksPdf) return `Only PDF uploads are supported for ${label}.`;
+
+  const maxBytes = 20 * 1024 * 1024;
+  if (typeof file.size === "number" && file.size > maxBytes) {
+    return `${label} PDF is too large (max 20MB).`;
+  }
+
+  return null;
 }
 
 function uniqStrings(arr) {
@@ -163,6 +197,9 @@ function pickPurchaseOrdersInfo(s) {
 
 function mapDbShipmentToUi(s) {
   const po = pickPurchaseOrdersInfo(s);
+  const rawContainerNumber = String(s.containerNumber ?? "").trim();
+  const statusLower = String(s.status ?? "").trim().toLowerCase();
+  const hidePendingPlaceholder = isPendingContainerPlaceholder(rawContainerNumber) && statusLower === "pending";
 
   // Map shipment notes/history
   const history = Array.isArray(s.tbl_shipmentNotes)
@@ -199,7 +236,7 @@ function mapDbShipmentToUi(s) {
     products,
     productQuantities,
 
-    containerNumber: s.containerNumber,
+    containerNumber: hidePendingPlaceholder ? "" : rawContainerNumber,
     containerSize: s.containerSize ?? "",
     portOfOrigin: s.portOfOrigin ?? "",
     destinationPort: s.destinationPort ?? "",
@@ -208,8 +245,10 @@ function mapDbShipmentToUi(s) {
     etd: toYyyyMmDd(s.estimatedDeliveryToOrigin),
     estimatedDeliveryToOrigin: toYyyyMmDd(s.estimatedDeliveryToOrigin),
     supplierPi: s.supplierPi ?? "",
-    supplierPiUrl: s.supplierPiUrl ?? "",
-    supplierPiFileName: s.supplierPiFileName ?? "",
+    packingListUrl: s.packingListUrl ?? "",
+    packingListFileName: s.packingListFileName ?? "",
+    commercialInvoiceUrl: s.commercialInvoiceUrl ?? "",
+    commercialInvoiceFileName: s.commercialInvoiceFileName ?? "",
     quantity: s.quantity != null ? String(s.quantity) : "",
     bookingNumber: s.bookingNumber ?? "",
     bookingAgent: s.bookingAgent ?? "",
@@ -276,6 +315,25 @@ async function validatePurchaseOrdersExist(tx, purchaseOrderGIDs) {
   }
 }
 
+async function validatePurchaseOrdersHaveProForma(tx, purchaseOrderGIDs) {
+  if (!purchaseOrderGIDs.length) return;
+
+  const found = await tx.tbl_purchaseOrder.findMany({
+    where: { purchaseOrderGID: { in: purchaseOrderGIDs } },
+    select: { purchaseOrderGID: true, proFormaInvoiceUrl: true },
+  });
+
+  const missingProForma = found
+    .filter((x) => !String(x.proFormaInvoiceUrl || "").trim())
+    .map((x) => String(x.purchaseOrderGID));
+
+  if (missingProForma.length) {
+    const err = new Error("PO_MISSING_PRO_FORMA");
+    err.missing = missingProForma;
+    throw err;
+  }
+}
+
 function normalizePurchaseOrderGIDsFromPayload(shipment) {
   // Preferred: purchaseOrderGIDs: string[]
   if (shipment && Array.isArray(shipment.purchaseOrderGIDs)) {
@@ -299,6 +357,134 @@ function normalizeProductQuantitiesFromPayload(shipment) {
     }
   }
   return result;
+}
+
+function normalizePoQuantitiesFromPayload(shipment) {
+  const raw = shipment?.poQuantities;
+  if (!raw || typeof raw !== "object") return {};
+
+  const out = {};
+  for (const [productIdRaw, rowRaw] of Object.entries(raw)) {
+    const productId = String(productIdRaw || "").trim();
+    if (!productId || !rowRaw || typeof rowRaw !== "object") continue;
+
+    const rowOut = {};
+    for (const [gidRaw, remainingRaw] of Object.entries(rowRaw)) {
+      const purchaseOrderGID = String(gidRaw || "").trim();
+      if (!purchaseOrderGID) continue;
+      const remainingText = String(remainingRaw ?? "").trim();
+      if (!/^\d+$/.test(remainingText)) continue;
+      const parsed = parseInt(remainingText, 10);
+      if (Number.isNaN(parsed) || parsed < 0) continue;
+      rowOut[purchaseOrderGID] = parsed;
+    }
+
+    if (Object.keys(rowOut).length) out[productId] = rowOut;
+  }
+  return out;
+}
+
+async function prepareCommittedQuantityUpdates(tx, {
+  purchaseOrderGIDs,
+  poQuantities,
+  productQuantities,
+}) {
+  const gids = uniqStrings(purchaseOrderGIDs || []);
+  if (!gids.length || !poQuantities || typeof poQuantities !== "object") return [];
+
+  const keyFor = (gid, productId) => `${gid}::${productId}`;
+  const requestedByKey = new Map();
+
+  for (const [productIdRaw, rowRaw] of Object.entries(poQuantities)) {
+    const productId = String(productIdRaw || "").trim();
+    if (!productId || !rowRaw || typeof rowRaw !== "object") continue;
+    for (const [gidRaw, remainingRaw] of Object.entries(rowRaw)) {
+      const gid = String(gidRaw || "").trim();
+      if (!gid || !gids.includes(gid)) continue;
+      const remaining = parseInt(String(remainingRaw ?? ""), 10);
+      if (Number.isNaN(remaining) || remaining < 0) continue;
+      requestedByKey.set(keyFor(gid, productId), {
+        purchaseOrderGID: gid,
+        rslProductID: productId,
+        remaining,
+      });
+    }
+  }
+
+  const requestedRows = [...requestedByKey.values()];
+  if (!requestedRows.length) return [];
+
+  const dbRows = await tx.tbljn_purchaseOrder_rslProduct.findMany({
+    where: {
+      OR: requestedRows.map((x) => ({
+        purchaseOrderGID: x.purchaseOrderGID,
+        rslProductID: x.rslProductID,
+      })),
+    },
+    select: {
+      purchaseOrderGID: true,
+      rslProductID: true,
+      initialQuantity: true,
+      committedQuantity: true,
+    },
+  });
+
+  const dbByKey = new Map(
+    dbRows.map((r) => [keyFor(r.purchaseOrderGID, r.rslProductID), r])
+  );
+
+  const desiredUsedByProduct = new Map();
+  const updates = [];
+  const conflicts = [];
+
+  for (const req of requestedRows) {
+    const db = dbByKey.get(keyFor(req.purchaseOrderGID, req.rslProductID));
+    if (!db) continue; // no PO/product reference, ignore
+
+    const initial = Number(db.initialQuantity) || 0;
+    const currentCommitted = Number(db.committedQuantity) || 0;
+    const currentAvailable = Math.max(0, initial - currentCommitted);
+    const remaining = Math.min(Math.max(req.remaining, 0), initial);
+    const desiredUsed = Math.max(0, initial - remaining);
+
+    if (desiredUsed > currentAvailable) {
+      conflicts.push(
+        `${req.purchaseOrderGID}/${req.rslProductID} requested ${desiredUsed}, available ${currentAvailable}`
+      );
+      continue;
+    }
+
+    desiredUsedByProduct.set(
+      req.rslProductID,
+      (desiredUsedByProduct.get(req.rslProductID) || 0) + desiredUsed
+    );
+
+    updates.push({
+      purchaseOrderGID: req.purchaseOrderGID,
+      rslProductID: req.rslProductID,
+      committedQuantity: desiredUsed,
+    });
+  }
+
+  const productQtyMap = new Map(
+    (productQuantities || []).map((pq) => [String(pq.rslProductID), Number(pq.quantity) || 0])
+  );
+  for (const [productId, desiredUsed] of desiredUsedByProduct.entries()) {
+    const expected = productQtyMap.get(productId) || 0;
+    if (expected !== desiredUsed) {
+      conflicts.push(
+        `${productId} container quantity mismatch (PO fields total ${desiredUsed}, This Container ${expected})`
+      );
+    }
+  }
+
+  if (conflicts.length) {
+    const err = new Error("PO_COMMITTED_CONFLICT");
+    err.details = conflicts;
+    throw err;
+  }
+
+  return updates;
 }
 
 function shopFromUrlString(urlStr) {
@@ -328,10 +514,10 @@ async function resolveShopForAdmin(request) {
 }
 
 /**
- * Upload PI Form PDF to Shopify Files.
+ * Upload shipment documentation PDF to Shopify Files.
  */
-async function uploadPiFormToShopifyFiles({ shop, file }) {
-  const filename = file.name || "pi-form.pdf";
+async function uploadShipmentDocumentToShopifyFiles({ shop, file }) {
+  const filename = file.name || "shipment-document.pdf";
   const mimeType = file.type || "application/pdf";
   const fileSize = typeof file.size === "number" ? String(file.size) : undefined;
 
@@ -452,7 +638,8 @@ export async function action({ request }) {
     debug.stage = "parse-body";
     const contentType = request.headers.get("content-type") || "";
     let payload;
-    let piFormFile = null;
+    let packingListFile = null;
+    let commercialInvoiceFile = null;
 
     if (contentType.includes("application/json")) {
       payload = await request.json();
@@ -467,23 +654,27 @@ export async function action({ request }) {
         // ignore
       }
 
-      // Get the PI form file if present
-      const piForm = formData.get("piForm");
-      const hasPiForm = piForm && typeof piForm === "object" && typeof piForm.arrayBuffer === "function";
-      piFormFile = hasPiForm ? piForm : null;
+      // Get documentation files if present
+      const packingList = formData.get("packingList");
+      const commercialInvoice = formData.get("commercialInvoice");
+      const hasPackingList =
+        packingList && typeof packingList === "object" && typeof packingList.arrayBuffer === "function";
+      const hasCommercialInvoice =
+        commercialInvoice &&
+        typeof commercialInvoice === "object" &&
+        typeof commercialInvoice.arrayBuffer === "function";
 
-      // Validate PI form if present
-      if (piFormFile) {
-        const name = String(piFormFile.name || "");
-        const type = String(piFormFile.type || "");
-        const looksPdf = type === "application/pdf" || name.toLowerCase().endsWith(".pdf");
-        if (!looksPdf) {
-          return json({ success: false, error: "Only PDF uploads are supported for PI Form." }, { status: 200 });
-        }
-        const maxBytes = 20 * 1024 * 1024;
-        if (typeof piFormFile.size === "number" && piFormFile.size > maxBytes) {
-          return json({ success: false, error: "PI Form PDF is too large (max 20MB)." }, { status: 200 });
-        }
+      packingListFile = hasPackingList ? packingList : null;
+      commercialInvoiceFile = hasCommercialInvoice ? commercialInvoice : null;
+
+      const packingListValidationError = validateUploadedPdf(packingListFile, "Packing List");
+      if (packingListValidationError) {
+        return json({ success: false, error: packingListValidationError }, { status: 200 });
+      }
+
+      const commercialInvoiceValidationError = validateUploadedPdf(commercialInvoiceFile, "Commercial Invoice");
+      if (commercialInvoiceValidationError) {
+        return json({ success: false, error: commercialInvoiceValidationError }, { status: 200 });
       }
 
       payload = { intent, shipment: shipmentData };
@@ -512,12 +703,13 @@ export async function action({ request }) {
       debug.stage = "create";
 
       const supplierId = actorIsSupplier ? actorCompanyId : String(shipment.supplierId || "").trim();
-      const containerNumber = String(shipment.containerNumber || "").trim().toUpperCase();
+      let containerNumber = String(shipment.containerNumber || "").trim().toUpperCase();
 
       const containerSize = cleanStrOrNull(shipment.containerSize);
       const portOfOrigin = cleanStrOrNull(shipment.portOfOrigin);
       const destinationPort = cleanStrOrNull(shipment.destinationPort);
-      const status = cleanStrOrNull(shipment.status);
+      const status = cleanStrOrNull(shipment.status) || "Pending";
+      const isPendingStatus = String(status || "").trim().toLowerCase() === "pending";
 
       const etaDate = parseDateLike(shipment.eta);
       const cargoReadyDate = parseDateLike(shipment.cargoReadyDate);
@@ -539,14 +731,30 @@ export async function action({ request }) {
 
       const purchaseOrderGIDs = normalizePurchaseOrderGIDsFromPayload(shipment);
       const productQuantities = normalizeProductQuantitiesFromPayload(shipment);
+      const poQuantities = normalizePoQuantitiesFromPayload(shipment);
 
       if (actorIsSupplier && !supplierId) {
         return json({ success: false, error: "Supplier account has no company mapping." }, { status: 403 });
       }
 
-      if (!supplierId || !containerNumber) {
+      if (!supplierId) {
+        return json({ success: false, error: "Supplier is required.", debug }, { status: 200 });
+      }
+
+      if (!containerNumber && !isPendingStatus) {
         return json(
-          { success: false, error: "Supplier and Container # are required.", debug },
+          { success: false, error: "Container # is required unless status is Pending.", debug },
+          { status: 200 }
+        );
+      }
+
+      if (!containerNumber && isPendingStatus) {
+        containerNumber = buildPendingContainerPlaceholder();
+      }
+
+      if (!destinationPort || !etaDate) {
+        return json(
+          { success: false, error: "Destination Port and ETA are required.", debug },
           { status: 200 }
         );
       }
@@ -559,20 +767,43 @@ export async function action({ request }) {
       const companyName =
         (company?.displayName && String(company.displayName).trim()) || supplierId;
 
-      // Upload PI form if present
-      let supplierPiUrl = null;
-      let supplierPiFileName = null;
-      if (piFormFile) {
+      // Upload documentation files if present
+      let packingListUrl = null;
+      let packingListFileName = null;
+      let commercialInvoiceUrl = null;
+      let commercialInvoiceFileName = null;
+      if (packingListFile || commercialInvoiceFile) {
         const shop = await resolveShopForAdmin(request);
         if (!shop) {
           return json({ success: false, error: "Could not resolve shop for file upload.", debug }, { status: 200 });
         }
-        try {
-          supplierPiUrl = await uploadPiFormToShopifyFiles({ shop, file: piFormFile });
-          supplierPiFileName = String(piFormFile.name || "pi-form.pdf");
-        } catch (uploadErr) {
-          console.error("[logistics shipments] PI form upload error:", uploadErr);
-          return json({ success: false, error: `PI Form upload failed: ${uploadErr.message}`, debug }, { status: 200 });
+        if (packingListFile) {
+          try {
+            packingListUrl = await uploadShipmentDocumentToShopifyFiles({ shop, file: packingListFile });
+            packingListFileName = String(packingListFile.name || "packing-list.pdf");
+          } catch (uploadErr) {
+            console.error("[logistics shipments] packing list upload error:", uploadErr);
+            return json(
+              { success: false, error: `Packing List upload failed: ${uploadErr.message}`, debug },
+              { status: 200 }
+            );
+          }
+        }
+
+        if (commercialInvoiceFile) {
+          try {
+            commercialInvoiceUrl = await uploadShipmentDocumentToShopifyFiles({
+              shop,
+              file: commercialInvoiceFile,
+            });
+            commercialInvoiceFileName = String(commercialInvoiceFile.name || "commercial-invoice.pdf");
+          } catch (uploadErr) {
+            console.error("[logistics shipments] commercial invoice upload error:", uploadErr);
+            return json(
+              { success: false, error: `Commercial Invoice upload failed: ${uploadErr.message}`, debug },
+              { status: 200 }
+            );
+          }
         }
       }
 
@@ -581,6 +812,12 @@ export async function action({ request }) {
       try {
         createdId = await logisticsDb.$transaction(async (tx) => {
           await validatePurchaseOrdersExist(tx, purchaseOrderGIDs);
+          await validatePurchaseOrdersHaveProForma(tx, purchaseOrderGIDs);
+          const committedUpdates = await prepareCommittedQuantityUpdates(tx, {
+            purchaseOrderGIDs,
+            poQuantities,
+            productQuantities,
+          });
 
           const created = await tx.tbl_shipment.create({
             data: {
@@ -595,8 +832,10 @@ export async function action({ request }) {
               cargoReadyDate,
               estimatedDeliveryToOrigin,
               supplierPi,
-              supplierPiUrl,
-              supplierPiFileName,
+              packingListUrl,
+              packingListFileName,
+              commercialInvoiceUrl,
+              commercialInvoiceFileName,
               quantity,
               bookingNumber,
               bookingAgent,
@@ -629,6 +868,18 @@ export async function action({ request }) {
             });
           }
 
+          if (committedUpdates.length) {
+            for (const row of committedUpdates) {
+              await tx.tbljn_purchaseOrder_rslProduct.updateMany({
+                where: {
+                  purchaseOrderGID: row.purchaseOrderGID,
+                  rslProductID: row.rslProductID,
+                },
+                data: { committedQuantity: row.committedQuantity },
+              });
+            }
+          }
+
           // Always add a history entry so create events are visible in the modal timeline.
           await tx.tbl_shipmentNotes.create({
             data: {
@@ -648,6 +899,32 @@ export async function action({ request }) {
           const missing = Array.isArray(err.missing) ? err.missing.join(", ") : "";
           return json(
             { success: false, error: `Purchase Order not found: ${missing || "unknown"}.`, debug },
+            { status: 200 }
+          );
+        }
+
+        if (String(err?.message || "") === "PO_MISSING_PRO_FORMA") {
+          const missing = Array.isArray(err.missing) ? err.missing.join(", ") : "";
+          return json(
+            {
+              success: false,
+              error: `A Pro-forma invoice is required before using Purchase Order(s): ${missing || "unknown"}.`,
+              debug,
+            },
+            { status: 200 }
+          );
+        }
+
+        if (String(err?.message || "") === "PO_COMMITTED_CONFLICT") {
+          const details = Array.isArray(err.details) ? err.details.join("; ") : "";
+          return json(
+            {
+              success: false,
+              error:
+                `Unable to save container because PO committed quantities changed in the database. ` +
+                `Refresh and try again.${details ? ` (${details})` : ""}`,
+              debug,
+            },
             { status: 200 }
           );
         }
@@ -704,6 +981,9 @@ export async function action({ request }) {
       const portOfOrigin = cleanStrOrNull(shipment.portOfOrigin);
       const destinationPort = cleanStrOrNull(shipment.destinationPort);
       const status = cleanStrOrNull(shipment.status);
+      const effectiveStatus = status ?? cleanStrOrNull(existing.status) ?? "";
+      const isPendingStatus = String(effectiveStatus || "").trim().toLowerCase() === "pending";
+      const existingContainerIsPlaceholder = isPendingContainerPlaceholder(existing.containerNumber);
 
       const etaDate = parseDateLike(shipment.eta);
       const cargoReadyDate = parseDateLike(shipment.cargoReadyDate);
@@ -716,25 +996,55 @@ export async function action({ request }) {
       const vesselName = cleanStrOrNull(shipment.vesselName);
       const deliveryAddress = cleanStrOrNull(shipment.deliveryAddress);
 
-      // Upload PI form if present
-      let supplierPiUrl = undefined; // undefined = don't update
-      let supplierPiFileName = undefined;
-      if (piFormFile) {
+      // Upload documentation files if present
+      let packingListUrl = undefined; // undefined = don't update
+      let packingListFileName = undefined;
+      let commercialInvoiceUrl = undefined;
+      let commercialInvoiceFileName = undefined;
+      if (packingListFile || commercialInvoiceFile) {
         const shop = await resolveShopForAdmin(request);
         if (!shop) {
           return json({ success: false, error: "Could not resolve shop for file upload.", debug }, { status: 200 });
         }
-        try {
-          supplierPiUrl = await uploadPiFormToShopifyFiles({ shop, file: piFormFile });
-          supplierPiFileName = String(piFormFile.name || "pi-form.pdf");
-        } catch (uploadErr) {
-          console.error("[logistics shipments] PI form upload error:", uploadErr);
-          return json({ success: false, error: `PI Form upload failed: ${uploadErr.message}`, debug }, { status: 200 });
+        if (packingListFile) {
+          try {
+            packingListUrl = await uploadShipmentDocumentToShopifyFiles({ shop, file: packingListFile });
+            packingListFileName = String(packingListFile.name || "packing-list.pdf");
+          } catch (uploadErr) {
+            console.error("[logistics shipments] packing list upload error:", uploadErr);
+            return json(
+              { success: false, error: `Packing List upload failed: ${uploadErr.message}`, debug },
+              { status: 200 }
+            );
+          }
+        }
+
+        if (commercialInvoiceFile) {
+          try {
+            commercialInvoiceUrl = await uploadShipmentDocumentToShopifyFiles({
+              shop,
+              file: commercialInvoiceFile,
+            });
+            commercialInvoiceFileName = String(commercialInvoiceFile.name || "commercial-invoice.pdf");
+          } catch (uploadErr) {
+            console.error("[logistics shipments] commercial invoice upload error:", uploadErr);
+            return json(
+              { success: false, error: `Commercial Invoice upload failed: ${uploadErr.message}`, debug },
+              { status: 200 }
+            );
+          }
         }
       }
 
       // Notes entered during update go to tbl_shipmentNotes, not to the shipment record
       const updateNotes = cleanStrOrNull(shipment.notes);
+
+      if (!containerNumberRaw && !isPendingStatus && existingContainerIsPlaceholder) {
+        return json(
+          { success: false, error: "Container # is required unless status is Pending.", debug },
+          { status: 200 }
+        );
+      }
 
       // Quantity: preserve existing if blank/omitted
       const quantityRaw = shipment.quantity;
@@ -761,6 +1071,8 @@ export async function action({ request }) {
       // Product quantities: preserve unless productQuantities is explicitly present
       const productQuantitiesPresent = shipment && Object.prototype.hasOwnProperty.call(shipment, "productQuantities");
       const nextProductQuantities = productQuantitiesPresent ? normalizeProductQuantitiesFromPayload(shipment) : null;
+      const poQuantitiesPresent = shipment && Object.prototype.hasOwnProperty.call(shipment, "poQuantities");
+      const nextPoQuantities = poQuantitiesPresent ? normalizePoQuantitiesFromPayload(shipment) : null;
 
       // Data to update in tbl_shipment (notes field is NOT updated - initial notes stay)
       const data = {
@@ -788,10 +1100,14 @@ export async function action({ request }) {
         data.quantity = quantity;
       }
 
-      // Add PI form fields if uploaded
-      if (supplierPiUrl !== undefined) {
-        data.supplierPiUrl = supplierPiUrl;
-        data.supplierPiFileName = supplierPiFileName;
+      // Add documentation fields if uploaded
+      if (packingListUrl !== undefined) {
+        data.packingListUrl = packingListUrl;
+        data.packingListFileName = packingListFileName;
+      }
+      if (commercialInvoiceUrl !== undefined) {
+        data.commercialInvoiceUrl = commercialInvoiceUrl;
+        data.commercialInvoiceFileName = commercialInvoiceFileName;
       }
 
       // Detect changes for the history log
@@ -886,6 +1202,7 @@ export async function action({ request }) {
           if (poFieldPresent) {
             const gids = nextPurchaseOrderGIDs || [];
             await validatePurchaseOrdersExist(tx, gids);
+            await validatePurchaseOrdersHaveProForma(tx, gids);
 
             await tx.tbljn_shipment_purchaseOrder.deleteMany({
               where: { shipmentID: existing.containerNumber },
@@ -898,6 +1215,49 @@ export async function action({ request }) {
                   purchaseOrderGID,
                 })),
               });
+            }
+          }
+
+          if (poQuantitiesPresent) {
+            const effectivePoGids = poFieldPresent
+              ? (nextPurchaseOrderGIDs || [])
+              : uniqStrings(
+                (
+                  await tx.tbljn_shipment_purchaseOrder.findMany({
+                    where: { shipmentID: containerNumber },
+                    select: { purchaseOrderGID: true },
+                  })
+                ).map((x) => String(x.purchaseOrderGID || ""))
+              );
+
+            const effectiveProductQuantities = productQuantitiesPresent
+              ? (nextProductQuantities || [])
+              : (
+                await tx.tbljn_shipment_rslProduct.findMany({
+                  where: { shipmentId: id },
+                  select: { rslProductID: true, quantity: true },
+                })
+              ).map((x) => ({
+                rslProductID: String(x.rslProductID || "").trim(),
+                quantity: Number(x.quantity) || 0,
+              }));
+
+            const committedUpdates = await prepareCommittedQuantityUpdates(tx, {
+              purchaseOrderGIDs: effectivePoGids,
+              poQuantities: nextPoQuantities || {},
+              productQuantities: effectiveProductQuantities,
+            });
+
+            if (committedUpdates.length) {
+              for (const row of committedUpdates) {
+                await tx.tbljn_purchaseOrder_rslProduct.updateMany({
+                  where: {
+                    purchaseOrderGID: row.purchaseOrderGID,
+                    rslProductID: row.rslProductID,
+                  },
+                  data: { committedQuantity: row.committedQuantity },
+                });
+              }
             }
           }
 
@@ -940,6 +1300,32 @@ export async function action({ request }) {
           const missing = Array.isArray(err.missing) ? err.missing.join(", ") : "";
           return json(
             { success: false, error: `Purchase Order not found: ${missing || "unknown"}.`, debug },
+            { status: 200 }
+          );
+        }
+
+        if (String(err?.message || "") === "PO_MISSING_PRO_FORMA") {
+          const missing = Array.isArray(err.missing) ? err.missing.join(", ") : "";
+          return json(
+            {
+              success: false,
+              error: `A Pro-forma invoice is required before using Purchase Order(s): ${missing || "unknown"}.`,
+              debug,
+            },
+            { status: 200 }
+          );
+        }
+
+        if (String(err?.message || "") === "PO_COMMITTED_CONFLICT") {
+          const details = Array.isArray(err.details) ? err.details.join("; ") : "";
+          return json(
+            {
+              success: false,
+              error:
+                `Unable to save container because PO committed quantities changed in the database. ` +
+                `Refresh and try again.${details ? ` (${details})` : ""}`,
+              debug,
+            },
             { status: 200 }
           );
         }

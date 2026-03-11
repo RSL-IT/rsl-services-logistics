@@ -468,6 +468,9 @@ export async function loader({ request }) {
         purchaseOrderGID: true,
         shortName: true,
         purchaseOrderPdfUrl: true,
+        proFormaInvoiceUrl: true,
+        originalPoDate: true,
+        deliveryAddress: true,
         createdAt: true,
         updatedAt: true,
 
@@ -475,7 +478,8 @@ export async function loader({ request }) {
         tbljn_purchaseOrder_rslProduct: {
           select: {
             rslProductID: true,
-            quantity: true,
+            initialQuantity: true,
+            committedQuantity: true,
             // schema: tbljn_purchaseOrder_rslProduct.tlkp_rslProduct
             tlkp_rslProduct: { select: { shortName: true, displayName: true, SKU: true } },
           },
@@ -488,6 +492,9 @@ export async function loader({ request }) {
             // schema: tbljn_purchaseOrder_company.tlkp_company
             tlkp_company: { select: { shortName: true, displayName: true } },
           },
+        },
+        tlkp_deliveryAddress: {
+          select: { shortName: true, displayName: true },
         },
 
         // schema: tbl_purchaseOrder.tbl_purchaseOrderNotes[]
@@ -568,6 +575,10 @@ export async function loader({ request }) {
 
       estimatedDeliveryToOrigin: toIsoOrEmpty(s.estimatedDeliveryToOrigin),
       supplierPi: s.supplierPi ?? "",
+      packingListUrl: s.packingListUrl ?? "",
+      packingListFileName: s.packingListFileName ?? "",
+      commercialInvoiceUrl: s.commercialInvoiceUrl ?? "",
+      commercialInvoiceFileName: s.commercialInvoiceFileName ?? "",
       quantity: s.quantity != null ? String(s.quantity) : "",
       bookingAgent: s.bookingAgent ?? "",
       bookingNumber: s.bookingNumber ?? "",
@@ -617,6 +628,7 @@ export async function loader({ request }) {
 
   purchaseOrders = (purchaseOrderRows || []).map((po) => {
     const company = po.tbljn_purchaseOrder_company?.[0]?.tlkp_company || null;
+    const deliveryAddress = po.tlkp_deliveryAddress || null;
 
     const products = Array.isArray(po.tbljn_purchaseOrder_rslProduct)
       ? po.tbljn_purchaseOrder_rslProduct.map((l) => ({
@@ -624,7 +636,10 @@ export async function loader({ request }) {
         shortName: l.tlkp_rslProduct?.shortName || l.rslProductID,
         displayName: l.tlkp_rslProduct?.displayName || l.rslProductID,
         SKU: l.tlkp_rslProduct?.SKU || null,
-        quantity: typeof l.quantity === "number" ? l.quantity : 0,
+        initialQuantity: typeof l.initialQuantity === "number" ? l.initialQuantity : 0,
+        committedQuantity: typeof l.committedQuantity === "number" ? l.committedQuantity : 0,
+        // keep legacy quantity for existing UI consumers
+        quantity: typeof l.initialQuantity === "number" ? l.initialQuantity : 0,
       }))
       : [];
 
@@ -647,6 +662,8 @@ export async function loader({ request }) {
       purchaseOrderGID: po.purchaseOrderGID,
       shortName: po.shortName,
       purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
+      proFormaInvoiceUrl: po.proFormaInvoiceUrl || null,
+      originalPoDate: po.originalPoDate ? po.originalPoDate.toISOString() : null,
       createdAt: po.createdAt ? po.createdAt.toISOString() : null,
       updatedAt: po.updatedAt ? po.updatedAt.toISOString() : null,
 
@@ -654,6 +671,8 @@ export async function loader({ request }) {
 
       companyID: company?.shortName || null,
       companyName: company?.displayName || company?.shortName || null,
+      deliveryAddressID: deliveryAddress?.shortName || po.deliveryAddress || null,
+      deliveryAddressName: deliveryAddress?.displayName || deliveryAddress?.shortName || null,
       lastUpdatedBy,
       notes,
     };
