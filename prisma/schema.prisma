@@ -58,15 +58,20 @@ model tbl_purchaseOrder {
   shortName                      String                           @unique
   purchaseOrderGID               String                           @unique
   purchaseOrderPdfUrl            String?
+  proFormaInvoiceUrl             String?
+  originalPoDate                 DateTime?
+  deliveryAddress                String?
   createdAt                      DateTime                         @default(now())
   updatedAt                      DateTime
   statusShortName                String?
+  tlkp_deliveryAddress           tlkp_deliveryAddress?            @relation(fields: [deliveryAddress], references: [shortName])
   tlkp_purchaseOrderStatus       tlkp_purchaseOrderStatus?        @relation(fields: [statusShortName], references: [shortName])
   tbl_purchaseOrderNotes         tbl_purchaseOrderNotes[]
   tbljn_purchaseOrder_company    tbljn_purchaseOrder_company[]
   tbljn_purchaseOrder_rslProduct tbljn_purchaseOrder_rslProduct[]
   tbljn_shipment_purchaseOrder   tbljn_shipment_purchaseOrder[]
 
+  @@index([deliveryAddress])
   @@index([statusShortName])
 }
 
@@ -99,8 +104,10 @@ model tbl_shipment {
   cargoReadyDate               DateTime?
   estimatedDeliveryToOrigin    DateTime?
   supplierPi                   String?
-  supplierPiUrl                String?
-  supplierPiFileName           String?            @db.VarChar(255)
+  packingListUrl               String?
+  packingListFileName          String?            @db.VarChar(255)
+  commercialInvoiceUrl         String?
+  commercialInvoiceFileName    String?            @db.VarChar(255)
   quantity                     BigInt?
   bookingNumber                String?
   status                       String?
@@ -163,7 +170,8 @@ model tbljn_purchaseOrder_rslProduct {
   id                Int               @id @default(autoincrement())
   purchaseOrderGID  String
   rslProductID      String
-  quantity          Int               @default(0)
+  initialQuantity   Int               @default(0)
+  committedQuantity Int               @default(0)
   tbl_purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID], onDelete: Cascade)
   tlkp_rslProduct   tlkp_rslProduct   @relation(fields: [rslProductID], references: [shortName], onDelete: Cascade)
 
@@ -220,6 +228,7 @@ model tlkp_deliveryAddress {
   id           Int            @id @default(autoincrement())
   shortName    String         @unique
   displayName  String?
+  tbl_purchaseOrder tbl_purchaseOrder[]
   tbl_shipment tbl_shipment[]
 }
 

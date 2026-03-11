@@ -4,6 +4,9 @@ import type { Shipment } from "../LogisticsApp";
 import type { UIUser, CompanyOption, LookupOption, PurchaseOrderOption } from "./types";
 import ShipmentDetailsModal from "./ShipmentDetailsModal";
 
+const PO_SESSION_KEY = "logistics_po_modal";
+const CONTAINER_DRAFT_SESSION_KEY = "logistics_container_modal_draft";
+
 interface SupplierDashboardProps {
   currentUser: UIUser | null;
   shipments: Shipment[];
@@ -127,7 +130,7 @@ const controlsRowStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "flex-end",
   gap: 12,
-  flexWrap: "wrap",
+  flexWrap: "nowrap",
 };
 
 const fieldStyle: React.CSSProperties = {
@@ -224,6 +227,7 @@ export function SupplierDashboard({
   const [activeShipment, setActiveShipment] = useState<Shipment | null>(null);
   const [savingShipment, setSavingShipment] = useState(false);
   const [shipmentError, setShipmentError] = useState<string | null>(null);
+  const restoredContainerDraftRef = React.useRef(false);
 
   // Get the supplier ID from the current user's company
   const supplierId = (currentUser as any)?.companyName || (currentUser as any)?.supplierId || "";
@@ -285,6 +289,10 @@ export function SupplierDashboard({
 
       estimatedDeliveryToOrigin: "",
       supplierPi: "",
+      packingListUrl: "",
+      packingListFileName: "",
+      commercialInvoiceUrl: "",
+      commercialInvoiceFileName: "",
       quantity: 0,
       bookingAgent: "",
       bookingNumber: "",
@@ -313,7 +321,59 @@ export function SupplierDashboard({
     setShipmentError(null);
   };
 
-  const saveShipment = async (mode: "create" | "update", s: Shipment, piFile?: File | null) => {
+  React.useEffect(() => {
+    if (restoredContainerDraftRef.current) return;
+    restoredContainerDraftRef.current = true;
+
+    try {
+      const raw = sessionStorage.getItem(CONTAINER_DRAFT_SESSION_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      const shouldReturn = Boolean(parsed?.returnRequested);
+      const draftShipment = parsed?.shipment;
+      if (!shouldReturn || !draftShipment || typeof draftShipment !== "object") return;
+
+      setShipmentError(null);
+      setSavingShipment(false);
+      setActiveShipment(draftShipment as Shipment);
+      setShowShipmentModal(true);
+      sessionStorage.removeItem(CONTAINER_DRAFT_SESSION_KEY);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const openPurchaseOrderFromShipment = (purchaseOrderGID: string, draftShipment: Shipment) => {
+    const gid = String(purchaseOrderGID || "").trim();
+    if (!gid) return;
+    try {
+      sessionStorage.setItem(
+        CONTAINER_DRAFT_SESSION_KEY,
+        JSON.stringify({
+          shipment: draftShipment,
+          returnRequested: false,
+          sourceView: "supplierDashboard",
+          selectedPOGID: gid,
+          savedAt: new Date().toISOString(),
+        })
+      );
+      sessionStorage.setItem(
+        PO_SESSION_KEY,
+        JSON.stringify({ selectedPOGID: gid, mode: "view" })
+      );
+    } catch {
+      // ignore storage errors
+    }
+    closeShipmentModal();
+    onNavigateToPurchaseOrders();
+  };
+
+  const saveShipment = async (
+    mode: "create" | "update",
+    s: Shipment,
+    packingListFile?: File | null,
+    commercialInvoiceFile?: File | null
+  ) => {
     setSavingShipment(true);
     setShipmentError(null);
 
@@ -321,11 +381,12 @@ export function SupplierDashboard({
       let res: Response;
 
       // Use multipart form data if there's a file to upload
-      if (piFile) {
+      if (packingListFile || commercialInvoiceFile) {
         const fd = new FormData();
         fd.append("intent", mode);
         fd.append("shipment", JSON.stringify(s));
-        fd.append("piForm", piFile);
+        if (packingListFile) fd.append("packingList", packingListFile);
+        if (commercialInvoiceFile) fd.append("commercialInvoice", commercialInvoiceFile);
 
         res = await fetch("/apps/logistics/shipments", {
           method: "POST",
@@ -463,7 +524,7 @@ export function SupplierDashboard({
             <select
               value={selectedStatus}
               onChange={(e) => setSelectedStatus(e.target.value)}
-              style={selectStyle}
+              style={{ ...selectStyle, minWidth: 150, width: 150 }}
             >
               <option value="all">All</option>
               <option value="Pending">Pending</option>
@@ -479,10 +540,10 @@ export function SupplierDashboard({
             type="button"
             onClick={openCreateShipment}
             disabled={!canCreateShipment}
-            style={canCreateShipment ? btnSuccess : btnDisabled}
+            style={{ ...(canCreateShipment ? btnSuccess : btnDisabled), marginLeft: "auto", flexShrink: 0 }}
             title={!canCreateShipment ? "You do not have permission to create/update shipments." : ""}
           >
-            Create Shipment
+            New Container
           </button>
         </div>
 
@@ -549,6 +610,7 @@ export function SupplierDashboard({
           onClose={closeShipmentModal}
           onSave={saveShipment}
           onDelete={deleteShipment}
+          onOpenPurchaseOrder={openPurchaseOrderFromShipment}
         />
       ) : null}
     </div>

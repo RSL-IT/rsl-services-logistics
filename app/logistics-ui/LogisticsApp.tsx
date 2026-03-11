@@ -53,6 +53,10 @@ export type Shipment = {
 
   estimatedDeliveryToOrigin?: string | null;
   supplierPi?: string | null;
+  packingListUrl?: string | null;
+  packingListFileName?: string | null;
+  commercialInvoiceUrl?: string | null;
+  commercialInvoiceFileName?: string | null;
   quantity?: number | string | null;
   bookingAgent?: string | null;
   bookingNumber?: string | null;
@@ -61,6 +65,7 @@ export type Shipment = {
 
   purchaseOrderGIDs?: string[] | null;
   purchaseOrderShortNames?: string[] | null;
+  poQuantities?: Record<string, Record<string, string | number>> | null;
 };
 
 // Raw lookup shapes that can come from loaders (often allow null displayName)
@@ -133,6 +138,11 @@ function buildPurchaseOrderOptions(purchaseOrders: UIPurchaseOrder[]): PurchaseO
           shortName: p.shortName || undefined,
           displayName: p.displayName || undefined,
           SKU: p.SKU || null,
+          initialQuantity:
+            typeof p.initialQuantity === "number"
+              ? p.initialQuantity
+              : (typeof p.quantity === "number" ? p.quantity : 0),
+          committedQuantity: typeof p.committedQuantity === "number" ? p.committedQuantity : 0,
           quantity: p.quantity,
         }))
       : [];
@@ -142,6 +152,7 @@ function buildPurchaseOrderOptions(purchaseOrders: UIPurchaseOrder[]): PurchaseO
       shortName: label,
       products,
       purchaseOrderPdfUrl: po.purchaseOrderPdfUrl || null,
+      proFormaInvoiceUrl: po.proFormaInvoiceUrl || null,
       companyID: po.companyID || null,
     });
   }
@@ -187,6 +198,7 @@ export default function LogisticsApp({
 
   // Session storage keys
   const SESSION_KEY = "logistics_session";
+  const CONTAINER_DRAFT_SESSION_KEY = "logistics_container_modal_draft";
 
   // Track if user has explicitly logged out this session (to prevent auto-login from server props)
   const hasLoggedOutRef = useRef(false);
@@ -477,6 +489,7 @@ export default function LogisticsApp({
       try {
         sessionStorage.removeItem(SESSION_KEY);
         sessionStorage.removeItem("logistics_po_modal");
+        sessionStorage.removeItem(CONTAINER_DRAFT_SESSION_KEY);
       } catch {
         // ignore
       }
@@ -507,6 +520,25 @@ export default function LogisticsApp({
 
     setSupplierId(null);
     setCurrentView("dashboard");
+  };
+
+  const returnToContainerDetails = () => {
+    let nextView: ViewType = getDefaultDashboardView(currentUserState);
+    if (typeof window !== "undefined") {
+      try {
+        const raw = sessionStorage.getItem(CONTAINER_DRAFT_SESSION_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          const sourceView = String(parsed?.sourceView || "").trim();
+          if (sourceView === "dashboard" || sourceView === "supplierDashboard") {
+            nextView = sourceView;
+          }
+        }
+      } catch {
+        // ignore storage errors
+      }
+    }
+    setCurrentView(nextView);
   };
 
   return (
@@ -607,10 +639,12 @@ export default function LogisticsApp({
           purchaseOrders={purchaseOrdersState}
           onPurchaseOrdersChange={(next) => setPurchaseOrdersState(next)}
           companies={companiesSafe}
+          deliveryAddresses={deliveryAddressesSafe}
           rslModels={rslModelsSafe}
           currentUser={currentUserState}
           viewOnly={getDefaultDashboardView(currentUserState) === "supplierDashboard"}
           onBack={() => setCurrentView(getDefaultDashboardView(currentUserState))}
+          onReturnToContainerDetails={returnToContainerDetails}
           onLogout={logout}
           showLogout={showLogout}
           debugInfo={debugInfoWithProbe}

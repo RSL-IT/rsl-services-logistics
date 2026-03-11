@@ -4,15 +4,20 @@ import { redirect } from "@remix-run/node";
 import { authenticate } from "~/shopify.server";
 export const meta = () => [{ title: "RSL Services" }];
 
+function shouldReturnAuthBootstrapResponse(response) {
+  if (!(response instanceof Response)) return false;
+  return response.status >= 300 || response.status < 200;
+}
+
 export const loader = async ({ request }) => {
   let authResult;
   try {
     authResult = await authenticate.admin(request);
   } catch (err) {
-    if (err instanceof Response) return err;
+    if (shouldReturnAuthBootstrapResponse(err)) return err;
     throw err;
   }
-  if (authResult instanceof Response) return authResult;
+  if (shouldReturnAuthBootstrapResponse(authResult)) return authResult;
 
   const url = new URL(request.url);
   const params = new URLSearchParams(url.searchParams);

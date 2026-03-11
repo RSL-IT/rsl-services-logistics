@@ -61,6 +61,8 @@ export type PurchaseOrderProduct = {
   shortName?: string;
   displayName?: string;
   SKU?: string | null;
+  initialQuantity?: number;
+  committedQuantity?: number;
   quantity?: number;
 };
 
@@ -72,6 +74,8 @@ export type PurchaseOrderOption = {
   products?: PurchaseOrderProduct[];
   // URL to the PDF for this purchase order (if available)
   purchaseOrderPdfUrl?: string | null;
+  // URL to Pro Forma Invoice for this purchase order (required to activate for shipments)
+  proFormaInvoiceUrl?: string | null;
   // Company/supplier associated with this purchase order
   companyID?: string | null;
 };
