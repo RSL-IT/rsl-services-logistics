@@ -1177,24 +1177,14 @@ export function PurchaseOrderManagement({
       const updated = data.purchaseOrder as UIPurchaseOrder;
       upsertLocal(updated);
 
-      // For create: close the modal; for update: stay in view mode
-      if (saveMode === "create") {
-        setSelectedPO(null);
-        setInitialCreatePdfFile(null);
-        setCreateSupplierCandidate(null);
-        setCreateShipToCandidate(null);
-        setCreateMatchedCompany(null);
-        setCreateMatchedDeliveryAddress(null);
-      } else {
-        const shouldAutoReturnToContainer =
-          Boolean(showReturnToContainerControl && onReturnToContainerDetails);
-        if (shouldAutoReturnToContainer) {
-          handleReturnToContainer();
-          return;
-        }
-        setSelectedPO(updated);
-        setMode("view");
+      const shouldAutoReturnToContainer =
+        Boolean(showReturnToContainerControl && onReturnToContainerDetails);
+      if (shouldAutoReturnToContainer) {
+        handleReturnToContainer();
+        return;
       }
+
+      closeModal();
     } catch (e: any) {
       setError(e?.message || "Save failed.");
     } finally {

@@ -1,4 +1,5 @@
 // app/routes/apps.logistics.shipments.jsx
+import crypto from "node:crypto";
 import { json } from "@remix-run/node";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
@@ -34,15 +35,32 @@ const FILE_CHANGE_FIELD_CONFIG = {
 };
 
 const PENDING_CONTAINER_PREFIX = "PENDING-";
-
-function buildPendingContainerPlaceholder() {
-  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
-  return `${PENDING_CONTAINER_PREFIX}${Date.now()}-${rand}`.toUpperCase();
-}
+const RSL_LOGISTICS_ID_PREFIX = "RSL-";
+const RSL_LOGISTICS_ID_LENGTH = 6;
+const PO_LINE_ITEMS_SNAPSHOT_EVENT = "PO_LINE_ITEMS_SNAPSHOT";
 
 function isPendingContainerPlaceholder(value) {
   const s = String(value || "").trim().toUpperCase();
   return s.startsWith(PENDING_CONTAINER_PREFIX);
+}
+
+function normalizeRslLogisticsID(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  if (!raw) return "";
+  return raw.startsWith(RSL_LOGISTICS_ID_PREFIX) ? raw : `${RSL_LOGISTICS_ID_PREFIX}${raw}`;
+}
+
+function generateRslLogisticsID() {
+  const raw = crypto.randomUUID().replace(/-/g, "").toUpperCase();
+  return `${RSL_LOGISTICS_ID_PREFIX}${raw.slice(0, RSL_LOGISTICS_ID_LENGTH)}`;
+}
+
+function isRslLogisticsIDConflict(err) {
+  if (!err || String(err?.code || "") !== "P2002") return false;
+  const target = Array.isArray(err?.meta?.target)
+    ? err.meta.target.join(",")
+    : String(err?.meta?.target || "");
+  return target.includes("rslLogisticsID");
 }
 
 function formatDateForDisplay(d) {
@@ -135,7 +153,248 @@ function cleanStrOrNull(v) {
   return s ? s : null;
 }
 
-function validateUploadedPdf(file, label) {
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
+
+function isPlaceholderProductId(v) {
+  return /^line[_\s-]?\d+$/i.test(cleanStr(v));
+}
+
+function normalizeSkuForMatch(v) {
+  const raw = cleanStr(v).toUpperCase().replace(/\s+/g, "");
+  if (!raw) return "";
+  if (raw.length < 7) return raw;
+  // Ignore the 7th character (1-based) when matching SKUs.
+  return `${raw.slice(0, 6)}${raw.slice(7)}`;
+}
+
+function normalizeTitleForMatch(v) {
+  return cleanStr(v)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleMatchKeys(v) {
+  const title = cleanStr(v);
+  if (!title) return [];
+  const variants = [title];
+  const slashIdx = title.indexOf("/");
+  if (slashIdx > 0) variants.push(title.slice(0, slashIdx));
+  const dashIdx = title.indexOf(" - ");
+  if (dashIdx > 0) variants.push(title.slice(0, dashIdx));
+
+  const out = [];
+  for (const candidate of variants) {
+    const key = normalizeTitleForMatch(candidate);
+    if (!key) continue;
+    out.push(key);
+    const compact = key.replace(/\s+/g, "");
+    if (compact) out.push(compact);
+  }
+  return uniqStrings(out);
+}
+
+function parsePoLineItemsSnapshot(content) {
+  const raw = cleanStr(content);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.lineItems) ? parsed.lineItems : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildProductLookupForSnapshotMatch(rslProducts) {
+  const bySku = new Map();
+  const byTitle = new Map();
+  const byShortName = new Set();
+
+  for (const p of rslProducts || []) {
+    const shortName = cleanStr(p?.shortName);
+    if (!shortName) continue;
+    byShortName.add(shortName);
+
+    const rawSku = cleanStr(p?.SKU).toUpperCase().replace(/\s+/g, "");
+    const skuKey = normalizeSkuForMatch(rawSku);
+    if (skuKey) {
+      if (!bySku.has(skuKey)) bySku.set(skuKey, []);
+      bySku.get(skuKey).push({ shortName, rawSku });
+    }
+
+    const keys = uniqStrings([
+      ...titleMatchKeys(p?.displayName),
+      ...titleMatchKeys(shortName),
+    ]);
+    for (const key of keys) {
+      if (!byTitle.has(key)) byTitle.set(key, []);
+      byTitle.get(key).push({ shortName });
+    }
+  }
+
+  return { bySku, byTitle, byShortName };
+}
+
+function resolveSnapshotLineProductId(row, lookup) {
+  const directId = cleanStrOrNull(
+    row?.rslProductID ??
+    row?.rslModelID ??
+    row?.shortName ??
+    null
+  );
+  if (directId && !isPlaceholderProductId(directId) && lookup.byShortName?.has(directId)) return directId;
+
+  const sku = cleanStr(row?.sku ?? row?.SKU).toUpperCase().replace(/\s+/g, "");
+  const skuKey = normalizeSkuForMatch(sku);
+  if (skuKey) {
+    const candidates = lookup.bySku.get(skuKey) || [];
+    const matched = candidates.find((c) => c.rawSku === sku) || candidates[0] || null;
+    const skuMatchedId = cleanStrOrNull(matched?.shortName);
+    if (skuMatchedId) return skuMatchedId;
+  }
+
+  const keys = titleMatchKeys(row?.title ?? row?.displayName ?? "");
+  for (const key of keys) {
+    const matches = lookup.byTitle.get(key) || [];
+    const titleMatchedId = cleanStrOrNull(matches?.[0]?.shortName);
+    if (titleMatchedId) return titleMatchedId;
+  }
+
+  return null;
+}
+
+async function backfillMissingPoProductJoinRows(tx, missingPairs) {
+  const pairs = Array.isArray(missingPairs)
+    ? missingPairs
+        .map((row) => ({
+          purchaseOrderGID: cleanStr(row?.purchaseOrderGID),
+          rslProductID: cleanStr(row?.rslProductID),
+        }))
+        .filter((row) => row.purchaseOrderGID && row.rslProductID)
+    : [];
+  if (!pairs.length) return { remappedPairs: new Map() };
+
+  const requestedKeySet = new Set(
+    pairs.map((row) => `${row.purchaseOrderGID}::${row.rslProductID}`)
+  );
+  const poGids = uniqStrings(pairs.map((row) => row.purchaseOrderGID));
+  if (!poGids.length) return { remappedPairs: new Map() };
+
+  const [snapshotNotes, rslProducts] = await Promise.all([
+    tx.tbl_purchaseOrderNotes.findMany({
+      where: {
+        purchaseOrderGID: { in: poGids },
+        eventType: PO_LINE_ITEMS_SNAPSHOT_EVENT,
+      },
+      orderBy: [{ createdAt: "desc" }],
+      select: {
+        purchaseOrderGID: true,
+        content: true,
+        createdAt: true,
+      },
+    }),
+    tx.tlkp_rslProduct.findMany({
+      select: { shortName: true, displayName: true, SKU: true },
+    }),
+  ]);
+
+  const latestSnapshotByPo = new Map();
+  for (const note of snapshotNotes || []) {
+    const gid = cleanStr(note?.purchaseOrderGID);
+    if (!gid || latestSnapshotByPo.has(gid)) continue;
+    latestSnapshotByPo.set(gid, note);
+  }
+
+  const lookup = buildProductLookupForSnapshotMatch(rslProducts);
+  const qtyByPoProductKey = new Map();
+  const remappedPairs = new Map();
+
+  for (const gid of poGids) {
+    const note = latestSnapshotByPo.get(gid);
+    const lineItems = parsePoLineItemsSnapshot(note?.content);
+    for (const row of lineItems) {
+      const rawId = cleanStrOrNull(
+        row?.rslProductID ??
+        row?.rslModelID ??
+        row?.shortName ??
+        null
+      );
+      const normalizedRawId = rawId && !isPlaceholderProductId(rawId) ? rawId : null;
+      const productId = resolveSnapshotLineProductId(row, lookup);
+      if (!productId) continue;
+      const canonicalKey = `${gid}::${productId}`;
+      const rawKey = normalizedRawId ? `${gid}::${normalizedRawId}` : null;
+      const isRequestedCanonical = requestedKeySet.has(canonicalKey);
+      const isRequestedRaw = Boolean(rawKey && requestedKeySet.has(rawKey));
+      if (!isRequestedCanonical && !isRequestedRaw) continue;
+
+      if (rawKey && rawKey !== canonicalKey && isRequestedRaw) {
+        remappedPairs.set(rawKey, canonicalKey);
+      }
+
+      const qtyRaw = Number(row?.quantity);
+      const qty = Number.isFinite(qtyRaw) ? Math.max(0, Math.trunc(qtyRaw)) : 0;
+      qtyByPoProductKey.set(canonicalKey, (qtyByPoProductKey.get(canonicalKey) || 0) + qty);
+    }
+  }
+
+  const rowsToCreate = [];
+  for (const [key, qtyValue] of qtyByPoProductKey.entries()) {
+    const [purchaseOrderGID, rslProductID] = String(key || "").split("::");
+    if (!purchaseOrderGID || !rslProductID) continue;
+    const initialQuantity = Number(qtyValue);
+    if (!Number.isFinite(initialQuantity) || initialQuantity <= 0) continue;
+
+    rowsToCreate.push({
+      purchaseOrderGID,
+      rslProductID,
+      initialQuantity,
+      committedQuantity: 0,
+    });
+  }
+
+  if (!rowsToCreate.length) return { remappedPairs };
+
+  await tx.tbljn_purchaseOrder_rslProduct.createMany({
+    data: rowsToCreate,
+    skipDuplicates: true,
+  });
+
+  return { remappedPairs };
+}
+
+const PDF_ACTIVE_CONTENT_PATTERNS = [
+  { pattern: /\/javascript\b/i, label: "JavaScript" },
+  { pattern: /\/js\b/i, label: "JavaScript" },
+  { pattern: /\/openaction\b/i, label: "OpenAction" },
+  { pattern: /\/aa\b/i, label: "Additional Actions" },
+  { pattern: /\/launch\b/i, label: "Launch Action" },
+  { pattern: /\/richmedia\b/i, label: "Rich Media" },
+  { pattern: /\/embeddedfile\b/i, label: "Embedded File" },
+  { pattern: /\/submitform\b/i, label: "Submit Form Action" },
+  { pattern: /\/importdata\b/i, label: "Import Data Action" },
+  { pattern: /\/gotoe\b/i, label: "Embedded GoTo Action" },
+  { pattern: /\/xfa\b/i, label: "XFA Form" },
+];
+
+function detectSuspiciousPdfFeatures(buffer) {
+  if (!buffer || buffer.length === 0) return [];
+
+  // Keep ASCII-ish tokens and collapse binary noise to reduce false positives.
+  const searchable = buffer.toString("latin1").replace(/[^\x20-\x7E]+/g, " ");
+  const hits = new Set();
+  for (const row of PDF_ACTIVE_CONTENT_PATTERNS) {
+    if (row.pattern.test(searchable)) {
+      hits.add(row.label);
+    }
+  }
+  return [...hits];
+}
+
+async function validateUploadedPdf(file, label) {
   if (!file) return null;
 
   const name = String(file.name || "");
@@ -146,6 +405,31 @@ function validateUploadedPdf(file, label) {
   const maxBytes = 20 * 1024 * 1024;
   if (typeof file.size === "number" && file.size > maxBytes) {
     return `${label} PDF is too large (max 20MB).`;
+  }
+
+  let buffer;
+  try {
+    buffer = Buffer.from(await file.arrayBuffer());
+  } catch {
+    return `Unable to read ${label} PDF. Please try a different file.`;
+  }
+
+  // Basic signature/structure checks.
+  const header = buffer.subarray(0, 5).toString("latin1");
+  if (header !== "%PDF-") {
+    return `${label} is not a valid PDF file.`;
+  }
+  const tail = buffer.subarray(Math.max(0, buffer.length - 2048)).toString("latin1");
+  if (!tail.includes("%%EOF")) {
+    return `${label} appears to be malformed. Please upload a standard exported PDF.`;
+  }
+
+  const suspicious = detectSuspiciousPdfFeatures(buffer);
+  if (suspicious.length > 0) {
+    return (
+      `${label} contains blocked active content (${suspicious.join(", ")}). ` +
+      `Upload a flattened/static PDF without scripts, actions, or embedded payloads.`
+    );
   }
 
   return null;
@@ -179,7 +463,7 @@ function parseBigIntLike(value) {
 }
 
 function pickPurchaseOrdersInfo(s) {
-  const links = Array.isArray(s?.tbljn_shipment_purchaseOrder) ? s.tbljn_shipment_purchaseOrder : [];
+  const links = Array.isArray(s?.tbljn_container_purchaseOrder) ? s.tbljn_container_purchaseOrder : [];
   const gids = links
     .map((l) => l?.tbl_purchaseOrder?.purchaseOrderGID)
     .filter(Boolean)
@@ -195,15 +479,54 @@ function pickPurchaseOrdersInfo(s) {
   };
 }
 
-function mapDbShipmentToUi(s) {
+function aggregateContainerProducts(containerRow) {
+  const allocations = Array.isArray(containerRow?.tbljn_container_purchaseOrder_rslProduct)
+    ? containerRow.tbljn_container_purchaseOrder_rslProduct
+    : [];
+  const byProduct = new Map();
+  for (const row of allocations) {
+    const rslProductID = String(row?.rslProductID || "").trim();
+    if (!rslProductID) continue;
+    const quantity = Number(row?.quantity) || 0;
+    const existing = byProduct.get(rslProductID) || {
+      rslProductID,
+      shortName: row?.tlkp_rslProduct?.shortName || rslProductID,
+      displayName: row?.tlkp_rslProduct?.displayName || rslProductID,
+      SKU: row?.tlkp_rslProduct?.SKU || null,
+      quantity: 0,
+    };
+    existing.quantity += quantity;
+    byProduct.set(rslProductID, existing);
+  }
+  return [...byProduct.values()];
+}
+
+function buildContainerPoAllocationMap(containerRow) {
+  const allocations = Array.isArray(containerRow?.tbljn_container_purchaseOrder_rslProduct)
+    ? containerRow.tbljn_container_purchaseOrder_rslProduct
+    : [];
+  const out = {};
+  for (const row of allocations) {
+    const productId = String(row?.rslProductID || "").trim();
+    const poGid = String(row?.purchaseOrderGID || "").trim();
+    const qty = Number(row?.quantity) || 0;
+    if (!productId || !poGid || qty <= 0) continue;
+    if (!out[productId]) out[productId] = {};
+    out[productId][poGid] = (Number(out[productId][poGid]) || 0) + qty;
+  }
+  return out;
+}
+
+function mapDbContainerToUi(s) {
   const po = pickPurchaseOrdersInfo(s);
+  const resolvedRslLogisticsID = normalizeRslLogisticsID(s.rslLogisticsID || "");
   const rawContainerNumber = String(s.containerNumber ?? "").trim();
   const statusLower = String(s.status ?? "").trim().toLowerCase();
   const hidePendingPlaceholder = isPendingContainerPlaceholder(rawContainerNumber) && statusLower === "pending";
 
-  // Map shipment notes/history
-  const history = Array.isArray(s.tbl_shipmentNotes)
-    ? s.tbl_shipmentNotes.map((n) => ({
+  // Map container notes/history
+  const history = Array.isArray(s.tbl_containerNotes)
+    ? s.tbl_containerNotes.map((n) => ({
         id: String(n.id),
         timestamp: n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString(),
         content: n.content || "",
@@ -212,29 +535,25 @@ function mapDbShipmentToUi(s) {
       }))
     : [];
 
-  // Map shipment product quantities
-  const products = Array.isArray(s.tbljn_shipment_rslProduct)
-    ? s.tbljn_shipment_rslProduct.map((p) => ({
-        rslProductID: p.rslProductID,
-        shortName: p.tlkp_rslProduct?.shortName || p.rslProductID,
-        displayName: p.tlkp_rslProduct?.displayName || p.rslProductID,
-        SKU: p.tlkp_rslProduct?.SKU || null,
-        quantity: p.quantity,
-      }))
-    : [];
+  // Map container product quantities from per-container PO allocations.
+  const products = aggregateContainerProducts(s);
 
   // Build productQuantities map for easy access
   const productQuantities = {};
   for (const p of products) {
     productQuantities[p.rslProductID] = p.quantity;
   }
+  const poAllocations = buildContainerPoAllocationMap(s);
 
   return {
-    id: String(s.id),
+    id: resolvedRslLogisticsID || String(s.id),
+    dbId: String(s.id),
+    rslLogisticsID: resolvedRslLogisticsID || String(s.id),
     supplierId: s.companyId,
     supplierName: s.companyName,
     products,
     productQuantities,
+    poAllocations,
 
     containerNumber: hidePendingPlaceholder ? "" : rawContainerNumber,
     containerSize: s.containerSize ?? "",
@@ -274,21 +593,21 @@ function mapDbShipmentToUi(s) {
   };
 }
 
-async function loadShipmentWithPo(id) {
-  return logisticsDb.tbl_shipment.findUnique({
+async function loadContainerWithPoByDbId(id) {
+  return logisticsDb.tbl_container.findUnique({
     where: { id },
     include: {
-      tbljn_shipment_purchaseOrder: {
+      tbljn_container_purchaseOrder: {
         include: {
           tbl_purchaseOrder: { select: { purchaseOrderGID: true, shortName: true } },
         },
       },
-      tbljn_shipment_rslProduct: {
+      tbljn_container_purchaseOrder_rslProduct: {
         include: {
           tlkp_rslProduct: { select: { shortName: true, displayName: true, SKU: true } },
         },
       },
-      tbl_shipmentNotes: {
+      tbl_containerNotes: {
         orderBy: { createdAt: "desc" },
         include: {
           tbl_logisticsUser: { select: { displayName: true } },
@@ -296,6 +615,63 @@ async function loadShipmentWithPo(id) {
       },
     },
   });
+}
+
+async function resolveContainerByExternalId(externalId) {
+  const normalized = String(externalId || "").trim();
+  if (!normalized) return null;
+
+  const asRsl = normalizeRslLogisticsID(normalized);
+  if (asRsl) {
+    const byRsl = await logisticsDb.tbl_container.findUnique({
+      where: { rslLogisticsID: asRsl },
+    });
+    if (byRsl) return byRsl;
+  }
+
+  const numericId = Number(normalized);
+  if (!Number.isNaN(numericId) && Number.isFinite(numericId) && numericId > 0) {
+    return logisticsDb.tbl_container.findUnique({
+      where: { id: numericId },
+    });
+  }
+
+  return null;
+}
+
+async function resolveContainerFromPayload(shipment) {
+  const externalContainerId = cleanStrOrNull(shipment?.id) || cleanStrOrNull(shipment?.rslLogisticsID);
+  if (externalContainerId) {
+    const byExternal = await resolveContainerByExternalId(externalContainerId);
+    if (byExternal) return byExternal;
+  }
+
+  const dbId = Number(shipment?.dbId);
+  if (!Number.isNaN(dbId) && Number.isFinite(dbId) && dbId > 0) {
+    const byDbId = await logisticsDb.tbl_container.findUnique({ where: { id: dbId } });
+    if (byDbId) return byDbId;
+  }
+
+  // Fallback for stale client IDs after ID-format migration.
+  const supplierId = cleanStrOrNull(shipment?.supplierId);
+  const containerNumber = cleanStrOrNull(String(shipment?.containerNumber || "").trim().toUpperCase());
+  if (!supplierId || !containerNumber) return null;
+
+  const candidates = await logisticsDb.tbl_container.findMany({
+    where: { companyId: supplierId, containerNumber },
+    orderBy: { id: "desc" },
+    take: 10,
+  });
+  if (!candidates.length) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  const etaYmd = toYyyyMmDd(parseDateLike(shipment?.eta));
+  if (etaYmd) {
+    const etaMatches = candidates.filter((row) => toYyyyMmDd(row?.etaDate) === etaYmd);
+    if (etaMatches.length === 1) return etaMatches[0];
+  }
+
+  return null;
 }
 
 async function validatePurchaseOrdersExist(tx, purchaseOrderGIDs) {
@@ -384,39 +760,112 @@ function normalizePoQuantitiesFromPayload(shipment) {
   return out;
 }
 
-async function prepareCommittedQuantityUpdates(tx, {
+function poProductKey(purchaseOrderGID, rslProductID) {
+  return `${String(purchaseOrderGID || "").trim()}::${String(rslProductID || "").trim()}`;
+}
+
+async function getLiveCommittedByPoProductKey(tx, pairs) {
+  const uniquePairs = uniqStrings(
+    (pairs || []).map((row) => poProductKey(row?.purchaseOrderGID, row?.rslProductID))
+  )
+    .map((key) => {
+      const [purchaseOrderGID, rslProductID] = String(key || "").split("::");
+      return {
+        purchaseOrderGID: String(purchaseOrderGID || "").trim(),
+        rslProductID: String(rslProductID || "").trim(),
+      };
+    })
+    .filter((row) => row.purchaseOrderGID && row.rslProductID);
+
+  if (!uniquePairs.length) return new Map();
+
+  const grouped = await tx.tbljn_container_purchaseOrder_rslProduct.groupBy({
+    by: ["purchaseOrderGID", "rslProductID"],
+    where: {
+      OR: uniquePairs.map((row) => ({
+        purchaseOrderGID: row.purchaseOrderGID,
+        rslProductID: row.rslProductID,
+      })),
+    },
+    _sum: { quantity: true },
+  });
+
+  const out = new Map();
+  for (const row of grouped || []) {
+    const key = poProductKey(row?.purchaseOrderGID, row?.rslProductID);
+    const qty = Number(row?._sum?.quantity) || 0;
+    out.set(key, Math.max(0, qty));
+  }
+  return out;
+}
+
+function buildProductQuantitiesFromAllocationRows(rows) {
+  const byProduct = new Map();
+  for (const row of rows || []) {
+    const rslProductID = String(row?.rslProductID || "").trim();
+    if (!rslProductID) continue;
+    const quantity = Number(row?.quantity) || 0;
+    if (quantity <= 0) continue;
+    byProduct.set(rslProductID, (byProduct.get(rslProductID) || 0) + quantity);
+  }
+  return [...byProduct.entries()].map(([rslProductID, quantity]) => ({ rslProductID, quantity }));
+}
+
+async function prepareContainerAllocationChanges(tx, {
+  containerId = null,
   purchaseOrderGIDs,
   poQuantities,
   productQuantities,
 }) {
   const gids = uniqStrings(purchaseOrderGIDs || []);
-  if (!gids.length || !poQuantities || typeof poQuantities !== "object") return [];
-
   const keyFor = (gid, productId) => `${gid}::${productId}`;
-  const requestedByKey = new Map();
 
-  for (const [productIdRaw, rowRaw] of Object.entries(poQuantities)) {
-    const productId = String(productIdRaw || "").trim();
-    if (!productId || !rowRaw || typeof rowRaw !== "object") continue;
-    for (const [gidRaw, remainingRaw] of Object.entries(rowRaw)) {
-      const gid = String(gidRaw || "").trim();
-      if (!gid || !gids.includes(gid)) continue;
-      const remaining = parseInt(String(remainingRaw ?? ""), 10);
-      if (Number.isNaN(remaining) || remaining < 0) continue;
-      requestedByKey.set(keyFor(gid, productId), {
-        purchaseOrderGID: gid,
-        rslProductID: productId,
-        remaining,
-      });
+  const existingAllocations = containerId
+    ? await tx.tbljn_container_purchaseOrder_rslProduct.findMany({
+      where: { containerID: containerId },
+      select: { purchaseOrderGID: true, rslProductID: true, quantity: true },
+    })
+    : [];
+
+  const existingByKey = new Map(
+    existingAllocations.map((x) => [keyFor(x.purchaseOrderGID, x.rslProductID), Number(x.quantity) || 0])
+  );
+
+  const requestedByKey = new Map();
+  if (poQuantities && typeof poQuantities === "object") {
+    for (const [productIdRaw, rowRaw] of Object.entries(poQuantities)) {
+      const productId = String(productIdRaw || "").trim();
+      if (!productId || !rowRaw || typeof rowRaw !== "object") continue;
+      for (const [gidRaw, remainingRaw] of Object.entries(rowRaw)) {
+        const gid = String(gidRaw || "").trim();
+        if (!gid || (gids.length && !gids.includes(gid))) continue;
+        const remaining = parseInt(String(remainingRaw ?? ""), 10);
+        if (Number.isNaN(remaining) || remaining < 0) continue;
+        requestedByKey.set(keyFor(gid, productId), {
+          purchaseOrderGID: gid,
+          rslProductID: productId,
+          remaining,
+        });
+      }
     }
   }
 
-  const requestedRows = [...requestedByKey.values()];
-  if (!requestedRows.length) return [];
+  let keysToProcess = new Set([
+    ...requestedByKey.keys(),
+    ...existingByKey.keys(),
+  ]);
+  if (!keysToProcess.size) {
+    return { committedDeltas: [], allocationRows: [] };
+  }
+
+  let pairs = [...keysToProcess].map((k) => {
+    const [purchaseOrderGID, rslProductID] = k.split("::");
+    return { purchaseOrderGID, rslProductID };
+  });
 
   const dbRows = await tx.tbljn_purchaseOrder_rslProduct.findMany({
     where: {
-      OR: requestedRows.map((x) => ({
+      OR: pairs.map((x) => ({
         purchaseOrderGID: x.purchaseOrderGID,
         rslProductID: x.rslProductID,
       })),
@@ -429,51 +878,153 @@ async function prepareCommittedQuantityUpdates(tx, {
     },
   });
 
-  const dbByKey = new Map(
-    dbRows.map((r) => [keyFor(r.purchaseOrderGID, r.rslProductID), r])
+  const dbByKey = new Map(dbRows.map((r) => [keyFor(r.purchaseOrderGID, r.rslProductID), r]));
+  const missingRequestedPairs = [...requestedByKey.values()].filter(
+    (row) => !dbByKey.has(keyFor(row.purchaseOrderGID, row.rslProductID))
   );
+  let remappedPairs = new Map();
+  if (missingRequestedPairs.length) {
+    // Auto-heal PO join rows when product refresh changed product identities but
+    // PO snapshot data still contains the original line items.
+    const backfill = await backfillMissingPoProductJoinRows(tx, missingRequestedPairs);
+    remappedPairs = backfill?.remappedPairs instanceof Map ? backfill.remappedPairs : new Map();
+  }
 
-  const desiredUsedByProduct = new Map();
-  const updates = [];
+  if (remappedPairs.size) {
+    for (const [oldKey, newKey] of remappedPairs.entries()) {
+      const oldRequested = requestedByKey.get(oldKey);
+      if (!oldRequested) continue;
+
+      const [mappedPoGid, mappedProductId] = String(newKey || "").split("::");
+      if (!mappedPoGid || !mappedProductId) continue;
+
+      const existingMapped = requestedByKey.get(newKey);
+      if (!existingMapped) {
+        requestedByKey.set(newKey, {
+          purchaseOrderGID: mappedPoGid,
+          rslProductID: mappedProductId,
+          remaining: oldRequested.remaining,
+        });
+      } else {
+        existingMapped.remaining = Math.min(
+          Number(existingMapped.remaining) || 0,
+          Number(oldRequested.remaining) || 0
+        );
+        requestedByKey.set(newKey, existingMapped);
+      }
+
+      requestedByKey.delete(oldKey);
+    }
+  }
+
+  keysToProcess = new Set([
+    ...requestedByKey.keys(),
+    ...existingByKey.keys(),
+  ]);
+  if (!keysToProcess.size) {
+    return { committedDeltas: [], allocationRows: [] };
+  }
+
+  pairs = [...keysToProcess].map((k) => {
+    const [purchaseOrderGID, rslProductID] = k.split("::");
+    return { purchaseOrderGID, rslProductID };
+  });
+
+  const missingDbPairs = pairs.filter((row) => !dbByKey.has(keyFor(row.purchaseOrderGID, row.rslProductID)));
+  if (missingDbPairs.length) {
+    const repairedRows = await tx.tbljn_purchaseOrder_rslProduct.findMany({
+      where: {
+        OR: missingDbPairs.map((row) => ({
+          purchaseOrderGID: row.purchaseOrderGID,
+          rslProductID: row.rslProductID,
+        })),
+      },
+      select: {
+        purchaseOrderGID: true,
+        rslProductID: true,
+        initialQuantity: true,
+        committedQuantity: true,
+      },
+    });
+    for (const row of repairedRows || []) {
+      dbByKey.set(keyFor(row.purchaseOrderGID, row.rslProductID), row);
+    }
+  }
+
+  const liveCommittedByKey = await getLiveCommittedByPoProductKey(tx, pairs);
+
   const conflicts = [];
+  const committedDeltaByKey = new Map();
+  const desiredByProduct = new Map();
+  const allocationRows = [];
 
-  for (const req of requestedRows) {
-    const db = dbByKey.get(keyFor(req.purchaseOrderGID, req.rslProductID));
-    if (!db) continue; // no PO/product reference, ignore
+  for (const k of keysToProcess) {
+    const db = dbByKey.get(k);
+    const [purchaseOrderGID, rslProductID] = k.split("::");
+    const previousQty = existingByKey.get(k) || 0;
+    const requested = requestedByKey.get(k);
+    if (!db) {
+      if (requested) {
+        conflicts.push(`${purchaseOrderGID}/${rslProductID} is not a valid PO product line.`);
+      }
+      continue;
+    }
 
     const initial = Number(db.initialQuantity) || 0;
-    const currentCommitted = Number(db.committedQuantity) || 0;
-    const currentAvailable = Math.max(0, initial - currentCommitted);
-    const remaining = Math.min(Math.max(req.remaining, 0), initial);
-    const desiredUsed = Math.max(0, initial - remaining);
-
-    if (desiredUsed > currentAvailable) {
+    // Use live container allocation totals as the source of truth for committed quantity.
+    // tbljn_purchaseOrder_rslProduct.committedQuantity can be stale during data transitions.
+    const currentCommitted = Number(liveCommittedByKey.get(k)) || 0;
+    // UI PO-field values are "remaining from currently available", not from initial PO quantity.
+    // Base availability for this container = initial - liveCommitted + thisContainerPreviousAllocation.
+    const availableToContainer = Math.max(0, initial - currentCommitted + previousQty);
+    const remaining = requested
+      ? Math.min(Math.max(requested.remaining, 0), availableToContainer)
+      : availableToContainer;
+    const desiredQty = Math.max(0, availableToContainer - remaining);
+    const delta = desiredQty - previousQty;
+    const nextCommitted = currentCommitted + delta;
+    if (nextCommitted < 0 || nextCommitted > initial) {
       conflicts.push(
-        `${req.purchaseOrderGID}/${req.rslProductID} requested ${desiredUsed}, available ${currentAvailable}`
+        `${purchaseOrderGID}/${rslProductID} requested ${desiredQty}, previous ${previousQty}, available ${availableToContainer}`
       );
       continue;
     }
 
-    desiredUsedByProduct.set(
-      req.rslProductID,
-      (desiredUsedByProduct.get(req.rslProductID) || 0) + desiredUsed
-    );
-
-    updates.push({
-      purchaseOrderGID: req.purchaseOrderGID,
-      rslProductID: req.rslProductID,
-      committedQuantity: desiredUsed,
-    });
+    committedDeltaByKey.set(k, delta);
+    if (desiredQty > 0) {
+      allocationRows.push({ purchaseOrderGID, rslProductID, quantity: desiredQty });
+      desiredByProduct.set(rslProductID, (desiredByProduct.get(rslProductID) || 0) + desiredQty);
+    }
   }
 
-  const productQtyMap = new Map(
-    (productQuantities || []).map((pq) => [String(pq.rslProductID), Number(pq.quantity) || 0])
-  );
-  for (const [productId, desiredUsed] of desiredUsedByProduct.entries()) {
-    const expected = productQtyMap.get(productId) || 0;
-    if (expected !== desiredUsed) {
+  const productIdRemap = new Map();
+  for (const [oldKey, newKey] of remappedPairs.entries()) {
+    const [, oldProductId] = String(oldKey || "").split("::");
+    const [, newProductId] = String(newKey || "").split("::");
+    if (!oldProductId || !newProductId || oldProductId === newProductId) continue;
+    if (!productIdRemap.has(oldProductId)) productIdRemap.set(oldProductId, new Set());
+    productIdRemap.get(oldProductId).add(newProductId);
+  }
+
+  const expectedByProduct = new Map();
+  for (const pq of productQuantities || []) {
+    const rawProductId = String(pq?.rslProductID || "").trim();
+    if (!rawProductId) continue;
+    const qty = Number(pq?.quantity) || 0;
+    const remapTargets = productIdRemap.get(rawProductId);
+    const productId =
+      remapTargets && remapTargets.size === 1
+        ? [...remapTargets][0]
+        : rawProductId;
+    expectedByProduct.set(productId, (expectedByProduct.get(productId) || 0) + qty);
+  }
+  const allProductIds = new Set([...expectedByProduct.keys(), ...desiredByProduct.keys()]);
+  for (const productId of allProductIds) {
+    const expected = expectedByProduct.get(productId) || 0;
+    const desired = desiredByProduct.get(productId) || 0;
+    if (expected !== desired) {
       conflicts.push(
-        `${productId} container quantity mismatch (PO fields total ${desiredUsed}, This Container ${expected})`
+        `${productId} container quantity mismatch (PO fields total ${desired}, This Container ${expected})`
       );
     }
   }
@@ -484,7 +1035,29 @@ async function prepareCommittedQuantityUpdates(tx, {
     throw err;
   }
 
-  return updates;
+  const committedDeltas = [];
+  for (const [k, delta] of committedDeltaByKey.entries()) {
+    if (!delta) continue;
+    const [purchaseOrderGID, rslProductID] = k.split("::");
+    committedDeltas.push({ purchaseOrderGID, rslProductID, delta });
+  }
+
+  return { committedDeltas, allocationRows };
+}
+
+async function applyCommittedQuantityDeltas(tx, deltas) {
+  for (const row of deltas || []) {
+    if (!row?.delta) continue;
+    await tx.tbljn_purchaseOrder_rslProduct.updateMany({
+      where: {
+        purchaseOrderGID: row.purchaseOrderGID,
+        rslProductID: row.rslProductID,
+      },
+      data: row.delta > 0
+        ? { committedQuantity: { increment: row.delta } }
+        : { committedQuantity: { decrement: Math.abs(row.delta) } },
+    });
+  }
 }
 
 function shopFromUrlString(urlStr) {
@@ -646,10 +1219,10 @@ export async function action({ request }) {
     } else if (contentType.includes("multipart/form-data")) {
       const formData = await request.formData();
       const intent = cleanStrOrNull(formData.get("intent"));
-      const shipmentRaw = cleanStrOrNull(formData.get("shipment"));
-      let shipmentData = {};
+      const containerRaw = cleanStrOrNull(formData.get("container")) || cleanStrOrNull(formData.get("shipment"));
+      let containerData = {};
       try {
-        shipmentData = shipmentRaw ? JSON.parse(shipmentRaw) : {};
+        containerData = containerRaw ? JSON.parse(containerRaw) : {};
       } catch {
         // ignore
       }
@@ -667,23 +1240,40 @@ export async function action({ request }) {
       packingListFile = hasPackingList ? packingList : null;
       commercialInvoiceFile = hasCommercialInvoice ? commercialInvoice : null;
 
-      const packingListValidationError = validateUploadedPdf(packingListFile, "Packing List");
+      const packingListValidationError = await validateUploadedPdf(packingListFile, "Packing List");
       if (packingListValidationError) {
+        console.warn("[logistics shipments] blocked upload:", {
+          fileName: packingListFile?.name || null,
+          label: "Packing List",
+          reason: packingListValidationError,
+        });
         return json({ success: false, error: packingListValidationError }, { status: 200 });
       }
 
-      const commercialInvoiceValidationError = validateUploadedPdf(commercialInvoiceFile, "Commercial Invoice");
+      const commercialInvoiceValidationError = await validateUploadedPdf(commercialInvoiceFile, "Commercial Invoice");
       if (commercialInvoiceValidationError) {
+        console.warn("[logistics shipments] blocked upload:", {
+          fileName: commercialInvoiceFile?.name || null,
+          label: "Commercial Invoice",
+          reason: commercialInvoiceValidationError,
+        });
         return json({ success: false, error: commercialInvoiceValidationError }, { status: 200 });
       }
 
-      payload = { intent, shipment: shipmentData };
+      payload = { intent, container: containerData, shipment: containerData };
     } else {
       const formData = await request.formData();
       payload = Object.fromEntries(formData);
-      if (typeof payload.shipment === "string") {
+      if (typeof payload.container === "string") {
         try {
-          payload.shipment = JSON.parse(payload.shipment);
+          payload.container = JSON.parse(payload.container);
+        } catch {
+          // ignore
+        }
+      }
+      if (!payload.container && typeof payload.shipment === "string") {
+        try {
+          payload.container = JSON.parse(payload.shipment);
         } catch {
           // ignore
         }
@@ -691,7 +1281,7 @@ export async function action({ request }) {
     }
 
     const intent = payload.intent;
-    const shipment = payload.shipment || {};
+    const shipment = payload.container || payload.shipment || {};
     debug.intent = intent;
 
     if (!intent) {
@@ -703,13 +1293,12 @@ export async function action({ request }) {
       debug.stage = "create";
 
       const supplierId = actorIsSupplier ? actorCompanyId : String(shipment.supplierId || "").trim();
-      let containerNumber = String(shipment.containerNumber || "").trim().toUpperCase();
+      const containerNumber = cleanStrOrNull(String(shipment.containerNumber || "").trim().toUpperCase());
 
       const containerSize = cleanStrOrNull(shipment.containerSize);
       const portOfOrigin = cleanStrOrNull(shipment.portOfOrigin);
       const destinationPort = cleanStrOrNull(shipment.destinationPort);
       const status = cleanStrOrNull(shipment.status) || "Pending";
-      const isPendingStatus = String(status || "").trim().toLowerCase() === "pending";
 
       const etaDate = parseDateLike(shipment.eta);
       const cargoReadyDate = parseDateLike(shipment.cargoReadyDate);
@@ -739,17 +1328,6 @@ export async function action({ request }) {
 
       if (!supplierId) {
         return json({ success: false, error: "Supplier is required.", debug }, { status: 200 });
-      }
-
-      if (!containerNumber && !isPendingStatus) {
-        return json(
-          { success: false, error: "Container # is required unless status is Pending.", debug },
-          { status: 200 }
-        );
-      }
-
-      if (!containerNumber && isPendingStatus) {
-        containerNumber = buildPendingContainerPlaceholder();
       }
 
       if (!destinationPort || !etaDate) {
@@ -810,88 +1388,92 @@ export async function action({ request }) {
       let createdId;
 
       try {
-        createdId = await logisticsDb.$transaction(async (tx) => {
-          await validatePurchaseOrdersExist(tx, purchaseOrderGIDs);
-          await validatePurchaseOrdersHaveProForma(tx, purchaseOrderGIDs);
-          const committedUpdates = await prepareCommittedQuantityUpdates(tx, {
-            purchaseOrderGIDs,
-            poQuantities,
-            productQuantities,
-          });
-
-          const created = await tx.tbl_shipment.create({
-            data: {
-              companyId: supplierId,
-              companyName,
-              containerNumber,
-              containerSize,
-              portOfOrigin,
-              destinationPort,
-              etaDate,
-
-              cargoReadyDate,
-              estimatedDeliveryToOrigin,
-              supplierPi,
-              packingListUrl,
-              packingListFileName,
-              commercialInvoiceUrl,
-              commercialInvoiceFileName,
-              quantity,
-              bookingNumber,
-              bookingAgent,
-              vesselName,
-              deliveryAddress,
-              notes,
-
-              status,
-              updatedAt: new Date(),
-            },
-          });
-
-          if (purchaseOrderGIDs.length) {
-            await tx.tbljn_shipment_purchaseOrder.createMany({
-              data: purchaseOrderGIDs.map((purchaseOrderGID) => ({
-                shipmentID: containerNumber,
-                purchaseOrderGID,
-              })),
-            });
-          }
-
-          // Save product quantities
-          if (productQuantities.length) {
-            await tx.tbljn_shipment_rslProduct.createMany({
-              data: productQuantities.map((pq) => ({
-                shipmentId: created.id,
-                rslProductID: pq.rslProductID,
-                quantity: pq.quantity,
-              })),
-            });
-          }
-
-          if (committedUpdates.length) {
-            for (const row of committedUpdates) {
-              await tx.tbljn_purchaseOrder_rslProduct.updateMany({
-                where: {
-                  purchaseOrderGID: row.purchaseOrderGID,
-                  rslProductID: row.rslProductID,
-                },
-                data: { committedQuantity: row.committedQuantity },
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const generatedRslLogisticsID = generateRslLogisticsID();
+          try {
+            createdId = await logisticsDb.$transaction(async (tx) => {
+              await validatePurchaseOrdersExist(tx, purchaseOrderGIDs);
+              await validatePurchaseOrdersHaveProForma(tx, purchaseOrderGIDs);
+              const allocationPlan = await prepareContainerAllocationChanges(tx, {
+                containerId: null,
+                purchaseOrderGIDs,
+                poQuantities,
+                productQuantities,
               });
-            }
+
+              const created = await tx.tbl_container.create({
+                data: {
+                  rslLogisticsID: generatedRslLogisticsID,
+                  companyId: supplierId,
+                  companyName,
+                  containerNumber,
+                  containerSize,
+                  portOfOrigin,
+                  destinationPort,
+                  etaDate,
+
+                  cargoReadyDate,
+                  estimatedDeliveryToOrigin,
+                  supplierPi,
+                  packingListUrl,
+                  packingListFileName,
+                  commercialInvoiceUrl,
+                  commercialInvoiceFileName,
+                  quantity,
+                  bookingNumber,
+                  bookingAgent,
+                  vesselName,
+                  deliveryAddress,
+                  notes,
+
+                  status,
+                  updatedAt: new Date(),
+                },
+              });
+
+              if (purchaseOrderGIDs.length) {
+                await tx.tbljn_container_purchaseOrder.createMany({
+                  data: purchaseOrderGIDs.map((purchaseOrderGID) => ({
+                    containerID: created.id,
+                    purchaseOrderGID,
+                  })),
+                });
+              }
+
+              if (allocationPlan.allocationRows.length) {
+                await tx.tbljn_container_purchaseOrder_rslProduct.createMany({
+                  data: allocationPlan.allocationRows.map((row) => ({
+                    containerID: created.id,
+                    purchaseOrderGID: row.purchaseOrderGID,
+                    rslProductID: row.rslProductID,
+                    quantity: row.quantity,
+                  })),
+                });
+              }
+              await applyCommittedQuantityDeltas(tx, allocationPlan.committedDeltas);
+
+              // Always add a history entry so create events are visible in the modal timeline.
+              await tx.tbl_containerNotes.create({
+                data: {
+                  containerId: created.id,
+                  userId: actor?.id ? Number(actor.id) : null,
+                  content: "Container created.",
+                  changes: null,
+                },
+              });
+
+              return created.id;
+            });
+            break;
+          } catch (innerErr) {
+            if (isRslLogisticsIDConflict(innerErr) && attempt < 4) continue;
+            throw innerErr;
           }
+        }
 
-          // Always add a history entry so create events are visible in the modal timeline.
-          await tx.tbl_shipmentNotes.create({
-            data: {
-              shipmentId: created.id,
-              userId: actor?.id ? Number(actor.id) : null,
-              content: "Shipment created.",
-              changes: null,
-            },
-          });
-
-          return created.id;
-        });
+        if (!createdId) {
+          throw new Error("RSL_LOGISTICS_ID_GENERATION_FAILED");
+        }
       } catch (err) {
         console.error("[logistics shipments] create error:", err);
 
@@ -929,14 +1511,12 @@ export async function action({ request }) {
           );
         }
 
-        return json(
-          { success: false, error: "Container # already exists (must be unique).", debug },
-          { status: 200 }
-        );
+        return json({ success: false, error: "Server error while creating container.", debug }, { status: 200 });
       }
 
-      const full = await loadShipmentWithPo(createdId);
-      return json({ success: true, shipment: mapDbShipmentToUi(full || {}), debug }, { status: 200 });
+      const full = await loadContainerWithPoByDbId(createdId);
+      const mapped = mapDbContainerToUi(full || {});
+      return json({ success: true, container: mapped, shipment: mapped, debug }, { status: 200 });
     }
 
     // UPDATE
@@ -946,15 +1526,11 @@ export async function action({ request }) {
       // Track who made the update
       const userId = actor?.id ? Number(actor.id) : null;
 
-      const id = Number(shipment.id);
-      if (!id || Number.isNaN(id)) {
-        return json({ success: false, error: "Missing shipment id.", debug }, { status: 200 });
-      }
-
-      const existing = await logisticsDb.tbl_shipment.findUnique({ where: { id } });
+      const existing = await resolveContainerFromPayload(shipment);
       if (!existing) {
-        return json({ success: false, error: "Shipment not found.", debug }, { status: 200 });
+        return json({ success: false, error: "Container not found. Refresh and try again.", debug }, { status: 200 });
       }
+      const id = existing.id;
 
       if (actorIsSupplier && String(existing.companyId || "").trim() !== actorCompanyId) {
         return json({ success: false, error: "Not authorized." }, { status: 403 });
@@ -972,18 +1548,18 @@ export async function action({ request }) {
       const companyName =
         (company?.displayName && String(company.displayName).trim()) || supplierId;
 
-      // Container number - can be updated, but need to update join table references
+      // Container number is optional and can be cleared.
+      const containerNumberProvided =
+        shipment && Object.prototype.hasOwnProperty.call(shipment, "containerNumber");
       const containerNumberRaw = String(shipment.containerNumber || "").trim().toUpperCase();
-      const containerNumber = containerNumberRaw || existing.containerNumber;
-      const containerNumberChanged = containerNumber !== existing.containerNumber;
+      const containerNumber = containerNumberProvided
+        ? cleanStrOrNull(containerNumberRaw)
+        : existing.containerNumber;
 
       const containerSize = cleanStrOrNull(shipment.containerSize);
       const portOfOrigin = cleanStrOrNull(shipment.portOfOrigin);
       const destinationPort = cleanStrOrNull(shipment.destinationPort);
       const status = cleanStrOrNull(shipment.status);
-      const effectiveStatus = status ?? cleanStrOrNull(existing.status) ?? "";
-      const isPendingStatus = String(effectiveStatus || "").trim().toLowerCase() === "pending";
-      const existingContainerIsPlaceholder = isPendingContainerPlaceholder(existing.containerNumber);
 
       const etaDate = parseDateLike(shipment.eta);
       const cargoReadyDate = parseDateLike(shipment.cargoReadyDate);
@@ -1036,15 +1612,8 @@ export async function action({ request }) {
         }
       }
 
-      // Notes entered during update go to tbl_shipmentNotes, not to the shipment record
+      // Notes entered during update go to tbl_containerNotes, not to the shipment record
       const updateNotes = cleanStrOrNull(shipment.notes);
-
-      if (!containerNumberRaw && !isPendingStatus && existingContainerIsPlaceholder) {
-        return json(
-          { success: false, error: "Container # is required unless status is Pending.", debug },
-          { status: 200 }
-        );
-      }
 
       // Quantity: preserve existing if blank/omitted
       const quantityRaw = shipment.quantity;
@@ -1074,7 +1643,7 @@ export async function action({ request }) {
       const poQuantitiesPresent = shipment && Object.prototype.hasOwnProperty.call(shipment, "poQuantities");
       const nextPoQuantities = poQuantitiesPresent ? normalizePoQuantitiesFromPayload(shipment) : null;
 
-      // Data to update in tbl_shipment (notes field is NOT updated - initial notes stay)
+      // Data to update in tbl_container (notes field is NOT updated - initial notes stay)
       const data = {
         companyId: supplierId,
         companyName,
@@ -1115,8 +1684,8 @@ export async function action({ request }) {
 
       // Track PO changes separately
       if (poFieldPresent) {
-        const oldGids = await logisticsDb.tbljn_shipment_purchaseOrder.findMany({
-          where: { shipmentID: existing.containerNumber },
+        const oldGids = await logisticsDb.tbljn_container_purchaseOrder.findMany({
+          where: { containerID: id },
           select: { purchaseOrderGID: true },
         });
         const oldGidSet = new Set(oldGids.map((x) => x.purchaseOrderGID));
@@ -1136,17 +1705,23 @@ export async function action({ request }) {
 
       // Track product quantity changes
       if (productQuantitiesPresent) {
-        const oldProducts = await logisticsDb.tbljn_shipment_rslProduct.findMany({
-          where: { shipmentId: id },
+        const oldProducts = await logisticsDb.tbljn_container_purchaseOrder_rslProduct.findMany({
+          where: { containerID: id },
           include: { tlkp_rslProduct: { select: { displayName: true } } },
         });
 
         // Build maps for comparison
         const oldQtyMap = new Map();
         for (const p of oldProducts) {
-          oldQtyMap.set(p.rslProductID, {
-            quantity: p.quantity,
-            displayName: p.tlkp_rslProduct?.displayName || p.rslProductID,
+          const key = String(p.rslProductID || "").trim();
+          if (!key) continue;
+          const prev = oldQtyMap.get(key) || {
+            quantity: 0,
+            displayName: p.tlkp_rslProduct?.displayName || key,
+          };
+          oldQtyMap.set(key, {
+            quantity: (Number(prev.quantity) || 0) + (Number(p.quantity) || 0),
+            displayName: prev.displayName,
           });
         }
 
@@ -1189,93 +1764,67 @@ export async function action({ request }) {
 
       try {
         await logisticsDb.$transaction(async (tx) => {
-          await tx.tbl_shipment.update({ where: { id }, data });
-
-          // If container number changed but POs not explicitly updated, update the join table references
-          if (containerNumberChanged && !poFieldPresent) {
-            await tx.tbljn_shipment_purchaseOrder.updateMany({
-              where: { shipmentID: existing.containerNumber },
-              data: { shipmentID: containerNumber },
-            });
-          }
+          await tx.tbl_container.update({ where: { id }, data });
 
           if (poFieldPresent) {
             const gids = nextPurchaseOrderGIDs || [];
             await validatePurchaseOrdersExist(tx, gids);
             await validatePurchaseOrdersHaveProForma(tx, gids);
 
-            await tx.tbljn_shipment_purchaseOrder.deleteMany({
-              where: { shipmentID: existing.containerNumber },
+            await tx.tbljn_container_purchaseOrder.deleteMany({
+              where: { containerID: id },
             });
 
             if (gids.length) {
-              await tx.tbljn_shipment_purchaseOrder.createMany({
+              await tx.tbljn_container_purchaseOrder.createMany({
                 data: gids.map((purchaseOrderGID) => ({
-                  shipmentID: containerNumber, // Use new containerNumber
+                  containerID: id,
                   purchaseOrderGID,
                 })),
               });
             }
           }
 
-          if (poQuantitiesPresent) {
+          const shouldSyncAllocations = poFieldPresent || poQuantitiesPresent || productQuantitiesPresent;
+          if (shouldSyncAllocations) {
             const effectivePoGids = poFieldPresent
               ? (nextPurchaseOrderGIDs || [])
               : uniqStrings(
                 (
-                  await tx.tbljn_shipment_purchaseOrder.findMany({
-                    where: { shipmentID: containerNumber },
+                  await tx.tbljn_container_purchaseOrder.findMany({
+                    where: { containerID: id },
                     select: { purchaseOrderGID: true },
                   })
                 ).map((x) => String(x.purchaseOrderGID || ""))
               );
 
+            const existingAllocationRows = await tx.tbljn_container_purchaseOrder_rslProduct.findMany({
+              where: { containerID: id },
+              select: { rslProductID: true, quantity: true },
+            });
             const effectiveProductQuantities = productQuantitiesPresent
               ? (nextProductQuantities || [])
-              : (
-                await tx.tbljn_shipment_rslProduct.findMany({
-                  where: { shipmentId: id },
-                  select: { rslProductID: true, quantity: true },
-                })
-              ).map((x) => ({
-                rslProductID: String(x.rslProductID || "").trim(),
-                quantity: Number(x.quantity) || 0,
-              }));
+              : buildProductQuantitiesFromAllocationRows(existingAllocationRows);
 
-            const committedUpdates = await prepareCommittedQuantityUpdates(tx, {
+            const allocationPlan = await prepareContainerAllocationChanges(tx, {
+              containerId: id,
               purchaseOrderGIDs: effectivePoGids,
-              poQuantities: nextPoQuantities || {},
+              poQuantities: poQuantitiesPresent ? (nextPoQuantities || {}) : {},
               productQuantities: effectiveProductQuantities,
             });
 
-            if (committedUpdates.length) {
-              for (const row of committedUpdates) {
-                await tx.tbljn_purchaseOrder_rslProduct.updateMany({
-                  where: {
-                    purchaseOrderGID: row.purchaseOrderGID,
-                    rslProductID: row.rslProductID,
-                  },
-                  data: { committedQuantity: row.committedQuantity },
-                });
-              }
-            }
-          }
+            await applyCommittedQuantityDeltas(tx, allocationPlan.committedDeltas);
 
-          // Update product quantities if provided
-          if (productQuantitiesPresent) {
-            // Delete existing product quantities
-            await tx.tbljn_shipment_rslProduct.deleteMany({
-              where: { shipmentId: id },
+            await tx.tbljn_container_purchaseOrder_rslProduct.deleteMany({
+              where: { containerID: id },
             });
-
-            // Insert new product quantities
-            const pqs = nextProductQuantities || [];
-            if (pqs.length) {
-              await tx.tbljn_shipment_rslProduct.createMany({
-                data: pqs.map((pq) => ({
-                  shipmentId: id,
-                  rslProductID: pq.rslProductID,
-                  quantity: pq.quantity,
+            if (allocationPlan.allocationRows.length) {
+              await tx.tbljn_container_purchaseOrder_rslProduct.createMany({
+                data: allocationPlan.allocationRows.map((row) => ({
+                  containerID: id,
+                  purchaseOrderGID: row.purchaseOrderGID,
+                  rslProductID: row.rslProductID,
+                  quantity: row.quantity,
                 })),
               });
             }
@@ -1283,9 +1832,9 @@ export async function action({ request }) {
 
           // Create a history note if there are changes or notes
           if (changes.length > 0 || updateNotes) {
-            await tx.tbl_shipmentNotes.create({
+            await tx.tbl_containerNotes.create({
               data: {
-                shipmentId: id,
+                containerId: id,
                 userId: userId,
                 content: updateNotes || "",
                 changes: changes.length > 0 ? JSON.stringify(changes) : null,
@@ -1330,43 +1879,65 @@ export async function action({ request }) {
           );
         }
 
-        return json({ success: false, error: "Server error while updating shipment.", debug }, { status: 200 });
+        return json({ success: false, error: "Server error while updating container.", debug }, { status: 200 });
       }
 
-      const full = await loadShipmentWithPo(id);
-      return json({ success: true, shipment: mapDbShipmentToUi(full || {}), debug }, { status: 200 });
+      const full = await loadContainerWithPoByDbId(id);
+      const mapped = mapDbContainerToUi(full || {});
+      return json({ success: true, container: mapped, shipment: mapped, debug }, { status: 200 });
     }
 
     // DELETE
     if (intent === "delete") {
       debug.stage = "delete";
 
-      const id = Number(shipment.id);
-      if (!id || Number.isNaN(id)) {
-        return json({ success: false, error: "Missing shipment id.", debug }, { status: 200 });
-      }
-
-      const existing = await logisticsDb.tbl_shipment.findUnique({ where: { id } });
+      const existing = await resolveContainerFromPayload(shipment);
       if (!existing) {
-        return json({ success: false, error: "Shipment not found.", debug }, { status: 200 });
+        return json({ success: false, error: "Container not found. Refresh and try again.", debug }, { status: 200 });
       }
+      const id = existing.id;
 
       if (actorIsSupplier && String(existing.companyId || "").trim() !== actorCompanyId) {
         return json({ success: false, error: "Not authorized." }, { status: 403 });
       }
 
-      await logisticsDb.tbljn_shipment_purchaseOrder.deleteMany({
-        where: { shipmentID: existing.containerNumber },
+      await logisticsDb.$transaction(async (tx) => {
+        const allocationRows = await tx.tbljn_container_purchaseOrder_rslProduct.findMany({
+          where: { containerID: id },
+          select: { purchaseOrderGID: true, rslProductID: true, quantity: true },
+        });
+
+        if (allocationRows.length) {
+          await applyCommittedQuantityDeltas(
+            tx,
+            allocationRows
+              .filter((row) => Number(row.quantity) > 0)
+              .map((row) => ({
+                purchaseOrderGID: row.purchaseOrderGID,
+                rslProductID: row.rslProductID,
+                delta: -Math.abs(Number(row.quantity) || 0),
+              }))
+          );
+        }
+
+        await tx.tbljn_container_purchaseOrder_rslProduct.deleteMany({
+          where: { containerID: id },
+        });
+        await tx.tbljn_container_purchaseOrder.deleteMany({
+          where: { containerID: id },
+        });
+        await tx.tbl_container.delete({ where: { id } });
       });
 
-      await logisticsDb.tbl_shipment.delete({ where: { id } });
-
-      return json({ success: true, deletedId: String(id), debug }, { status: 200 });
+      return json(
+        { success: true, deletedId: normalizeRslLogisticsID(existing.rslLogisticsID) || String(id), debug },
+        { status: 200 }
+      );
     }
 
     return json({ success: false, error: "Unknown intent.", debug }, { status: 200 });
   } catch (err) {
     console.error("[logistics shipments] unexpected error:", err, debug);
-    return json({ success: false, error: "Server error while saving shipment.", debug }, { status: 200 });
+    return json({ success: false, error: "Server error while saving container.", debug }, { status: 200 });
   }
 }

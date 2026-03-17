@@ -235,6 +235,27 @@ function normalizePoQuantitiesShape(
   return out;
 }
 
+function normalizePoAllocationsShape(
+  raw: unknown
+): Record<string, Record<string, number>> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, Record<string, number>> = {};
+  for (const [productIdRaw, rowRaw] of Object.entries(raw as Record<string, unknown>)) {
+    const productId = String(productIdRaw || "").trim();
+    if (!productId || !rowRaw || typeof rowRaw !== "object") continue;
+    const rowOut: Record<string, number> = {};
+    for (const [gidRaw, qtyRaw] of Object.entries(rowRaw as Record<string, unknown>)) {
+      const gid = String(gidRaw || "").trim();
+      if (!gid) continue;
+      const qty = parseWholeNonNegativeInt(qtyRaw);
+      if (qty == null || qty <= 0) continue;
+      rowOut[gid] = qty;
+    }
+    if (Object.keys(rowOut).length) out[productId] = rowOut;
+  }
+  return out;
+}
+
 function poQuantitiesEqual(
   a: Record<string, Record<string, string>> | null | undefined,
   b: Record<string, Record<string, string>> | null | undefined
@@ -477,7 +498,8 @@ export default function ShipmentDetailsModal({
     })()
   );
 
-  const title = "Shipping Container Details";
+  const headerContainerId = norm((shipment as any).rslLogisticsID || shipment.id);
+  const title = `Shipping Container Details - ${isCreate ? "NEW" : (headerContainerId || "UNKNOWN")}`;
 
   // Filter purchase orders by selected supplier (for both create and edit mode)
   const filteredPurchaseOrders = useMemo(() => {
@@ -544,7 +566,7 @@ export default function ShipmentDetailsModal({
   const existingPackingListFileName = norm((shipment as any).packingListFileName);
   const existingCommercialInvoiceUrl = norm((shipment as any).commercialInvoiceUrl);
   const existingCommercialInvoiceFileName = norm((shipment as any).commercialInvoiceFileName);
-  const isReadOnlySupplierDocs = isSupplier && !isCreate;
+  const isReadOnlySupplierDocs = !canEdit;
 
   const buildInitialProductQuantities = () => {
     const saved = (shipment as any).productQuantities;
@@ -560,6 +582,10 @@ export default function ShipmentDetailsModal({
 
   const buildInitialPoFieldQuantities = () =>
     normalizePoQuantitiesShape((shipment as any).poQuantities);
+  const containerPoAllocations = useMemo(
+    () => normalizePoAllocationsShape((shipment as any).poAllocations),
+    [shipment]
+  );
 
   // Track typed quantities and validated (applied) quantities separately.
   const [productQuantities, setProductQuantities] = useState<Record<string, string>>(
@@ -576,6 +602,9 @@ export default function ShipmentDetailsModal({
   );
   const [selectedPoFieldsByProduct, setSelectedPoFieldsByProduct] = useState<Record<string, string[]>>({});
   const poFieldFocusFromPointerRef = React.useRef(false);
+  const poQuantityInputRefs = React.useRef<Record<string, HTMLInputElement | null>>({});
+  const thisContainerInputRefs = React.useRef<Record<string, HTMLInputElement | null>>({});
+  const rowSwipeStartRef = React.useRef<{ productId: string; startX: number; startY: number } | null>(null);
   const [productQuantityErrors, setProductQuantityErrors] = useState<Record<string, string>>({});
   const previousProductQuantitiesRef = React.useRef<Record<string, string>>({});
   const previousPoFieldQuantitiesRef = React.useRef<Record<string, string>>({});
@@ -623,12 +652,17 @@ export default function ShipmentDetailsModal({
         const committedQuantity =
           typeof product?.committedQuantity === "number" ? product.committedQuantity : 0;
         const availableQuantity = Math.max(0, initialQuantity - committedQuantity);
-        productMap.set(productId, (productMap.get(productId) || 0) + availableQuantity);
+        const allocatedInThisContainer =
+          clampWholeNonNegativeInt(containerPoAllocations?.[productId]?.[gid], 0, Number.MAX_SAFE_INTEGER);
+        // For existing containers, add this container's allocation back so "This Container"
+        // can be reconstructed from PO fields on reopen.
+        const editableBaseQuantity = Math.max(0, availableQuantity + allocatedInThisContainer);
+        productMap.set(productId, (productMap.get(productId) || 0) + editableBaseQuantity);
       }
       out.set(gid, productMap);
     }
     return out;
-  }, [selectedPurchaseOrders]);
+  }, [selectedPurchaseOrders, containerPoAllocations]);
 
   // Aggregate products from all selected purchase orders
   const aggregatedProducts = useMemo(() => {
@@ -670,14 +704,71 @@ export default function ShipmentDetailsModal({
     );
   }, [selectedPurchaseOrders]);
 
+  const unmappedPoLines = useMemo(() => {
+    const rows: Array<{
+      key: string;
+      purchaseOrderGID: string;
+      shortName: string;
+      displayName: string;
+      SKU: string | null;
+      quantity: number;
+    }> = [];
+
+    for (const po of selectedPurchaseOrders) {
+      const gid = String(po.purchaseOrderGID || "").trim();
+      const poShortName = String(po.shortName || "").trim();
+      if (!gid) continue;
+      const products = Array.isArray(po.products) ? po.products : [];
+
+      products.forEach((product, idx) => {
+        const productId = String(product?.rslModelID || "").trim();
+        if (productId) return;
+
+        const initialQuantity =
+          typeof product?.initialQuantity === "number"
+            ? product.initialQuantity
+            : (typeof product?.quantity === "number" ? product.quantity : 0);
+        const committedQuantity =
+          typeof product?.committedQuantity === "number" ? product.committedQuantity : 0;
+        const availableQuantity = Math.max(0, initialQuantity - committedQuantity);
+
+        const displayName = String(product?.displayName || product?.shortName || "").trim();
+        if (!displayName && availableQuantity <= 0) return;
+
+        rows.push({
+          key: `${gid}::unmapped::${idx}`,
+          purchaseOrderGID: gid,
+          shortName: poShortName,
+          displayName: displayName || `Line ${idx + 1}`,
+          SKU: product?.SKU || null,
+          quantity: availableQuantity,
+        });
+      });
+    }
+
+    return rows;
+  }, [selectedPurchaseOrders]);
+  const totalProductRows = aggregatedProducts.length + unmappedPoLines.length;
+
   // Initialize product quantities from PO quantities when products change
   React.useEffect(() => {
     setProductQuantities((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const product of aggregatedProducts) {
-        const id = String(product.rslModelID || "").trim();
-        if (!id) continue;
+      const validIds = new Set(
+        aggregatedProducts
+          .map((product) => String(product.rslModelID || "").trim())
+          .filter(Boolean)
+      );
+
+      for (const existingId of Object.keys(next)) {
+        if (!validIds.has(existingId)) {
+          delete next[existingId];
+          changed = true;
+        }
+      }
+
+      for (const id of validIds) {
         // Start container quantity at 0 for newly selected rows.
         if (!(id in next)) {
           next[id] = "0";
@@ -689,9 +780,20 @@ export default function ShipmentDetailsModal({
     setAppliedProductQuantities((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const product of aggregatedProducts) {
-        const id = String(product.rslModelID || "").trim();
-        if (!id) continue;
+      const validIds = new Set(
+        aggregatedProducts
+          .map((product) => String(product.rslModelID || "").trim())
+          .filter(Boolean)
+      );
+
+      for (const existingId of Object.keys(next)) {
+        if (!validIds.has(existingId)) {
+          delete next[existingId];
+          changed = true;
+        }
+      }
+
+      for (const id of validIds) {
         if (!(id in next)) {
           next[id] = "0";
           changed = true;
@@ -721,6 +823,8 @@ export default function ShipmentDetailsModal({
           if (!gid) continue;
           const base = perPoProductQuantities.get(gid)?.get(productId);
           if (typeof base !== "number") continue;
+          const allocatedInThisContainer =
+            clampWholeNonNegativeInt(containerPoAllocations?.[productId]?.[gid], 0, Number.MAX_SAFE_INTEGER);
 
           if (Object.prototype.hasOwnProperty.call(prevRow, gid)) {
             rowOut[gid] = String(clampWholeNonNegativeInt(prevRow[gid], 0, base));
@@ -728,6 +832,10 @@ export default function ShipmentDetailsModal({
           }
           if (Object.prototype.hasOwnProperty.call(savedRow, gid)) {
             rowOut[gid] = String(clampWholeNonNegativeInt(savedRow[gid], 0, base));
+            continue;
+          }
+          if (allocatedInThisContainer > 0) {
+            rowOut[gid] = String(Math.max(0, base - allocatedInThisContainer));
             continue;
           }
           rowOut[gid] = String(base);
@@ -752,7 +860,7 @@ export default function ShipmentDetailsModal({
       }
       return next;
     });
-  }, [aggregatedProducts, selectedPurchaseOrders, perPoProductQuantities]);
+  }, [aggregatedProducts, selectedPurchaseOrders, perPoProductQuantities, containerPoAllocations]);
 
   const getRowMaxAvailable = (productId: string) =>
     Number(aggregatedProducts.find((p) => String(p.rslModelID || "").trim() === productId)?.quantity || 0);
@@ -812,7 +920,8 @@ export default function ShipmentDetailsModal({
     productId: string,
     row: Record<string, string>,
     selectedGids: string[],
-    targetTotalUsed: number
+    targetTotalUsed: number,
+    options?: { mode?: "equal" | "sequential" }
   ): { ok: true; rowNext: Record<string, string> } | { ok: false; error: string } => {
     const orderedGids = getOrderedRowPoGids(productId, row);
     if (!orderedGids.length) {
@@ -857,20 +966,37 @@ export default function ShipmentDetailsModal({
     const allocatedSelectedUsed: Record<string, number> = {};
     for (const gid of effectiveSelectedGids) allocatedSelectedUsed[gid] = 0;
 
-    let remainingToAllocate = targetSelectedUsed;
-    while (remainingToAllocate > 0) {
-      let allocatedInRound = false;
+    const distributionMode =
+      options?.mode || (effectiveSelectedGids.length > 1 ? "equal" : "sequential");
+
+    if (distributionMode === "sequential") {
+      let remainingToAllocate = targetSelectedUsed;
       for (const gid of effectiveSelectedGids) {
         const base = baseByGid[gid] || 0;
-        const current = allocatedSelectedUsed[gid] || 0;
-        if (current >= base) continue;
-        allocatedSelectedUsed[gid] = current + 1;
-        remainingToAllocate -= 1;
-        allocatedInRound = true;
-        if (remainingToAllocate === 0) break;
+        if (remainingToAllocate <= 0) break;
+        const take = Math.min(base, remainingToAllocate);
+        allocatedSelectedUsed[gid] = take;
+        remainingToAllocate -= take;
       }
-      if (!allocatedInRound) {
-        return { ok: false, error: "Unable to distribute quantity across selected PO fields." };
+      if (remainingToAllocate > 0) {
+        return { ok: false, error: "Selected PO quantity fields do not have enough available quantity for this value." };
+      }
+    } else {
+      let remainingToAllocate = targetSelectedUsed;
+      while (remainingToAllocate > 0) {
+        let allocatedInRound = false;
+        for (const gid of effectiveSelectedGids) {
+          const base = baseByGid[gid] || 0;
+          const current = allocatedSelectedUsed[gid] || 0;
+          if (current >= base) continue;
+          allocatedSelectedUsed[gid] = current + 1;
+          remainingToAllocate -= 1;
+          allocatedInRound = true;
+          if (remainingToAllocate === 0) break;
+        }
+        if (!allocatedInRound) {
+          return { ok: false, error: "Unable to distribute quantity across selected PO fields." };
+        }
       }
     }
 
@@ -888,6 +1014,70 @@ export default function ShipmentDetailsModal({
     }
 
     return { ok: true, rowNext };
+  };
+
+  const allocateThisContainerAcrossPoFields = (
+    productId: string,
+    row: Record<string, string>,
+    preferredSelectedGids: string[],
+    targetTotalUsed: number
+  ): {
+    ok: true;
+    rowNext: Record<string, string>;
+    usedSelection: string[];
+    preferredSelection: string[];
+    expandedFromPreferred: boolean;
+  } | { ok: false; error: string } => {
+    const orderedGids = getOrderedRowPoGids(productId, row);
+    if (!orderedGids.length) {
+      return { ok: false, error: "No PO quantity fields are available for this row." };
+    }
+
+    const preferred =
+      Array.isArray(preferredSelectedGids) && preferredSelectedGids.length
+        ? preferredSelectedGids.filter((gid) => orderedGids.includes(gid))
+        : [];
+
+    const firstSelection = preferred.length ? preferred : [orderedGids[0]];
+    const firstAttempt = distributeUsedAcrossSelectedPoFields(
+      productId,
+      row,
+      firstSelection,
+      targetTotalUsed,
+      { mode: firstSelection.length > 1 ? "equal" : "sequential" }
+    );
+    if (firstAttempt.ok) {
+      return {
+        ok: true,
+        rowNext: firstAttempt.rowNext,
+        usedSelection: firstSelection,
+        preferredSelection: firstSelection,
+        expandedFromPreferred: false,
+      };
+    }
+
+    // If the preferred selection cannot satisfy the requested value, auto-expand
+    // to all available PO fields in this row (left-to-right).
+    if (orderedGids.length > 1) {
+      const expandedAttempt = distributeUsedAcrossSelectedPoFields(
+        productId,
+        row,
+        orderedGids,
+        targetTotalUsed,
+        { mode: "sequential" }
+      );
+      if (expandedAttempt.ok) {
+        return {
+          ok: true,
+          rowNext: expandedAttempt.rowNext,
+          usedSelection: orderedGids,
+          preferredSelection: firstSelection,
+          expandedFromPreferred: true,
+        };
+      }
+    }
+
+    return { ok: false, error: firstAttempt.error };
   };
 
   const syncThisContainerFromPoRow = (productId: string, row: Record<string, string>) => {
@@ -967,7 +1157,7 @@ export default function ShipmentDetailsModal({
       return;
     }
 
-    const allocation = distributeUsedAcrossSelectedPoFields(productId, currentRow, selectedGids, parsed);
+    const allocation = allocateThisContainerAcrossPoFields(productId, currentRow, selectedGids, parsed);
     if (!allocation.ok) return;
 
     setPoFieldQuantities((prev) => {
@@ -975,6 +1165,25 @@ export default function ShipmentDetailsModal({
       const rowNext = { ...rowPrev, ...allocation.rowNext };
       return { ...prev, [productId]: rowNext };
     });
+    if (allocation.expandedFromPreferred) {
+      const focusGid = getPostExpansionFocusGid(productId, allocation.rowNext, allocation.preferredSelection);
+      if (focusGid) {
+        setSelectedPoFieldsByProduct((prev) => ({
+          ...prev,
+          [productId]: [focusGid],
+        }));
+      } else {
+        setSelectedPoFieldsByProduct((prev) => ({
+          ...prev,
+          [productId]: allocation.usedSelection,
+        }));
+      }
+    } else {
+      setSelectedPoFieldsByProduct((prev) => ({
+        ...prev,
+        [productId]: allocation.usedSelection,
+      }));
+    }
 
     const normalized = String(parsed);
     setProductQuantities((prev) => ({ ...prev, [productId]: normalized }));
@@ -988,15 +1197,19 @@ export default function ShipmentDetailsModal({
     );
   };
 
+  const resetRowToInitialAndClearThisContainer = (productId: string) => {
+    const currentRow = poFieldQuantities[productId] || {};
+    const resetRow = buildInitialRenderedPoRow(productId, currentRow);
+    setPoFieldQuantities((prev) => ({ ...prev, [productId]: resetRow }));
+    setProductQuantities((prev) => ({ ...prev, [productId]: "0" }));
+    setAppliedProductQuantities((prev) => ({ ...prev, [productId]: "0" }));
+    previousProductQuantitiesRef.current[productId] = "0";
+  };
+
   const validateProductQuantityOnBlur = (productId: string) => {
     const maxAvailable = Number(
       aggregatedProducts.find((p) => String(p.rslModelID || "").trim() === productId)?.quantity || 0
     );
-
-    const previousRaw = String(
-      previousProductQuantitiesRef.current[productId] ?? appliedProductQuantities[productId] ?? "0"
-    );
-    const previousValue = parseWholeNonNegativeInt(previousRaw) ?? 0;
 
     const parsed = parseWholeNonNegativeInt(productQuantities[productId]);
     if (parsed == null) {
@@ -1004,8 +1217,7 @@ export default function ShipmentDetailsModal({
         ...prev,
         [productId]: "Quantity must be a whole number.",
       }));
-      setProductQuantities((prev) => ({ ...prev, [productId]: String(previousValue) }));
-      setAppliedProductQuantities((prev) => ({ ...prev, [productId]: String(previousValue) }));
+      resetRowToInitialAndClearThisContainer(productId);
       return;
     }
 
@@ -1014,8 +1226,7 @@ export default function ShipmentDetailsModal({
         ...prev,
         [productId]: `Quantity cannot exceed the initial quantity (${maxAvailable}).`,
       }));
-      setProductQuantities((prev) => ({ ...prev, [productId]: String(previousValue) }));
-      setAppliedProductQuantities((prev) => ({ ...prev, [productId]: String(previousValue) }));
+      resetRowToInitialAndClearThisContainer(productId);
       return;
     }
 
@@ -1030,14 +1241,13 @@ export default function ShipmentDetailsModal({
       return;
     }
 
-    const allocation = distributeUsedAcrossSelectedPoFields(productId, currentRow, selectedGids, parsed);
+    const allocation = allocateThisContainerAcrossPoFields(productId, currentRow, selectedGids, parsed);
     if (!allocation.ok) {
       setProductQuantityErrors((prev) => ({
         ...prev,
         [productId]: allocation.error,
       }));
-      setProductQuantities((prev) => ({ ...prev, [productId]: String(previousValue) }));
-      setAppliedProductQuantities((prev) => ({ ...prev, [productId]: String(previousValue) }));
+      resetRowToInitialAndClearThisContainer(productId);
       return;
     }
 
@@ -1047,6 +1257,25 @@ export default function ShipmentDetailsModal({
       syncThisContainerFromPoRow(productId, rowNext);
       return { ...prev, [productId]: rowNext };
     });
+    if (allocation.expandedFromPreferred) {
+      const focusGid = getPostExpansionFocusGid(productId, allocation.rowNext, allocation.preferredSelection);
+      if (focusGid) {
+        setSelectedPoFieldsByProduct((prev) => ({
+          ...prev,
+          [productId]: [focusGid],
+        }));
+      } else {
+        setSelectedPoFieldsByProduct((prev) => ({
+          ...prev,
+          [productId]: allocation.usedSelection,
+        }));
+      }
+    } else {
+      setSelectedPoFieldsByProduct((prev) => ({
+        ...prev,
+        [productId]: allocation.usedSelection,
+      }));
+    }
     clearRowError(productId);
   };
 
@@ -1082,6 +1311,190 @@ export default function ShipmentDetailsModal({
       if (!next.length) next = [poGid];
       return { ...prev, [productId]: next };
     });
+  };
+
+  const poFieldRefKey = (productId: string, poGid: string) => `${productId}::${poGid}`;
+
+  const focusInputEl = (el: HTMLInputElement | null | undefined) => {
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.focus();
+      el.select?.();
+    });
+  };
+
+  const getPostExpansionFocusGid = (
+    productId: string,
+    rowNext: Record<string, string>,
+    preferredSelection: string[]
+  ) => {
+    const orderedGids = getOrderedRowPoGids(productId, rowNext);
+    if (!orderedGids.length) return null;
+
+    // Prefer a PO field that still has quantity remaining.
+    const positiveRemainingGid = orderedGids.find((gid) => {
+      const base = perPoProductQuantities.get(gid)?.get(productId);
+      if (typeof base !== "number") return false;
+      const remaining = clampWholeNonNegativeInt(rowNext[gid], 0, base);
+      return remaining > 0;
+    });
+    if (positiveRemainingGid) return positiveRemainingGid;
+
+    // If all PO quantities are 0, return focus to the previously highlighted field.
+    const previousHighlighted = (preferredSelection || []).find((gid) => orderedGids.includes(gid));
+    if (previousHighlighted) return previousHighlighted;
+
+    return orderedGids[0];
+  };
+
+  const transferSelectedPoToThisContainer = (productId: string) => {
+    if (!canEdit) return;
+    clearClientValidation();
+    setPoFieldQuantities((prev) => {
+      const rowPrev = prev[productId] || {};
+      const selectedGids = getSelectedPoGidsForProduct(productId, rowPrev);
+      if (!selectedGids.length) return prev;
+      const orderedSelected = getOrderedRowPoGids(productId, rowPrev).filter((gid) => selectedGids.includes(gid));
+      if (!orderedSelected.length) return prev;
+
+      const rowNext: Record<string, string> = { ...rowPrev };
+      let changed = false;
+      for (const gid of orderedSelected) {
+        const base = perPoProductQuantities.get(gid)?.get(productId);
+        if (typeof base !== "number") continue;
+        const remaining = clampWholeNonNegativeInt(rowNext[gid], 0, base);
+        if (remaining <= 0) continue;
+        rowNext[gid] = "0";
+        changed = true;
+      }
+
+      if (!changed) return prev;
+      syncThisContainerFromPoRow(productId, rowNext);
+      clearRowError(productId);
+      return { ...prev, [productId]: rowNext };
+    });
+  };
+
+  const transferThisContainerToSelectedPo = (productId: string) => {
+    if (!canEdit) return;
+    clearClientValidation();
+    setPoFieldQuantities((prev) => {
+      const rowPrev = prev[productId] || {};
+      const selectedGids = getSelectedPoGidsForProduct(productId, rowPrev);
+      if (!selectedGids.length) return prev;
+
+      const orderedGids = getOrderedRowPoGids(productId, rowPrev);
+      const selectedSet = new Set(selectedGids);
+      const fixedUsed = orderedGids.reduce((sum, gid) => {
+        if (selectedSet.has(gid)) return sum;
+        const base = perPoProductQuantities.get(gid)?.get(productId);
+        if (typeof base !== "number") return sum;
+        const remaining = clampWholeNonNegativeInt(rowPrev[gid], 0, base);
+        return sum + Math.max(0, base - remaining);
+      }, 0);
+
+      const distributed = distributeUsedAcrossSelectedPoFields(
+        productId,
+        rowPrev,
+        selectedGids,
+        fixedUsed,
+        { mode: selectedGids.length > 1 ? "equal" : "sequential" }
+      );
+      if (!distributed.ok) return prev;
+
+      const rowNext = distributed.rowNext;
+      const changed = orderedGids.some((gid) => String(rowPrev[gid] ?? "") !== String(rowNext[gid] ?? ""));
+      if (!changed) return prev;
+
+      syncThisContainerFromPoRow(productId, rowNext);
+      clearRowError(productId);
+      return { ...prev, [productId]: rowNext };
+    });
+  };
+
+  const handleShiftArrowTransfer = (e: React.KeyboardEvent<HTMLInputElement>, productId: string) => {
+    if (!canEdit || !e.shiftKey) return false;
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      transferSelectedPoToThisContainer(productId);
+      return true;
+    }
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      transferThisContainerToSelectedPo(productId);
+      return true;
+    }
+    return false;
+  };
+
+  const handleRowTouchStart = (productId: string, e: React.TouchEvent<HTMLTableRowElement>) => {
+    if (!canEdit) return;
+    const touch = e.touches && e.touches[0];
+    if (!touch) return;
+    rowSwipeStartRef.current = {
+      productId,
+      startX: touch.clientX,
+      startY: touch.clientY,
+    };
+  };
+
+  const handleRowTouchEnd = (productId: string, e: React.TouchEvent<HTMLTableRowElement>) => {
+    const start = rowSwipeStartRef.current;
+    rowSwipeStartRef.current = null;
+    if (!start || start.productId !== productId) return;
+    const touch = e.changedTouches && e.changedTouches[0];
+    if (!touch) return;
+
+    const dx = touch.clientX - start.startX;
+    const dy = touch.clientY - start.startY;
+    const minHorizontalSwipe = 48;
+    const horizontalDominance = 1.15;
+    if (Math.abs(dx) < minHorizontalSwipe) return;
+    if (Math.abs(dx) <= Math.abs(dy) * horizontalDominance) return;
+
+    if (dx > 0) {
+      transferSelectedPoToThisContainer(productId);
+    } else {
+      transferThisContainerToSelectedPo(productId);
+    }
+  };
+
+  const handleRowTouchCancel = () => {
+    rowSwipeStartRef.current = null;
+  };
+
+  const handleThisContainerTab = (e: React.KeyboardEvent<HTMLInputElement>, productId: string) => {
+    if (handleShiftArrowTransfer(e, productId)) return;
+    if (e.key !== "Tab" && e.key !== "Enter") return;
+    const rowIds = aggregatedProducts
+      .map((p) => String(p?.rslModelID || "").trim())
+      .filter(Boolean);
+    if (!rowIds.length) return;
+    const currentIdx = rowIds.indexOf(String(productId || "").trim());
+    if (currentIdx < 0) return;
+
+    e.preventDefault();
+    const step = e.key === "Tab" && e.shiftKey ? -1 : 1;
+    const nextIdx = (currentIdx + step + rowIds.length) % rowIds.length;
+    const nextId = rowIds[nextIdx];
+    focusInputEl(thisContainerInputRefs.current[nextId]);
+  };
+
+  const handlePoFieldTab = (e: React.KeyboardEvent<HTMLInputElement>, productId: string, poGid: string) => {
+    if (handleShiftArrowTransfer(e, productId)) return;
+    if (e.key !== "Tab") return;
+    const row = poFieldQuantities[productId] || {};
+    const orderedGids = getOrderedRowPoGids(productId, row);
+    if (orderedGids.length <= 1) return;
+    const currentIdx = orderedGids.indexOf(poGid);
+    if (currentIdx < 0) return;
+
+    e.preventDefault();
+    const step = e.shiftKey ? -1 : 1;
+    const nextIdx = (currentIdx + step + orderedGids.length) % orderedGids.length;
+    const nextGid = orderedGids[nextIdx];
+    selectPoField(productId, nextGid, false);
+    focusInputEl(poQuantityInputRefs.current[poFieldRefKey(productId, nextGid)]);
   };
 
   const updatePoFieldQuantity = (productId: string, poGid: string, raw: string) => {
@@ -1148,6 +1561,44 @@ export default function ShipmentDetailsModal({
     }
     return out;
   }, [aggregatedProducts, poFieldQuantities, perPoProductQuantities]);
+
+  const exhaustedPoColumnSet = useMemo(() => {
+    const exhausted = new Set<string>();
+    for (const po of selectedPurchaseOrders) {
+      const gid = String(po.purchaseOrderGID || "").trim();
+      if (!gid) continue;
+
+      let hasAnyRows = false;
+      let allRowsZero = true;
+      for (const product of aggregatedProducts) {
+        const productId = String(product.rslModelID || "").trim();
+        if (!productId) continue;
+        const base = perPoProductQuantities.get(gid)?.get(productId);
+        if (typeof base !== "number") continue;
+        hasAnyRows = true;
+        const remaining = clampWholeNonNegativeInt(poFieldQuantities?.[productId]?.[gid], 0, base);
+        if (remaining > 0) {
+          allRowsZero = false;
+          break;
+        }
+      }
+
+      if (allRowsZero) {
+        const hasUnmappedRemaining = unmappedPoLines.some(
+          (row) => row.purchaseOrderGID === gid && row.quantity > 0
+        );
+        if (hasUnmappedRemaining) {
+          allRowsZero = false;
+          hasAnyRows = true;
+        }
+      }
+
+      if (hasAnyRows && allRowsZero) {
+        exhausted.add(gid);
+      }
+    }
+    return exhausted;
+  }, [selectedPurchaseOrders, aggregatedProducts, perPoProductQuantities, poFieldQuantities, unmappedPoLines]);
 
   const initialNormalizedPoQuantitiesRef = React.useRef<Record<string, Record<string, string>> | null>(null);
   React.useEffect(() => {
@@ -1221,7 +1672,6 @@ export default function ShipmentDetailsModal({
     const hasCommercialInvoice = Boolean(commercialInvoiceFile || existingCommercialInvoiceUrl);
 
     if (!norm(draft.containerSize)) missing.push("containerSize");
-    if (!norm(draft.containerNumber)) missing.push("containerNumber");
     if (!norm(draft.portOfOrigin)) missing.push("portOfOrigin");
     if (!norm(draft.destinationPort)) missing.push("destinationPort");
     if (!norm(draft.deliveryAddress)) missing.push("deliveryAddress");
@@ -1238,7 +1688,6 @@ export default function ShipmentDetailsModal({
     return missing;
   }, [
     draft.containerSize,
-    draft.containerNumber,
     draft.portOfOrigin,
     draft.destinationPort,
     draft.deliveryAddress,
@@ -1337,6 +1786,25 @@ export default function ShipmentDetailsModal({
     const company = companiesSafe.find((c) => c.shortName === draft.supplierId);
     const derivedSupplierName =
       (company?.displayName && String(company.displayName).trim()) || draft.supplierId || draft.supplierName;
+    const activeProductIdSet = new Set(
+      aggregatedProducts
+        .map((product) => String(product?.rslModelID || "").trim())
+        .filter(Boolean)
+    );
+    const payloadProductQuantities: Record<string, string> = {};
+    for (const [rawProductId, rawQty] of Object.entries(appliedProductQuantities || {})) {
+      const productId = String(rawProductId || "").trim();
+      if (!productId || !activeProductIdSet.has(productId)) continue;
+      const parsed = parseWholeNonNegativeInt(rawQty);
+      if (parsed == null) continue;
+      payloadProductQuantities[productId] = String(parsed);
+    }
+    const payloadPoQuantities: Record<string, Record<string, string>> = {};
+    for (const [rawProductId, rowRaw] of Object.entries(normalizedPoQuantities || {})) {
+      const productId = String(rawProductId || "").trim();
+      if (!productId || !activeProductIdSet.has(productId) || !rowRaw || typeof rowRaw !== "object") continue;
+      payloadPoQuantities[productId] = { ...rowRaw };
+    }
 
     return {
       ...(shipment as any),
@@ -1364,8 +1832,8 @@ export default function ShipmentDetailsModal({
       deliveryAddress: draft.deliveryAddress,
 
       purchaseOrderGIDs: Array.isArray(draft.purchaseOrderGIDs) ? draft.purchaseOrderGIDs : [],
-      productQuantities: appliedProductQuantities,
-      poQuantities: normalizedPoQuantities,
+      productQuantities: payloadProductQuantities,
+      poQuantities: payloadPoQuantities,
     } as Shipment;
   };
 
@@ -1408,7 +1876,7 @@ export default function ShipmentDetailsModal({
                 type="button"
                 onClick={() => {
                   const ok = window.confirm(
-                    `Are you sure you want to delete this shipment (Container #${draft.containerNumber || shipment.id})? This action cannot be undone.`
+                    `Are you sure you want to delete this shipment (${draft.containerNumber ? `Container #${draft.containerNumber}` : `ID ${headerContainerId || shipment.id}`})? This action cannot be undone.`
                   );
                   if (ok) onDelete(shipment);
                 }}
@@ -2124,6 +2592,10 @@ export default function ShipmentDetailsModal({
                   const activationTooltip = checkboxBlockedForMissingPi
                     ? "A Pro-forma invoice is required to activate this purchase order.  Click the title to edit the Purchase Order."
                     : "";
+                  const toggleCardSelection = () => {
+                    if (checkboxDisabled) return;
+                    togglePo(po.purchaseOrderGID);
+                  };
                   const openPoInSystem = (e: React.MouseEvent) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -2141,7 +2613,19 @@ export default function ShipmentDetailsModal({
                         border: checked ? "1px solid #2563eb" : "1px solid #e5e7eb",
                         borderRadius: 12,
                         padding: "10px 12px",
+                        cursor: checkboxDisabled ? "default" : "pointer",
                       }}
+                      onClick={toggleCardSelection}
+                      onKeyDown={(e) => {
+                        if (checkboxDisabled) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          togglePo(po.purchaseOrderGID);
+                        }
+                      }}
+                      role={checkboxDisabled ? undefined : "button"}
+                      tabIndex={checkboxDisabled ? -1 : 0}
+                      aria-disabled={checkboxDisabled || undefined}
                     >
                       <div
                         style={{
@@ -2159,6 +2643,7 @@ export default function ShipmentDetailsModal({
                             checked={checked}
                             disabled={checkboxDisabled}
                             title={activationTooltip}
+                            onClick={(e) => e.stopPropagation()}
                             onChange={() => togglePo(po.purchaseOrderGID)}
                           />
                         </span>
@@ -2169,7 +2654,9 @@ export default function ShipmentDetailsModal({
                             fontSize: 13,
                             fontWeight: 800,
                             color: hasProForma ? "#0f172a" : "#991b1b",
-                            textDecoration: "underline",
+                            textDecoration: exhaustedPoColumnSet.has(String(po.purchaseOrderGID || "").trim())
+                              ? "underline line-through"
+                              : "underline",
                           }}
                         >
                           #{po.shortName}
@@ -2184,7 +2671,7 @@ export default function ShipmentDetailsModal({
           </div>
 
           {/* Products from Selected Purchase Orders */}
-          {aggregatedProducts.length > 0 && (
+          {(aggregatedProducts.length > 0 || unmappedPoLines.length > 0) && (
             <div
               style={{ ...cardStyle, marginBottom: 12, ...cardStyleFor("thisContainerProducts") }}
               className="shipment-details-card"
@@ -2200,7 +2687,7 @@ export default function ShipmentDetailsModal({
                   Products from Selected Purchase Orders
                 </span>
                 <span style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
-                  {aggregatedProducts.length} product{aggregatedProducts.length !== 1 ? "s" : ""}
+                  {totalProductRows} product{totalProductRows !== 1 ? "s" : ""}
                 </span>
               </div>
 
@@ -2248,7 +2735,17 @@ export default function ShipmentDetailsModal({
                             whiteSpace: "nowrap",
                           }}
                         >
-                          <div style={{ fontWeight: 800, textAlign: "center" }}>#{po.shortName}</div>
+                          <div
+                            style={{
+                              fontWeight: 800,
+                              textAlign: "center",
+                              textDecoration: exhaustedPoColumnSet.has(String(po.purchaseOrderGID || "").trim())
+                                ? "line-through"
+                                : "none",
+                            }}
+                          >
+                            #{po.shortName}
+                          </div>
                           <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>(available)</div>
                         </th>
                       ))}
@@ -2283,6 +2780,9 @@ export default function ShipmentDetailsModal({
                         style={{
                           background: idx % 2 === 0 ? "#fff" : "#fafafa",
                         }}
+                        onTouchStart={(e) => handleRowTouchStart(String(product.rslModelID || "").trim(), e)}
+                        onTouchEnd={(e) => handleRowTouchEnd(String(product.rslModelID || "").trim(), e)}
+                        onTouchCancel={handleRowTouchCancel}
                       >
                         <td
                           data-label="Product"
@@ -2292,7 +2792,7 @@ export default function ShipmentDetailsModal({
                             width: 320,
                             minWidth: 320,
                             borderBottom:
-                              idx < aggregatedProducts.length - 1
+                              idx < totalProductRows - 1
                                 ? "1px solid #e5e7eb"
                                 : "none",
                           }}
@@ -2345,7 +2845,7 @@ export default function ShipmentDetailsModal({
                                 color: "#0f172a",
                                 textAlign: "center",
                                 borderBottom:
-                                  idx < aggregatedProducts.length - 1
+                                  idx < totalProductRows - 1
                                     ? "1px solid #e5e7eb"
                                     : "none",
                               }}
@@ -2356,6 +2856,9 @@ export default function ShipmentDetailsModal({
                                   min={0}
                                   max={baseQty}
                                   value={qtyRaw}
+                                  ref={(el) => {
+                                    poQuantityInputRefs.current[poFieldRefKey(productId, poGid)] = el;
+                                  }}
                                   onMouseDown={() => {
                                     poFieldFocusFromPointerRef.current = true;
                                   }}
@@ -2363,6 +2866,7 @@ export default function ShipmentDetailsModal({
                                     selectPoField(productId, poGid, e.shiftKey);
                                     poFieldFocusFromPointerRef.current = false;
                                   }}
+                                  onKeyDown={(e) => handlePoFieldTab(e, productId, poGid)}
                                   onFocus={() => handlePoFieldFocus(productId, poGid)}
                                   onChange={(e) => updatePoFieldQuantity(productId, poGid, e.target.value)}
                                   onBlur={() => {
@@ -2397,7 +2901,7 @@ export default function ShipmentDetailsModal({
                             background: idx % 2 === 0 ? "#fff" : "#fafafa",
                             boxShadow: "-1px 0 0 #e5e7eb",
                             borderBottom:
-                              idx < aggregatedProducts.length - 1
+                              idx < totalProductRows - 1
                                 ? "1px solid #e5e7eb"
                                 : "none",
                           }}
@@ -2407,7 +2911,11 @@ export default function ShipmentDetailsModal({
                             type="number"
                             min={0}
                             value={productQuantities[product.rslModelID] ?? "0"}
+                            ref={(el) => {
+                              thisContainerInputRefs.current[String(product.rslModelID || "").trim()] = el;
+                            }}
                             onChange={(e) => updateThisContainerQuantity(product.rslModelID, e.target.value)}
+                            onKeyDown={(e) => handleThisContainerTab(e, String(product.rslModelID || "").trim())}
                             onFocus={() => rememberPreviousProductQuantity(product.rslModelID)}
                             onBlur={() => validateProductQuantityOnBlur(product.rslModelID)}
                             placeholder="0"
@@ -2429,6 +2937,94 @@ export default function ShipmentDetailsModal({
                         </td>
                       </tr>
                     ))}
+                    {unmappedPoLines.map((row, unmappedIdx) => {
+                      const rowIndex = aggregatedProducts.length + unmappedIdx;
+                      const sku = String(row.SKU || "").trim();
+                      return (
+                        <tr
+                          key={row.key}
+                          style={{
+                            background: rowIndex % 2 === 0 ? "#fff" : "#fafafa",
+                          }}
+                        >
+                          <td
+                            data-label="Product"
+                            style={{
+                              padding: "10px 12px",
+                              fontSize: 13,
+                              width: 320,
+                              minWidth: 320,
+                              borderBottom:
+                                rowIndex < aggregatedProducts.length + unmappedPoLines.length - 1
+                                  ? "1px solid #e5e7eb"
+                                  : "none",
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontWeight: 700,
+                                color: "#0f172a",
+                                whiteSpace: "normal",
+                                overflowWrap: "anywhere",
+                                wordBreak: "break-word",
+                                lineHeight: 1.3,
+                              }}
+                              title={row.displayName}
+                            >
+                              {row.displayName}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#64748b" }}>{sku || "—"}</div>
+                            <div style={{ fontSize: 11, color: "#a16207", fontWeight: 700 }}>
+                              PO line not mapped to an RSL SKU
+                            </div>
+                          </td>
+                          {selectedPurchaseOrders.map((po) => {
+                            const poGid = String(po.purchaseOrderGID || "").trim();
+                            const qty = poGid === row.purchaseOrderGID ? row.quantity : null;
+                            return (
+                              <td
+                                key={`${row.key}_${po.purchaseOrderGID}`}
+                                data-label={`#${po.shortName}`}
+                                style={{
+                                  padding: "10px 10px",
+                                  fontSize: 13,
+                                  color: "#0f172a",
+                                  textAlign: "center",
+                                  borderBottom:
+                                    rowIndex < aggregatedProducts.length + unmappedPoLines.length - 1
+                                      ? "1px solid #e5e7eb"
+                                      : "none",
+                                }}
+                              >
+                                {typeof qty === "number" ? qty : null}
+                              </td>
+                            );
+                          })}
+                          <td
+                            data-label="This Container"
+                            style={{
+                              padding: "6px 12px",
+                              position: "sticky",
+                              right: 0,
+                              zIndex: 2,
+                              background: rowIndex % 2 === 0 ? "#fff" : "#fafafa",
+                              boxShadow: "-1px 0 0 #e5e7eb",
+                              borderBottom:
+                                rowIndex < aggregatedProducts.length + unmappedPoLines.length - 1
+                                  ? "1px solid #e5e7eb"
+                                  : "none",
+                              textAlign: "center",
+                              fontSize: 12,
+                              color: "#64748b",
+                              fontWeight: 700,
+                            }}
+                            className="shipment-this-container-col"
+                          >
+                            N/A
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

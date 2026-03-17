@@ -23,6 +23,7 @@ interface InternalDashboardProps {
 
   // Allow passing setState directly (Dispatch<SetStateAction<Shipment[]>>)
   onShipmentsChange: (next: Shipment[] | ((prev: Shipment[]) => Shipment[])) => void;
+  onRefreshPurchaseOrders?: () => Promise<void> | void;
 
   onLogout: () => void | Promise<void>;
   showLogout?: boolean;
@@ -63,6 +64,13 @@ function sortCompaniesSpecial(companies: CompanyOption[]) {
 function companyLabel(c: CompanyOption) {
   const d = String(c.displayName ?? "").trim();
   return d ? `${c.shortName} — ${d}` : c.shortName;
+}
+
+function poSummary(shipment: Shipment) {
+  const names = Array.isArray(shipment.purchaseOrderShortNames)
+    ? shipment.purchaseOrderShortNames.map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+  return names.length ? names.join(", ") : "—";
 }
 
 function statusPill(status: string): React.CSSProperties {
@@ -236,8 +244,9 @@ export function InternalDashboard({
                                     destinationPorts,
                                     bookingAgents,
                                     deliveryAddresses,
-                                    purchaseOrders,
-                                    onShipmentsChange,
+  purchaseOrders,
+  onShipmentsChange,
+  onRefreshPurchaseOrders,
                                     onLogout,
                                     showLogout = true,
                                     debugInfo = null,
@@ -445,10 +454,21 @@ export function InternalDashboard({
       if (mode === "create") {
         onShipmentsChange((prev) => [saved, ...(prev || [])]);
       } else {
-        onShipmentsChange((prev) => (prev || []).map((x) => (x.id === saved.id ? saved : x)));
+        onShipmentsChange((prev) =>
+          (prev || []).map((x) =>
+            x.id === saved.id ||
+            (String((x as any).dbId || "") && String((x as any).dbId || "") === String((saved as any).dbId || ""))
+              ? saved
+              : x
+          )
+        );
       }
-
       closeShipmentModal();
+      try {
+        await onRefreshPurchaseOrders?.();
+      } catch (refreshErr) {
+        console.error("[logistics shipments] refresh after save error:", refreshErr);
+      }
     } catch (err) {
       console.error("saveShipment error:", err);
       setShipmentError("Network/server error while saving shipment.");
@@ -457,9 +477,6 @@ export function InternalDashboard({
   };
 
   const deleteShipment = async (s: Shipment) => {
-    const ok = window.confirm("Delete this shipment? This cannot be undone.");
-    if (!ok) return;
-
     setSavingShipment(true);
     setShipmentError(null);
 
@@ -480,6 +497,11 @@ export function InternalDashboard({
 
       onShipmentsChange((prev) => (prev || []).filter((x) => x.id !== String(s.id)));
       closeShipmentModal();
+      try {
+        await onRefreshPurchaseOrders?.();
+      } catch (refreshErr) {
+        console.error("[logistics shipments] refresh after delete error:", refreshErr);
+      }
     } catch (err) {
       console.error("deleteShipment error:", err);
       setShipmentError("Network/server error while deleting shipment.");
@@ -612,8 +634,7 @@ export function InternalDashboard({
           <table style={tableStyle}>
             <thead>
             <tr>
-              <th style={thStyle}>Container #</th>
-              <th style={thStyle}>Supplier</th>
+              <th style={thStyle}>Company/POs</th>
               <th style={thStyle}>ETA</th>
               <th style={thStyle}>Status</th>
             </tr>
@@ -633,20 +654,25 @@ export function InternalDashboard({
                 }
                 onClick={() => openShipmentDetail(s)}
               >
-                <td style={tdStyle}>{s.containerNumber || "—"}</td>
-                <td style={tdStyle}>{s.supplierName || s.supplierId || "—"}</td>
+                <td style={tdStyle}>
+                  <div style={{ fontWeight: 700 }}>{s.supplierName || s.supplierId || "—"}</div>
+                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{poSummary(s)}</div>
+                </td>
                 <td style={tdStyle}>{(s as any).eta || "—"}</td>
                 <td style={tdStyle}>
                     <span style={{ ...pillBase, ...statusPill(String(s.status || "")) }}>
                       {s.status || "—"}
                     </span>
+                  {String(s.status || "").trim().toLowerCase().includes("transit") && s.containerNumber ? (
+                    <div style={{ fontSize: 12, color: "#334155", marginTop: 4 }}>{s.containerNumber}</div>
+                  ) : null}
                 </td>
               </tr>
             ))}
 
             {filteredShipments.length === 0 && (
               <tr>
-                <td colSpan={4} style={{ ...tdStyle, textAlign: "center", color: "#64748b" }}>
+                <td colSpan={3} style={{ ...tdStyle, textAlign: "center", color: "#64748b" }}>
                   No shipments match your filters
                 </td>
               </tr>

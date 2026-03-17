@@ -26,6 +26,8 @@ export type { CompanyOption, LookupOption, PurchaseOrderOption } from "./compone
 
 export type Shipment = {
   id: string;
+  dbId?: string;
+  rslLogisticsID?: string;
 
   supplierId: string;
   supplierName: string;
@@ -66,6 +68,7 @@ export type Shipment = {
   purchaseOrderGIDs?: string[] | null;
   purchaseOrderShortNames?: string[] | null;
   poQuantities?: Record<string, Record<string, string | number>> | null;
+  poAllocations?: Record<string, Record<string, string | number>> | null;
 };
 
 // Raw lookup shapes that can come from loaders (often allow null displayName)
@@ -358,6 +361,23 @@ export default function LogisticsApp({
     };
   }, [debugInfo, apiProbeRunning, apiProbeResult, apiProbeError, apiProbeRanAt, apiProbeShop]);
 
+  const refreshPurchaseOrders = async () => {
+    try {
+      const res = await fetch(withShopParam("/apps/logistics/purchase-orders?intent=list"), {
+        method: "GET",
+        headers: { accept: "application/json" },
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ok && Array.isArray(data.purchaseOrders)) {
+        setPurchaseOrdersState(data.purchaseOrders);
+      } else {
+        console.warn("[logistics ui] purchase order refresh failed:", data);
+      }
+    } catch (err) {
+      console.error("[logistics ui] purchase order refresh error:", err);
+    }
+  };
+
   if (unauthorizedMessage) {
     return (
       <div style={{ minHeight: "100vh", background: "#f8fafc", padding: 18 }}>
@@ -571,6 +591,7 @@ export default function LogisticsApp({
         <InternalDashboard
           shipments={shipmentsState}
           onShipmentsChange={(next) => setShipmentsState(next)}
+          onRefreshPurchaseOrders={() => refreshPurchaseOrders()}
           companies={companiesSafe}
           containers={containersSafe}
           originPorts={originPortsSafe}
@@ -596,6 +617,7 @@ export default function LogisticsApp({
         <SupplierDashboard
           shipments={shipmentsState}
           onShipmentsChange={(next) => setShipmentsState(next)}
+          onRefreshPurchaseOrders={() => refreshPurchaseOrders()}
           companies={companiesSafe}
           containers={containersSafe}
           originPorts={originPortsSafe}

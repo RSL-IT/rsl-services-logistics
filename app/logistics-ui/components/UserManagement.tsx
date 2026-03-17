@@ -266,6 +266,7 @@ export function UserManagement({
   const [modalError, setModalError] = useState<string | null>(null);
 
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoggingStaffMembers, setIsLoggingStaffMembers] = useState(false);
 
   const filteredUsers = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -379,6 +380,28 @@ export function UserManagement({
     }
   };
 
+  const handleLogStaffMembers = async () => {
+    try {
+      setIsLoggingStaffMembers(true);
+      setModalError(null);
+
+      const data = await postUsersEndpoint({
+        intent: "debug_log_staffmembers",
+        first: 100,
+        shop: String(debugInfo?.shop || "").trim(),
+        debugEnabled: showDebug,
+      });
+
+      if (!data || data.success !== true) {
+        setModalError(data?.error || "Unable to log staff members.");
+      }
+    } catch (e: any) {
+      setModalError(e?.message || "Unable to log staff members.");
+    } finally {
+      setIsLoggingStaffMembers(false);
+    }
+  };
+
   return (
     <div style={pageStyle}>
       <div style={headerStyle}>
@@ -407,6 +430,16 @@ export function UserManagement({
               >
                 {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
               </button>
+              {showDebug ? (
+                <button
+                  type="button"
+                  onClick={() => void handleLogStaffMembers()}
+                  disabled={isLoggingStaffMembers}
+                  style={isLoggingStaffMembers ? btnDisabled : btnPrimary}
+                >
+                  {isLoggingStaffMembers ? "Logging Staff..." : "Log Staff JSON (100)"}
+                </button>
+              ) : null}
             </div>
           ) : null}
 

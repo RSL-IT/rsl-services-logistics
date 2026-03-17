@@ -50,26 +50,27 @@ model tbl_logisticsUser {
   tlkp_company                   tlkp_company                     @relation(fields: [companyID], references: [shortName])
   tbl_purchaseOrderNotes         tbl_purchaseOrderNotes[]
   tbljn_logisticsUser_permission tbljn_logisticsUser_permission[]
-  tbl_shipmentNotes              tbl_shipmentNotes[]
+  tbl_containerNotes             tbl_containerNotes[]
 }
 
 model tbl_purchaseOrder {
-  id                             Int                              @id @default(autoincrement())
-  shortName                      String                           @unique
-  purchaseOrderGID               String                           @unique
-  purchaseOrderPdfUrl            String?
-  proFormaInvoiceUrl             String?
-  originalPoDate                 DateTime?
-  deliveryAddress                String?
-  createdAt                      DateTime                         @default(now())
-  updatedAt                      DateTime
-  statusShortName                String?
-  tlkp_deliveryAddress           tlkp_deliveryAddress?            @relation(fields: [deliveryAddress], references: [shortName])
-  tlkp_purchaseOrderStatus       tlkp_purchaseOrderStatus?        @relation(fields: [statusShortName], references: [shortName])
-  tbl_purchaseOrderNotes         tbl_purchaseOrderNotes[]
-  tbljn_purchaseOrder_company    tbljn_purchaseOrder_company[]
-  tbljn_purchaseOrder_rslProduct tbljn_purchaseOrder_rslProduct[]
-  tbljn_shipment_purchaseOrder   tbljn_shipment_purchaseOrder[]
+  id                                       Int                                        @id @default(autoincrement())
+  shortName                                String                                     @unique
+  purchaseOrderGID                         String                                     @unique
+  purchaseOrderPdfUrl                      String?
+  proFormaInvoiceUrl                       String?
+  originalPoDate                           DateTime?
+  deliveryAddress                          String?
+  createdAt                                DateTime                                   @default(now())
+  updatedAt                                DateTime
+  statusShortName                          String?
+  tlkp_deliveryAddress                     tlkp_deliveryAddress?                      @relation(fields: [deliveryAddress], references: [shortName])
+  tlkp_purchaseOrderStatus                 tlkp_purchaseOrderStatus?                  @relation(fields: [statusShortName], references: [shortName])
+  tbl_purchaseOrderNotes                   tbl_purchaseOrderNotes[]
+  tbljn_purchaseOrder_company              tbljn_purchaseOrder_company[]
+  tbljn_purchaseOrder_rslProduct           tbljn_purchaseOrder_rslProduct[]
+  tbljn_container_purchaseOrder            tbljn_container_purchaseOrder[]
+  tbljn_container_purchaseOrder_rslProduct tbljn_container_purchaseOrder_rslProduct[]
 
   @@index([deliveryAddress])
   @@index([statusShortName])
@@ -92,54 +93,55 @@ model tbl_purchaseOrderNotes {
   @@index([userId])
 }
 
-model tbl_shipment {
-  id                           Int                            @id @default(autoincrement())
-  companyId                    String
-  companyName                  String
-  containerNumber              String                         @unique
-  containerSize                String?
-  portOfOrigin                 String?
-  destinationPort              String?
-  etaDate                      DateTime?
-  cargoReadyDate               DateTime?
-  estimatedDeliveryToOrigin    DateTime?
-  supplierPi                   String?
-  packingListUrl               String?
-  packingListFileName          String?            @db.VarChar(255)
-  commercialInvoiceUrl         String?
-  commercialInvoiceFileName    String?            @db.VarChar(255)
-  quantity                     BigInt?
-  bookingNumber                String?
-  status                       String?
-  notes                        String?
-  createdAt                    DateTime                       @default(now())
-  updatedAt                    DateTime
-  bookingAgent                 String?
-  deliveryAddress              String?
-  vesselName                   String?
-  tlkp_bookingAgent            tlkp_bookingAgent?             @relation(fields: [bookingAgent], references: [shortName])
-  tlkp_company                 tlkp_company                   @relation(fields: [companyId], references: [shortName])
-  tlkp_container               tlkp_container?                @relation(fields: [containerSize], references: [shortName])
-  tlkp_deliveryAddress         tlkp_deliveryAddress?          @relation(fields: [deliveryAddress], references: [shortName])
-  tlkp_destinationPort         tlkp_destinationPort?          @relation(fields: [destinationPort], references: [shortName])
-  tlkp_originPort              tlkp_originPort?               @relation(fields: [portOfOrigin], references: [shortName])
-  tbljn_shipment_purchaseOrder tbljn_shipment_purchaseOrder[]
-  tbljn_shipment_rslProduct    tbljn_shipment_rslProduct[]
-  tbl_shipmentNotes            tbl_shipmentNotes[]
+model tbl_container {
+  id                                       Int                                        @id @default(autoincrement())
+  rslLogisticsID                           String                                     @unique @db.VarChar(10)
+  companyId                                String
+  companyName                              String
+  containerNumber                          String?
+  containerSize                            String?
+  portOfOrigin                             String?
+  destinationPort                          String?
+  etaDate                                  DateTime?
+  cargoReadyDate                           DateTime?
+  estimatedDeliveryToOrigin                DateTime?
+  supplierPi                               String?
+  packingListUrl                           String?
+  packingListFileName                      String?                                    @db.VarChar(255)
+  commercialInvoiceUrl                     String?
+  commercialInvoiceFileName                String?                                    @db.VarChar(255)
+  quantity                                 BigInt?
+  bookingNumber                            String?
+  status                                   String?
+  notes                                    String?
+  createdAt                                DateTime                                   @default(now())
+  updatedAt                                DateTime
+  bookingAgent                             String?
+  deliveryAddress                          String?
+  vesselName                               String?
+  tlkp_bookingAgent                        tlkp_bookingAgent?                         @relation(fields: [bookingAgent], references: [shortName])
+  tlkp_company                             tlkp_company                               @relation(fields: [companyId], references: [shortName])
+  tlkp_container                           tlkp_container?                            @relation(fields: [containerSize], references: [shortName])
+  tlkp_deliveryAddress                     tlkp_deliveryAddress?                      @relation(fields: [deliveryAddress], references: [shortName])
+  tlkp_destinationPort                     tlkp_destinationPort?                      @relation(fields: [destinationPort], references: [shortName])
+  tlkp_originPort                          tlkp_originPort?                           @relation(fields: [portOfOrigin], references: [shortName])
+  tbljn_container_purchaseOrder            tbljn_container_purchaseOrder[]
+  tbljn_container_purchaseOrder_rslProduct tbljn_container_purchaseOrder_rslProduct[]
+  tbl_containerNotes                       tbl_containerNotes[]
 }
 
-model tbl_shipmentNotes {
-  id            Int                @id @default(autoincrement())
-  shipmentId    Int
-  userId        Int?
-  createdAt     DateTime           @default(now())
-  content       String
-  changes       String?            @db.Text
-  tbl_shipment      tbl_shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+model tbl_containerNotes {
+  id                Int                @id @default(autoincrement())
+  containerId       Int
+  userId            Int?
+  createdAt         DateTime           @default(now())
+  content           String
+  changes           String?            @db.Text
+  tbl_container     tbl_container      @relation(fields: [containerId], references: [id], onDelete: Cascade)
   tbl_logisticsUser tbl_logisticsUser? @relation(fields: [userId], references: [id])
 
   @@index([createdAt])
-  @@index([shipmentId])
+  @@index([containerId])
   @@index([userId])
 }
 
@@ -180,22 +182,23 @@ model tbljn_purchaseOrder_rslProduct {
   @@index([rslProductID])
 }
 
-model tbljn_shipment_purchaseOrder {
+model tbljn_container_purchaseOrder {
   id                Int               @id @default(autoincrement())
-  shipmentID        String
+  containerID       Int
   purchaseOrderGID  String
   tbl_purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID])
-  tbl_shipment      tbl_shipment      @relation(fields: [shipmentID], references: [containerNumber])
+  tbl_container     tbl_container     @relation(fields: [containerID], references: [id], onDelete: Cascade)
 
+  @@unique([containerID, purchaseOrderGID])
   @@index([purchaseOrderGID])
-  @@index([shipmentID])
+  @@index([containerID])
 }
 
 model tlkp_bookingAgent {
-  id           Int            @id @default(autoincrement())
-  shortName    String         @unique
-  displayName  String?
-  tbl_shipment tbl_shipment[]
+  id            Int             @id @default(autoincrement())
+  shortName     String          @unique
+  displayName   String?
+  tbl_container tbl_container[]
 }
 
 model tlkp_company {
@@ -213,37 +216,37 @@ model tlkp_company {
   primaryEmail                String?
   supplierCurrency            String?
   tbl_logisticsUser           tbl_logisticsUser[]
-  tbl_shipment                tbl_shipment[]
+  tbl_container               tbl_container[]
   tbljn_purchaseOrder_company tbljn_purchaseOrder_company[]
 }
 
 model tlkp_container {
-  id           Int            @id @default(autoincrement())
-  shortName    String         @unique
-  displayName  String
-  tbl_shipment tbl_shipment[]
+  id            Int             @id @default(autoincrement())
+  shortName     String          @unique
+  displayName   String
+  tbl_container tbl_container[]
 }
 
 model tlkp_deliveryAddress {
-  id           Int            @id @default(autoincrement())
-  shortName    String         @unique
-  displayName  String?
+  id                Int                 @id @default(autoincrement())
+  shortName         String              @unique
+  displayName       String?
   tbl_purchaseOrder tbl_purchaseOrder[]
-  tbl_shipment tbl_shipment[]
+  tbl_container     tbl_container[]
 }
 
 model tlkp_destinationPort {
-  id           Int            @id @default(autoincrement())
-  shortName    String         @unique
-  displayName  String?
-  tbl_shipment tbl_shipment[]
+  id            Int             @id @default(autoincrement())
+  shortName     String          @unique
+  displayName   String?
+  tbl_container tbl_container[]
 }
 
 model tlkp_originPort {
-  id           Int            @id @default(autoincrement())
-  shortName    String         @unique
-  displayName  String?
-  tbl_shipment tbl_shipment[]
+  id            Int             @id @default(autoincrement())
+  shortName     String          @unique
+  displayName   String?
+  tbl_container tbl_container[]
 }
 
 model tlkp_permission {
@@ -261,24 +264,27 @@ model tlkp_purchaseOrderStatus {
 }
 
 model tlkp_rslProduct {
-  id                             Int                              @id(map: "tlkp_rslproduct_pkey") @default(autoincrement())
-  shortName                      String                           @unique(map: "tlkp_rslproduct_shortname_key")
-  displayName                    String
-  SKU                            String
-  variantGID                     String?                          @unique(map: "tlkp_rslproduct_variantgid_key")
-  tbljn_purchaseOrder_rslProduct tbljn_purchaseOrder_rslProduct[]
-  tbljn_shipment_rslProduct      tbljn_shipment_rslProduct[]
+  id                                       Int                                        @id(map: "tlkp_rslproduct_pkey") @default(autoincrement())
+  shortName                                String                                     @unique(map: "tlkp_rslproduct_shortname_key")
+  displayName                              String
+  SKU                                      String?
+  variantGID                               String?                                    @unique(map: "tlkp_rslproduct_variantgid_key")
+  tbljn_purchaseOrder_rslProduct           tbljn_purchaseOrder_rslProduct[]
+  tbljn_container_purchaseOrder_rslProduct tbljn_container_purchaseOrder_rslProduct[]
 }
 
-model tbljn_shipment_rslProduct {
-  id              Int             @id @default(autoincrement())
-  shipmentId      Int
-  rslProductID    String
-  quantity        Int             @default(0)
-  tbl_shipment    tbl_shipment    @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
-  tlkp_rslProduct tlkp_rslProduct @relation(fields: [rslProductID], references: [shortName], onDelete: Cascade)
+model tbljn_container_purchaseOrder_rslProduct {
+  id                Int               @id @default(autoincrement())
+  containerID       Int
+  purchaseOrderGID  String
+  rslProductID      String
+  quantity          Int               @default(0)
+  tbl_container     tbl_container     @relation(fields: [containerID], references: [id], onDelete: Cascade)
+  tbl_purchaseOrder tbl_purchaseOrder @relation(fields: [purchaseOrderGID], references: [purchaseOrderGID], onDelete: Cascade)
+  tlkp_rslProduct   tlkp_rslProduct   @relation(fields: [rslProductID], references: [shortName], onDelete: Cascade)
 
-  @@unique([shipmentId, rslProductID])
-  @@index([shipmentId])
+  @@unique([containerID, purchaseOrderGID, rslProductID], map: "tbljn_container_po_product_unique")
+  @@index([containerID])
+  @@index([purchaseOrderGID])
   @@index([rslProductID])
 }

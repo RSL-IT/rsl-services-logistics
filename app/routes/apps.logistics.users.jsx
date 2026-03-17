@@ -7,7 +7,7 @@
 //
 // Payload (JSON or FormData):
 //   {
-//     intent: "create" | "update" | "delete",
+//     intent: "create" | "update" | "delete" | "debug_log_staffmembers",
 //     user: {
 //       id?: string|number,
 //       email: string,
@@ -33,11 +33,92 @@ import bcrypt from "bcryptjs";
 import { verifyProxyIfPresent } from "~/utils/app-proxy-verify.server";
 import { logisticsDb } from "~/logistics-db.server";
 import { getLogisticsUserFromRequest } from "~/logistics-auth.server";
+import { runAdminQuery } from "~/shopify-admin.server";
 
 const INTERNAL_COMPANY_ID = "RSL";
 const TX_OPTIONS = { maxWait: 10_000, timeout: 10_000 };
 const TX_RETRY_ATTEMPTS = 3;
 const TX_RETRY_BASE_DELAY_MS = 150;
+const DEBUG_STAFFMEMBER_LIMIT = 100;
+
+const DEBUG_STAFFMEMBERS_QUERY = `#graphql
+  query LogisticsDebugStaffMembers($first: Int!) {
+    staffMembers(first: $first) {
+      nodes {
+        id
+        name
+        email
+        firstName
+        lastName
+        accountType
+        active
+        exists
+        initials
+        isShopOwner
+        locale
+        phone
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
+
+function getShopFromRequestOrPayload(request, payload) {
+  const fromPayload = cleanStr(payload?.shop);
+  if (fromPayload) return fromPayload;
+
+  try {
+    const url = new URL(request.url);
+    const fromQuery = cleanStr(url.searchParams.get("shop"));
+    if (fromQuery) return fromQuery;
+  } catch {
+    // ignore URL parse issues
+  }
+
+  const fromHeader = cleanStr(request.headers.get("x-shopify-shop-domain"));
+  return fromHeader || null;
+}
+
+function dbUserHasPermission(dbUser, permissionShortName) {
+  if (!dbUser || !permissionShortName) return false;
+  const links = Array.isArray(dbUser.tbljn_logisticsUser_permission)
+    ? dbUser.tbljn_logisticsUser_permission
+    : [];
+  return links.some((x) => x?.tlkp_permission?.shortName === permissionShortName);
+}
+
+function extractShopifyErrorMessages(rawErrors) {
+  if (!rawErrors) return [];
+  const list = Array.isArray(rawErrors) ? rawErrors : [rawErrors];
+  const out = [];
+
+  for (const err of list) {
+    if (!err) continue;
+    if (typeof err === "string") {
+      if (err.trim()) out.push(err.trim());
+      continue;
+    }
+    if (typeof err?.message === "string" && err.message.trim()) {
+      out.push(err.message.trim());
+      continue;
+    }
+    try {
+      const s = JSON.stringify(err);
+      if (s && s !== "{}") out.push(s);
+    } catch {
+      // ignore serialization failures
+    }
+  }
+
+  return out;
+}
 
 function normalizeUserTypeForDb(input) {
   const raw = String(input || "").trim().toLowerCase();
@@ -213,6 +294,92 @@ export async function action({ request }) {
 
     if (!intent) {
       return json({ success: false, error: "Missing intent.", debug }, { status: 200 });
+    }
+
+    if (intent === "debug_log_staffmembers") {
+      debug.stage = "debug-log-staffmembers";
+
+      const debugEnabled = toBool(payload.debugEnabled, false);
+      if (!debugEnabled) {
+        return json(
+          { success: false, error: "Enable Show Debug before running this action.", debug },
+          { status: 403 },
+        );
+      }
+
+      const actorWithPerms = await logisticsDb.tbl_logisticsUser.findUnique({
+        where: { id: Number(actor.id) },
+        include: {
+          tbljn_logisticsUser_permission: {
+            include: { tlkp_permission: true },
+          },
+        },
+      });
+
+      if (!dbUserHasPermission(actorWithPerms, "debug_view")) {
+        return json({ success: false, error: "Forbidden.", debug }, { status: 403 });
+      }
+
+      const shop = getShopFromRequestOrPayload(request, payload);
+      if (!shop) {
+        return json(
+          {
+            success: false,
+            error: "Missing shop context for staff-member query. Include ?shop=... on the request.",
+            debug,
+          },
+          { status: 400 },
+        );
+      }
+
+      const requestedFirst = Number(payload.first);
+      const first = Number.isFinite(requestedFirst)
+        ? Math.max(1, Math.min(DEBUG_STAFFMEMBER_LIMIT, Math.trunc(requestedFirst)))
+        : DEBUG_STAFFMEMBER_LIMIT;
+
+      const staffResp = await runAdminQuery(shop, DEBUG_STAFFMEMBERS_QUERY, { first });
+      const errorMessages = extractShopifyErrorMessages(staffResp?.errors);
+      if (errorMessages.length) {
+        const msg = `Shopify Admin API staff-members query failed: ${errorMessages.join("; ")}`;
+        console.error("[logistics users] debug staff-members graphql errors", {
+          actorId: actor.id,
+          shop,
+          errors: staffResp?.errors,
+        });
+        return json({ success: false, error: msg, debug }, { status: 502 });
+      }
+
+      const ranAt = new Date().toISOString();
+      const staffMembers = staffResp?.data?.staffMembers || null;
+      const nodes = Array.isArray(staffMembers?.nodes) ? staffMembers.nodes : [];
+
+      console.info(
+        "[logistics users] debug staff-members payload\n" +
+        JSON.stringify(
+          {
+            actorId: String(actor.id),
+            shop,
+            ranAt,
+            requestedLimit: first,
+            returnedCount: nodes.length,
+            staffMembers,
+          },
+          null,
+          2,
+        ),
+      );
+
+      return json(
+        {
+          success: true,
+          logged: true,
+          shop,
+          ranAt,
+          count: nodes.length,
+          debug,
+        },
+        { status: 200 },
+      );
     }
 
     if (intent === "create") {

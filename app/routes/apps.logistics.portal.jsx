@@ -61,12 +61,163 @@ function uniqStrings(arr) {
   return out;
 }
 
+function cleanStr(v) {
+  return String(v ?? "").trim();
+}
+
+function cleanStrOrNull(v) {
+  const s = cleanStr(v);
+  return s ? s : null;
+}
+
+const SHOPIFY_FOOTER_NOISE_RE = /\bPowered by Shopify\b/ig;
+const PO_LINE_ITEMS_SNAPSHOT_EVENT = "PO_LINE_ITEMS_SNAPSHOT";
+
+function sanitizeProductTitleText(v) {
+  const s = cleanStr(v).replace(SHOPIFY_FOOTER_NOISE_RE, " ");
+  const normalized = s.replace(/\s+/g, " ").trim();
+  return normalized || null;
+}
+
+function isPlaceholderProductId(v) {
+  return /^line[_\s-]?\d+$/i.test(cleanStr(v));
+}
+
+function normalizeSkuForMatch(v) {
+  const raw = cleanStr(v).toUpperCase().replace(/\s+/g, "");
+  if (!raw) return "";
+  if (raw.length < 7) return raw;
+  return `${raw.slice(0, 6)}${raw.slice(7)}`;
+}
+
+function normalizeTitleForMatch(v) {
+  const title = sanitizeProductTitleText(v);
+  if (!title) return "";
+  return title
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleMatchKeys(v) {
+  const title = sanitizeProductTitleText(v);
+  if (!title) return [];
+
+  const variants = [title];
+  const slashIdx = title.indexOf("/");
+  if (slashIdx > 0) variants.push(title.slice(0, slashIdx));
+  const dashIdx = title.indexOf(" - ");
+  if (dashIdx > 0) variants.push(title.slice(0, dashIdx));
+
+  const keys = [];
+  for (const candidate of variants) {
+    const normalized = normalizeTitleForMatch(candidate);
+    if (!normalized) continue;
+    keys.push(normalized);
+    const compact = normalized.replace(/\s+/g, "");
+    if (compact) keys.push(compact);
+  }
+  return uniqStrings(keys);
+}
+
+function normalizePoLineItemSnapshotRow(row, idx = 0) {
+  const mappedId = cleanStrOrNull(
+    row?.rslProductID ??
+    row?.rslModelID ??
+    row?.shortName ??
+    null
+  );
+  const normalizedMappedId = mappedId && !isPlaceholderProductId(mappedId) ? mappedId : null;
+
+  const title = sanitizeProductTitleText(row?.title ?? row?.displayName ?? null);
+  const sku = cleanStrOrNull(row?.SKU ?? row?.sku ?? null);
+  const qtyRaw = Number(row?.quantity);
+  const quantity = Number.isFinite(qtyRaw) ? Math.max(0, Math.trunc(qtyRaw)) : 0;
+
+  return {
+    lineNumber: idx + 1,
+    title: title || `Line ${idx + 1}`,
+    sku,
+    quantity,
+    rslProductID: normalizedMappedId,
+  };
+}
+
+function normalizePoLineItemsSnapshot(rows) {
+  const raw = Array.isArray(rows) ? rows : [];
+  return raw
+    .map((row, idx) => normalizePoLineItemSnapshotRow(row, idx))
+    .filter((row) => row.title || row.sku || row.quantity > 0 || row.rslProductID);
+}
+
+function parsePoLineItemsSnapshot(content) {
+  const s = cleanStr(content);
+  if (!s) return [];
+  try {
+    const parsed = JSON.parse(s);
+    const rows = Array.isArray(parsed?.lineItems) ? parsed.lineItems : [];
+    return normalizePoLineItemsSnapshot(rows);
+  } catch {
+    return [];
+  }
+}
+
+function buildSkuLookup(rslProducts) {
+  const bySku = new Map();
+  for (const p of rslProducts || []) {
+    const rawSku = cleanStr(p?.SKU).toUpperCase().replace(/\s+/g, "");
+    const skuKey = normalizeSkuForMatch(rawSku);
+    if (!skuKey) continue;
+    if (!bySku.has(skuKey)) bySku.set(skuKey, []);
+    bySku.get(skuKey).push({ product: p, rawSku });
+  }
+  return bySku;
+}
+
+function findSkuMatch(sku, bySku) {
+  const normalizedInputSku = cleanStr(sku).toUpperCase().replace(/\s+/g, "");
+  const skuKey = normalizeSkuForMatch(normalizedInputSku);
+  if (!skuKey) return null;
+  const skuMatches = bySku.get(skuKey) || [];
+  const matchedEntry = skuMatches.find((m) => m.rawSku === normalizedInputSku) || skuMatches[0] || null;
+  return matchedEntry?.product || null;
+}
+
+function buildTitleLookup(rslProducts) {
+  const byTitle = new Map();
+  for (const p of rslProducts || []) {
+    const keys = uniqStrings([
+      ...titleMatchKeys(p?.displayName),
+      ...titleMatchKeys(p?.shortName),
+    ]);
+    for (const key of keys) {
+      if (!byTitle.has(key)) byTitle.set(key, []);
+      byTitle.get(key).push(p);
+    }
+  }
+  return byTitle;
+}
+
+function findTitleMatch(title, byTitle) {
+  const keys = titleMatchKeys(title);
+  for (const key of keys) {
+    const matches = byTitle.get(key) || [];
+    if (matches.length) return matches[0];
+  }
+  return null;
+}
+
+function poProductKey(purchaseOrderGID, rslProductID) {
+  return `${String(purchaseOrderGID || "").trim()}::${String(rslProductID || "").trim()}`;
+}
+
 /**
  * Schema-accurate shipment -> PO link reader:
- * tbl_shipment.tbljn_shipment_purchaseOrder[].tbl_purchaseOrder
+ * tbl_container.tbljn_container_purchaseOrder[].tbl_purchaseOrder
  */
 function pickPurchaseOrdersInfoFromShipment(s) {
-  const links = Array.isArray(s?.tbljn_shipment_purchaseOrder) ? s.tbljn_shipment_purchaseOrder : [];
+  const links = Array.isArray(s?.tbljn_container_purchaseOrder) ? s.tbljn_container_purchaseOrder : [];
 
   const gids = links
     .map((l) => l?.tbl_purchaseOrder?.purchaseOrderGID)
@@ -82,6 +233,44 @@ function pickPurchaseOrdersInfoFromShipment(s) {
     purchaseOrderGIDs: uniqStrings(gids),
     purchaseOrderShortNames: uniqStrings(names),
   };
+}
+
+function aggregateContainerProducts(containerRow) {
+  const allocations = Array.isArray(containerRow?.tbljn_container_purchaseOrder_rslProduct)
+    ? containerRow.tbljn_container_purchaseOrder_rslProduct
+    : [];
+  const byProduct = new Map();
+  for (const row of allocations) {
+    const rslProductID = String(row?.rslProductID || "").trim();
+    if (!rslProductID) continue;
+    const quantity = Number(row?.quantity) || 0;
+    const existing = byProduct.get(rslProductID) || {
+      rslProductID,
+      shortName: row?.tlkp_rslProduct?.shortName || rslProductID,
+      displayName: row?.tlkp_rslProduct?.displayName || rslProductID,
+      SKU: row?.tlkp_rslProduct?.SKU || null,
+      quantity: 0,
+    };
+    existing.quantity += quantity;
+    byProduct.set(rslProductID, existing);
+  }
+  return [...byProduct.values()];
+}
+
+function buildContainerPoAllocationMap(containerRow) {
+  const allocations = Array.isArray(containerRow?.tbljn_container_purchaseOrder_rslProduct)
+    ? containerRow.tbljn_container_purchaseOrder_rslProduct
+    : [];
+  const out = {};
+  for (const row of allocations) {
+    const productId = String(row?.rslProductID || "").trim();
+    const poGid = String(row?.purchaseOrderGID || "").trim();
+    const qty = Number(row?.quantity) || 0;
+    if (!productId || !poGid || qty <= 0) continue;
+    if (!out[productId]) out[productId] = {};
+    out[productId][poGid] = (Number(out[productId][poGid]) || 0) + qty;
+  }
+  return out;
 }
 
 /**
@@ -344,26 +533,26 @@ export async function loader({ request }) {
   // Do NOT use Promise.all() that can fail-all if one query fails.
   // Each query is isolated so login doesn't break.
   const shipmentRows = await safeFindMany(
-    logisticsDb.tbl_shipment,
+    logisticsDb.tbl_container,
     {
       orderBy: { etaDate: "asc" },
       include: {
-        // schema: tbl_shipment.tbljn_shipment_purchaseOrder[]
-        tbljn_shipment_purchaseOrder: {
+        // schema: tbl_container.tbljn_container_purchaseOrder[]
+        tbljn_container_purchaseOrder: {
           include: {
-            // schema: tbljn_shipment_purchaseOrder.tbl_purchaseOrder
+            // schema: tbljn_container_purchaseOrder.tbl_purchaseOrder
             tbl_purchaseOrder: { select: { purchaseOrderGID: true, shortName: true } },
           },
         },
-        // schema: tbl_shipment.tbljn_shipment_rslProduct[]
-        tbljn_shipment_rslProduct: {
+        // schema: tbl_container.tbljn_container_purchaseOrder_rslProduct[]
+        tbljn_container_purchaseOrder_rslProduct: {
           include: {
-            // schema: tbljn_shipment_rslProduct.tlkp_rslProduct
+            // schema: tbljn_container_purchaseOrder_rslProduct.tlkp_rslProduct
             tlkp_rslProduct: { select: { shortName: true, displayName: true, SKU: true } },
           },
         },
-        // schema: tbl_shipment.tbl_shipmentNotes[]
-        tbl_shipmentNotes: {
+        // schema: tbl_container.tbl_containerNotes[]
+        tbl_containerNotes: {
           orderBy: { createdAt: "desc" },
           include: {
             tbl_logisticsUser: { select: { displayName: true } },
@@ -371,7 +560,7 @@ export async function loader({ request }) {
         },
       },
     },
-    "tbl_shipment"
+    "tbl_container"
   );
 
   let userRows = await safeFindMany(
@@ -521,14 +710,44 @@ export async function loader({ request }) {
     { select: { shortName: true, displayName: true, SKU: true }, orderBy: [{ displayName: "asc" }] },
     "tlkp_rslProduct"
   );
+  const rslShortNameSet = new Set(
+    (rslModelRows || [])
+      .map((row) => cleanStr(row?.shortName))
+      .filter(Boolean)
+  );
+  const rslSkuLookup = buildSkuLookup(rslModelRows);
+  const rslTitleLookup = buildTitleLookup(rslModelRows);
+
+  // Derive committed quantities from live container allocations so stale committedQuantity
+  // values in tbljn_purchaseOrder_rslProduct never surface as false "0 available" rows.
+  const containerAllocationRows = await safeFindMany(
+    logisticsDb.tbljn_container_purchaseOrder_rslProduct,
+    {
+      select: {
+        purchaseOrderGID: true,
+        rslProductID: true,
+        quantity: true,
+      },
+    },
+    "tbljn_container_purchaseOrder_rslProduct"
+  );
+  const committedByPoProduct = new Map();
+  for (const row of containerAllocationRows || []) {
+    const key = poProductKey(row?.purchaseOrderGID, row?.rslProductID);
+    if (!key || key === "::") continue;
+    const qty = Number(row?.quantity) || 0;
+    if (qty <= 0) continue;
+    committedByPoProduct.set(key, (committedByPoProduct.get(key) || 0) + qty);
+  }
 
   // Map shipments
   shipments = (shipmentRows || []).map((s) => {
     const po = pickPurchaseOrdersInfoFromShipment(s);
+    const externalContainerId = String(s.rslLogisticsID || s.id || "").trim();
 
     // Map shipment notes/history
-    const history = Array.isArray(s.tbl_shipmentNotes)
-      ? s.tbl_shipmentNotes.map((n) => ({
+    const history = Array.isArray(s.tbl_containerNotes)
+      ? s.tbl_containerNotes.map((n) => ({
           id: String(n.id),
           timestamp: n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString(),
           content: n.content || "",
@@ -537,29 +756,25 @@ export async function loader({ request }) {
         }))
       : [];
 
-    const products = Array.isArray(s.tbljn_shipment_rslProduct)
-      ? s.tbljn_shipment_rslProduct.map((p) => ({
-          rslProductID: p.rslProductID,
-          shortName: p.tlkp_rslProduct?.shortName || p.rslProductID,
-          displayName: p.tlkp_rslProduct?.displayName || p.rslProductID,
-          SKU: p.tlkp_rslProduct?.SKU || null,
-          quantity: p.quantity,
-        }))
-      : [];
+    const products = aggregateContainerProducts(s);
 
     const productQuantities = {};
     for (const p of products) {
       productQuantities[p.rslProductID] = p.quantity;
     }
+    const poAllocations = buildContainerPoAllocationMap(s);
 
     return {
-      id: String(s.id),
+      id: externalContainerId,
+      dbId: String(s.id),
+      rslLogisticsID: externalContainerId,
       supplierId: s.companyId,
       supplierName: s.companyName,
       products,
       productQuantities,
+      poAllocations,
 
-      containerNumber: s.containerNumber,
+      containerNumber: s.containerNumber ?? "",
       containerSize: s.containerSize ?? "",
       portOfOrigin: s.portOfOrigin ?? "",
       destinationPort: s.destinationPort ?? "",
@@ -629,22 +844,89 @@ export async function loader({ request }) {
   purchaseOrders = (purchaseOrderRows || []).map((po) => {
     const company = po.tbljn_purchaseOrder_company?.[0]?.tlkp_company || null;
     const deliveryAddress = po.tlkp_deliveryAddress || null;
+    const joinedProducts = Array.isArray(po.tbljn_purchaseOrder_rslProduct)
+      ? po.tbljn_purchaseOrder_rslProduct
+      : [];
+    const joinMetaById = new Map(
+      joinedProducts.map((l) => [
+        cleanStr(l?.rslProductID),
+        {
+          shortName: l?.tlkp_rslProduct?.shortName || l?.rslProductID || null,
+          displayName: l?.tlkp_rslProduct?.displayName || l?.rslProductID || null,
+          sku: l?.tlkp_rslProduct?.SKU || null,
+          initialQuantity: Number.isFinite(Number(l?.initialQuantity))
+            ? Math.max(0, Math.trunc(Number(l.initialQuantity)))
+            : 0,
+          committedQuantity: Math.max(
+            0,
+            Math.trunc(Number(committedByPoProduct.get(poProductKey(po.purchaseOrderGID, l?.rslProductID))) || 0)
+          ),
+        },
+      ])
+    );
 
-    const products = Array.isArray(po.tbljn_purchaseOrder_rslProduct)
-      ? po.tbljn_purchaseOrder_rslProduct.map((l) => ({
+    const rawNotes = Array.isArray(po.tbl_purchaseOrderNotes) ? po.tbl_purchaseOrderNotes : [];
+    const snapshotNote = rawNotes.find((n) => cleanStr(n?.eventType) === PO_LINE_ITEMS_SNAPSHOT_EVENT) || null;
+    const snapshotLineItems = parsePoLineItemsSnapshot(snapshotNote?.content);
+
+    const products = snapshotLineItems.length
+      ? snapshotLineItems.map((row, idx) => {
+        const snapshotMappedId = cleanStrOrNull(row?.rslProductID);
+        let mappedId = snapshotMappedId;
+        let fallbackMatchedProduct = null;
+        const snapshotMappedIdLooksUsable = Boolean(
+          mappedId && (joinMetaById.has(mappedId) || rslShortNameSet.has(mappedId))
+        );
+        if (!snapshotMappedIdLooksUsable) {
+          mappedId = null;
+        }
+        if (!mappedId) {
+          fallbackMatchedProduct = findSkuMatch(row?.sku, rslSkuLookup);
+          if (!fallbackMatchedProduct) {
+            fallbackMatchedProduct = findTitleMatch(row?.title, rslTitleLookup);
+          }
+          mappedId = cleanStrOrNull(fallbackMatchedProduct?.shortName);
+        }
+
+        const joinMeta = mappedId ? joinMetaById.get(mappedId) : null;
+        const qtyRaw = Number(row?.quantity);
+        const quantity = Number.isFinite(qtyRaw) ? Math.max(0, Math.trunc(qtyRaw)) : 0;
+        const title =
+          sanitizeProductTitleText(joinMeta?.displayName) ||
+          sanitizeProductTitleText(fallbackMatchedProduct?.displayName) ||
+          sanitizeProductTitleText(row?.title) ||
+          `Line ${idx + 1}`;
+        const committedQuantity = Number.isFinite(Number(joinMeta?.committedQuantity))
+          ? Math.max(0, Math.trunc(Number(joinMeta?.committedQuantity)))
+          : 0;
+
+        return {
+          rslProductID: mappedId || "",
+          shortName: mappedId || "",
+          displayName: title,
+          SKU: cleanStrOrNull(row?.sku) || joinMeta?.sku || cleanStrOrNull(fallbackMatchedProduct?.SKU) || null,
+          initialQuantity: quantity,
+          committedQuantity,
+          quantity,
+        };
+      })
+      : joinedProducts.map((l) => ({
         rslProductID: l.rslProductID,
         shortName: l.tlkp_rslProduct?.shortName || l.rslProductID,
         displayName: l.tlkp_rslProduct?.displayName || l.rslProductID,
         SKU: l.tlkp_rslProduct?.SKU || null,
         initialQuantity: typeof l.initialQuantity === "number" ? l.initialQuantity : 0,
-        committedQuantity: typeof l.committedQuantity === "number" ? l.committedQuantity : 0,
+        committedQuantity: Math.max(
+          0,
+          Math.trunc(Number(committedByPoProduct.get(poProductKey(po.purchaseOrderGID, l.rslProductID))) || 0)
+        ),
         // keep legacy quantity for existing UI consumers
         quantity: typeof l.initialQuantity === "number" ? l.initialQuantity : 0,
-      }))
-      : [];
+      }));
 
-    const notes = Array.isArray(po.tbl_purchaseOrderNotes)
-      ? po.tbl_purchaseOrderNotes.map((n) => ({
+    const notes = rawNotes
+      .filter((n) => cleanStr(n?.eventType) !== PO_LINE_ITEMS_SNAPSHOT_EVENT)
+      .map((n) => ({
         id: String(n.id),
         timestamp: n.createdAt ? new Date(n.createdAt).toISOString() : new Date().toISOString(),
         content: n.content || "",
@@ -652,8 +934,7 @@ export async function loader({ request }) {
         pdfUrl: n.pdfUrl || null,
         pdfFileName: n.pdfFileName || null,
         user: n.tbl_logisticsUser?.displayName || null,
-      }))
-      : [];
+      }));
 
     const lastUpdatedBy = notes.length > 0 && notes[0].user ? notes[0].user : null;
 
