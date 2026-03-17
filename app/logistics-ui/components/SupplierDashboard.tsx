@@ -499,14 +499,16 @@ export function SupplierDashboard({
                 />
                 Show Debug
               </label>
-              <button
-                type="button"
-                onClick={() => void onRunApiProbe?.()}
-                disabled={isApiProbeRunning}
-                style={isApiProbeRunning ? btnDisabled : btnPrimary}
-              >
-                {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
-              </button>
+              {showDebug ? (
+                <button
+                  type="button"
+                  onClick={() => void onRunApiProbe?.()}
+                  disabled={isApiProbeRunning}
+                  style={isApiProbeRunning ? btnDisabled : btnPrimary}
+                >
+                  {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
+                </button>
+              ) : null}
             </div>
           ) : null}
 

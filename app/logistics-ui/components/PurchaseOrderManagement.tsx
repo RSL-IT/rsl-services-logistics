@@ -1316,14 +1316,16 @@ export function PurchaseOrderManagement({
                 />
                 Show Debug
               </label>
-              <button
-                type="button"
-                onClick={() => void onRunApiProbe?.()}
-                disabled={isApiProbeRunning}
-                style={isApiProbeRunning ? btnDisabled : btnWarning}
-              >
-                {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
-              </button>
+              {showDebug ? (
+                <button
+                  type="button"
+                  onClick={() => void onRunApiProbe?.()}
+                  disabled={isApiProbeRunning}
+                  style={isApiProbeRunning ? btnDisabled : btnWarning}
+                >
+                  {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
+                </button>
+              ) : null}
             </div>
           ) : null}
 

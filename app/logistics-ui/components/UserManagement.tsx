@@ -267,6 +267,7 @@ export function UserManagement({
 
   const [isSaving, setIsSaving] = useState(false);
   const [isLoggingStaffMembers, setIsLoggingStaffMembers] = useState(false);
+  const [staffMembersDebugDump, setStaffMembersDebugDump] = useState<any>(null);
 
   const filteredUsers = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -394,13 +395,37 @@ export function UserManagement({
 
       if (!data || data.success !== true) {
         setModalError(data?.error || "Unable to log staff members.");
+        return;
       }
+
+      setStaffMembersDebugDump({
+        shop: data.shop || null,
+        ranAt: data.ranAt || null,
+        requestedLimit: data.requestedLimit ?? 100,
+        count: data.count ?? null,
+        staffMembers: data.staffMembers || null,
+      });
     } catch (e: any) {
       setModalError(e?.message || "Unable to log staff members.");
     } finally {
       setIsLoggingStaffMembers(false);
     }
   };
+
+  const debugPanelData = useMemo(() => {
+    const out: any =
+      debugInfo && typeof debugInfo === "object" && !Array.isArray(debugInfo)
+        ? { ...debugInfo }
+        : debugInfo != null
+          ? { debugInfo }
+          : {};
+
+    if (staffMembersDebugDump) {
+      out.staffMembersDump = staffMembersDebugDump;
+    }
+
+    return Object.keys(out).length ? out : null;
+  }, [debugInfo, staffMembersDebugDump]);
 
   return (
     <div style={pageStyle}>
@@ -422,23 +447,25 @@ export function UserManagement({
                 />
                 Show Debug
               </label>
-              <button
-                type="button"
-                onClick={() => void onRunApiProbe?.()}
-                disabled={isApiProbeRunning}
-                style={isApiProbeRunning ? btnDisabled : btnPrimary}
-              >
-                {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
-              </button>
               {showDebug ? (
-                <button
-                  type="button"
-                  onClick={() => void handleLogStaffMembers()}
-                  disabled={isLoggingStaffMembers}
-                  style={isLoggingStaffMembers ? btnDisabled : btnPrimary}
-                >
-                  {isLoggingStaffMembers ? "Logging Staff..." : "Log Staff JSON (100)"}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void onRunApiProbe?.()}
+                    disabled={isApiProbeRunning}
+                    style={isApiProbeRunning ? btnDisabled : btnPrimary}
+                  >
+                    {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleLogStaffMembers()}
+                    disabled={isLoggingStaffMembers}
+                    style={isLoggingStaffMembers ? btnDisabled : btnPrimary}
+                  >
+                    {isLoggingStaffMembers ? "Logging Staff..." : "Log Staff JSON (100)"}
+                  </button>
+                </>
               ) : null}
             </div>
           ) : null}
@@ -454,7 +481,7 @@ export function UserManagement({
         </div>
       </div>
 
-      {debugInfo && showDebug ? (
+      {debugPanelData && showDebug ? (
         <div
           style={{
             marginBottom: 14,
@@ -467,7 +494,7 @@ export function UserManagement({
             whiteSpace: "pre-wrap",
           }}
         >
-          {JSON.stringify(debugInfo, null, 2)}
+          {JSON.stringify(debugPanelData, null, 2)}
         </div>
       ) : null}
 

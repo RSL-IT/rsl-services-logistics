@@ -58,18 +58,20 @@ export function SupplierView({
                 />
                 Show Debug
               </label>
-              <button
-                type="button"
-                onClick={() => void onRunApiProbe?.()}
-                disabled={isApiProbeRunning}
-                className={`px-3 py-2 rounded-lg text-sm font-semibold ${
-                  isApiProbeRunning
-                    ? "bg-slate-300 text-slate-700 cursor-not-allowed"
-                    : "bg-blue-600 text-white hover:bg-blue-700"
-                }`}
-              >
-                {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
-              </button>
+              {showDebug ? (
+                <button
+                  type="button"
+                  onClick={() => void onRunApiProbe?.()}
+                  disabled={isApiProbeRunning}
+                  className={`px-3 py-2 rounded-lg text-sm font-semibold ${
+                    isApiProbeRunning
+                      ? "bg-slate-300 text-slate-700 cursor-not-allowed"
+                      : "bg-blue-600 text-white hover:bg-blue-700"
+                  }`}
+                >
+                  {isApiProbeRunning ? "Running Probe..." : "Run API Probe"}
+                </button>
+              ) : null}
             </div>
           ) : null}
           {showLogout ? (

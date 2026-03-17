@@ -412,23 +412,25 @@ export default function LogisticsApp({
                 />
                 Show Debug
               </label>
-              <button
-                type="button"
-                onClick={() => void runApiProbe()}
-                disabled={apiProbeRunning}
-                style={{
-                  borderRadius: 10,
-                  padding: "8px 10px",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  border: "1px solid transparent",
-                  cursor: apiProbeRunning ? "not-allowed" : "pointer",
-                  background: apiProbeRunning ? "#cbd5e1" : "#2563eb",
-                  color: apiProbeRunning ? "#475569" : "#fff",
-                }}
-              >
-                {apiProbeRunning ? "Running Probe..." : "Run API Probe"}
-              </button>
+              {showDebug ? (
+                <button
+                  type="button"
+                  onClick={() => void runApiProbe()}
+                  disabled={apiProbeRunning}
+                  style={{
+                    borderRadius: 10,
+                    padding: "8px 10px",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    border: "1px solid transparent",
+                    cursor: apiProbeRunning ? "not-allowed" : "pointer",
+                    background: apiProbeRunning ? "#cbd5e1" : "#2563eb",
+                    color: apiProbeRunning ? "#475569" : "#fff",
+                  }}
+                >
+                  {apiProbeRunning ? "Running Probe..." : "Run API Probe"}
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>
