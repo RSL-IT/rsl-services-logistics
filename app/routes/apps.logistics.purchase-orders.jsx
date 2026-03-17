@@ -42,6 +42,96 @@ function normalizeSkuForMatch(v) {
   return `${raw.slice(0, 6)}${raw.slice(7)}`;
 }
 
+function normalizeTitleForMatch(v) {
+  const title = sanitizeProductTitleText(v);
+  if (!title) return "";
+  return title
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleMatchKeys(v) {
+  const title = sanitizeProductTitleText(v);
+  if (!title) return [];
+
+  const variants = [title];
+  const slashIdx = title.indexOf("/");
+  if (slashIdx > 0) variants.push(title.slice(0, slashIdx));
+  const dashIdx = title.indexOf(" - ");
+  if (dashIdx > 0) variants.push(title.slice(0, dashIdx));
+
+  const keys = [];
+  for (const candidate of variants) {
+    const normalized = normalizeTitleForMatch(candidate);
+    if (!normalized) continue;
+    keys.push(normalized);
+    const compact = normalized.replace(/\s+/g, "");
+    if (compact) keys.push(compact);
+  }
+  return uniqStrings(keys);
+}
+
+function buildSkuLookup(rslProducts) {
+  const bySku = new Map();
+  const skuCounts = new Map();
+  for (const p of rslProducts || []) {
+    const rawSku = cleanStr(p?.SKU).toUpperCase().replace(/\s+/g, "");
+    const skuKey = normalizeSkuForMatch(rawSku);
+    if (!skuKey) continue;
+    skuCounts.set(skuKey, (skuCounts.get(skuKey) || 0) + 1);
+    if (!bySku.has(skuKey)) bySku.set(skuKey, []);
+    bySku.get(skuKey).push({ product: p, rawSku });
+  }
+  return { bySku, skuCounts };
+}
+
+function findSkuMatch(sku, bySku) {
+  const normalizedInputSku = cleanStr(sku).toUpperCase().replace(/\s+/g, "");
+  const skuKey = normalizeSkuForMatch(normalizedInputSku);
+  if (!skuKey) {
+    return { skuKey: "", normalizedInputSku: "", matchedEntry: null, matched: null };
+  }
+  const skuMatches = bySku.get(skuKey) || [];
+  const matchedEntry = skuMatches.find((m) => m.rawSku === normalizedInputSku) || skuMatches[0] || null;
+  return {
+    skuKey,
+    normalizedInputSku,
+    matchedEntry,
+    matched: matchedEntry?.product || null,
+  };
+}
+
+function buildTitleLookup(rslProducts) {
+  const byTitle = new Map();
+  for (const p of rslProducts || []) {
+    const keys = uniqStrings([
+      ...titleMatchKeys(p?.displayName),
+      ...titleMatchKeys(p?.shortName),
+    ]);
+    for (const key of keys) {
+      if (!byTitle.has(key)) byTitle.set(key, []);
+      byTitle.get(key).push(p);
+    }
+  }
+  return byTitle;
+}
+
+function findTitleMatch(title, byTitle) {
+  const keys = titleMatchKeys(title);
+  for (const key of keys) {
+    const matches = byTitle.get(key) || [];
+    if (!matches.length) continue;
+    return {
+      key,
+      matched: matches[0],
+      duplicate: matches.length > 1,
+    };
+  }
+  return null;
+}
+
 const INVALID_PO_FORMAT_MESSAGE =
   "That PDF does not seem to be a RSL Purchase Order.  Check it and try with a different document.  If you're sure it's correct, contact the IT administrator.";
 const PO_LINE_ITEMS_SNAPSHOT_EVENT = "PO_LINE_ITEMS_SNAPSHOT";
@@ -589,19 +679,16 @@ async function syncRslProductsFromShopify(shop) {
     const seenVariantKeys = new Set();
 
     for (const node of selectedVariants) {
-      const shortName = shortNameForVariant(node);
+      const baseShortName = shortNameForVariant(node);
+      let shortName = baseShortName;
       const variantGID = cleanStr(node?.id);
-      const variantKey = variantGID || `${shortName}::${cleanStr(node?.sku)}`;
+      const variantKey = variantGID || `${baseShortName}::${cleanStr(node?.sku)}::${cleanStr(node?.title)}`;
       if (seenVariantKeys.has(variantKey)) continue;
       seenVariantKeys.add(variantKey);
 
-      const sku = cleanStr(node?.sku);
-      if (!sku) {
-        missingSku.push({ id: variantGID, shortName, title: node?.title || "" });
-        skipped += 1;
-        continue;
-      }
-      keepShortNames.add(shortName);
+      const skuValue = cleanStr(node?.sku);
+      const sku = skuValue || null;
+      if (!sku) missingSku.push({ id: variantGID, shortName: baseShortName, title: node?.title || "" });
       if (variantGID) keepVariantGIDs.add(variantGID);
 
       const displayName = displayNameForVariant(node);
@@ -611,10 +698,12 @@ async function syncRslProductsFromShopify(shop) {
         select: { id: true, shortName: true, SKU: true, variantGID: true },
       });
 
-      const existingBySku = await logisticsDb.tlkp_rslProduct.findFirst({
-        where: { SKU: sku },
-        select: { id: true, shortName: true, SKU: true, variantGID: true },
-      });
+      const existingBySku = sku
+        ? await logisticsDb.tlkp_rslProduct.findFirst({
+          where: { SKU: sku },
+          select: { id: true, shortName: true, SKU: true, variantGID: true },
+        })
+        : null;
 
       const existingByVariant = variantGID
         ? await logisticsDb.tlkp_rslProduct.findFirst({
@@ -623,21 +712,60 @@ async function syncRslProductsFromShopify(shop) {
         })
         : null;
 
+      const rowVariant = (row) => cleanStr(row?.variantGID);
+      const hasSameVariant = (row) => Boolean(variantGID) && rowVariant(row) === variantGID;
+      const isLegacyVariantless = (row) => Boolean(row) && !rowVariant(row);
+
       const canonical =
-        existingByShortName ||
         existingByVariant ||
-        existingBySku ||
+        (hasSameVariant(existingByShortName) ? existingByShortName : null) ||
+        (hasSameVariant(existingBySku) ? existingBySku : null) ||
+        (isLegacyVariantless(existingByShortName) ? existingByShortName : null) ||
+        (isLegacyVariantless(existingBySku) ? existingBySku : null) ||
         null;
 
-      if (!canonical) {
-        await logisticsDb.tlkp_rslProduct.create({
+      let canonicalRow = canonical;
+      if (!canonicalRow) {
+        // Keep shortName unique even when different variants produce the same text label.
+        let candidate = baseShortName;
+        const suffixSeed = cleanStr(variantGID).split("/").pop() || cleanStr(node?.title) || "variant";
+        const suffix = suffixSeed.slice(-8) || suffixSeed;
+        let attempt = 0;
+
+        for (; attempt < 50; attempt += 1) {
+          const taken = await logisticsDb.tlkp_rslProduct.findUnique({
+            where: { shortName: candidate },
+            select: { id: true, shortName: true, SKU: true, variantGID: true },
+          });
+          if (!taken) {
+            shortName = candidate;
+            break;
+          }
+          if (hasSameVariant(taken) || isLegacyVariantless(taken)) {
+            canonicalRow = taken;
+            shortName = candidate;
+            break;
+          }
+          const suffixPart = attempt === 0 ? suffix : `${suffix}-${attempt + 1}`;
+          candidate = `${baseShortName} (${suffixPart})`;
+        }
+
+        if (!shortName) shortName = candidate;
+      } else {
+        shortName = canonicalRow.shortName || baseShortName;
+      }
+
+      if (!canonicalRow) {
+        const createdRow = await logisticsDb.tlkp_rslProduct.create({
           data: {
             shortName,
             displayName,
             SKU: sku,
             variantGID,
           },
+          select: { shortName: true },
         });
+        keepShortNames.add(cleanStr(createdRow?.shortName) || shortName);
         created += 1;
         continue;
       }
@@ -645,13 +773,13 @@ async function syncRslProductsFromShopify(shop) {
       // If another row currently owns this SKU/variantGID, move that value away first so
       // canonical update can succeed without unique-key collisions.
       const conflicts = new Map();
-      if (existingBySku && existingBySku.id !== canonical.id) conflicts.set(existingBySku.id, existingBySku);
-      if (existingByVariant && existingByVariant.id !== canonical.id) conflicts.set(existingByVariant.id, existingByVariant);
+      if (sku && existingBySku && existingBySku.id !== canonicalRow.id) conflicts.set(existingBySku.id, existingBySku);
+      if (existingByVariant && existingByVariant.id !== canonicalRow.id) conflicts.set(existingByVariant.id, existingByVariant);
 
       for (const conflict of conflicts.values()) {
         const conflictData = {};
 
-        if (existingBySku && conflict.id === existingBySku.id) {
+        if (sku && existingBySku && conflict.id === existingBySku.id) {
           conflictData.SKU = `${existingBySku.SKU}__conflict__${conflict.id}__${Date.now()}`;
         }
         if (existingByVariant && conflict.id === existingByVariant.id) {
@@ -672,20 +800,22 @@ async function syncRslProductsFromShopify(shop) {
         variantGID,
       };
 
-      if (canonical.shortName !== shortName) {
+      if (canonicalRow.shortName !== shortName) {
         const shortNameTaken = await logisticsDb.tlkp_rslProduct.findUnique({
           where: { shortName },
           select: { id: true },
         });
-        if (!shortNameTaken || shortNameTaken.id === canonical.id) {
+        if (!shortNameTaken || shortNameTaken.id === canonicalRow.id) {
           canonicalData.shortName = shortName;
         }
       }
 
-      await logisticsDb.tlkp_rslProduct.update({
-        where: { id: canonical.id },
+      const updatedRow = await logisticsDb.tlkp_rslProduct.update({
+        where: { id: canonicalRow.id },
         data: canonicalData,
+        select: { shortName: true },
       });
+      keepShortNames.add(cleanStr(updatedRow?.shortName) || cleanStr(canonicalData.shortName) || canonicalRow.shortName);
       updated += 1;
     }
   }
@@ -694,11 +824,26 @@ async function syncRslProductsFromShopify(shop) {
   const existingRows = await logisticsDb.tlkp_rslProduct.findMany({
     select: { id: true, shortName: true, variantGID: true },
   });
+  const [poRefs, containerRefs] = await Promise.all([
+    logisticsDb.tbljn_purchaseOrder_rslProduct.findMany({
+      select: { rslProductID: true },
+    }),
+    logisticsDb.tbljn_container_purchaseOrder_rslProduct.findMany({
+      select: { rslProductID: true },
+    }),
+  ]);
+  const protectedShortNames = new Set(
+    uniqStrings([
+      ...(poRefs || []).map((row) => cleanStr(row?.rslProductID)),
+      ...(containerRefs || []).map((row) => cleanStr(row?.rslProductID)),
+    ])
+  );
 
   const staleIds = existingRows
     .filter((row) => {
       const rowVariant = cleanStr(row.variantGID);
       const rowShortName = cleanStr(row.shortName);
+      if (protectedShortNames.has(rowShortName)) return false;
       if (rowVariant && keepVariantGIDs.has(rowVariant)) return false;
       if (keepShortNames.has(rowShortName)) return false;
       return true;
@@ -851,6 +996,35 @@ function extractUnresolvedProductsForSkuFallback(purchaseOrder) {
   return out;
 }
 
+function extractUnresolvedProductsForTitleFallback(purchaseOrder) {
+  const out = [];
+  const raw = Array.isArray(purchaseOrder?.products) ? purchaseOrder.products : [];
+
+  for (const p of raw) {
+    const id = cleanStrOrNull(
+      p?.rslProductID ??
+      p?.rslModelID ??
+      p?.shortName ??
+      p?.id ??
+      null,
+    );
+    if (id && !isPlaceholderProductId(id)) continue;
+
+    // SKU fallback handles rows with SKU. Title fallback is primarily for no-SKU rows.
+    const sku = cleanStrOrNull(p?.SKU ?? p?.sku ?? null);
+    if (sku) continue;
+
+    const title = sanitizeProductTitleText(p?.title ?? p?.displayName ?? null);
+    if (!title) continue;
+
+    const qtyRaw = Number(p?.quantity);
+    const quantity = Number.isFinite(qtyRaw) ? Math.max(0, Math.trunc(qtyRaw)) : 0;
+    out.push({ title, quantity });
+  }
+
+  return out;
+}
+
 async function addSkuFallbackMatchesIntoSelection(selectedProductQtyById, unresolvedRows) {
   if (!(selectedProductQtyById instanceof Map) || !Array.isArray(unresolvedRows) || unresolvedRows.length === 0) {
     return;
@@ -887,6 +1061,30 @@ async function addSkuFallbackMatchesIntoSelection(selectedProductQtyById, unreso
   }
 }
 
+async function addTitleFallbackMatchesIntoSelection(selectedProductQtyById, unresolvedRows) {
+  if (!(selectedProductQtyById instanceof Map) || !Array.isArray(unresolvedRows) || unresolvedRows.length === 0) {
+    return;
+  }
+
+  const rslProducts = await logisticsDb.tlkp_rslProduct.findMany({
+    select: { shortName: true, displayName: true, SKU: true },
+  });
+  const byTitle = buildTitleLookup(rslProducts);
+
+  for (const row of unresolvedRows) {
+    const titleMatch = findTitleMatch(row?.title, byTitle);
+    const matchedId = cleanStrOrNull(titleMatch?.matched?.shortName);
+    if (!matchedId) continue;
+
+    const qtyRaw = Number(row?.quantity);
+    const quantity = Number.isFinite(qtyRaw) ? Math.max(0, Math.trunc(qtyRaw)) : 0;
+    selectedProductQtyById.set(
+      matchedId,
+      (selectedProductQtyById.get(matchedId) || 0) + quantity
+    );
+  }
+}
+
 async function buildPdfRefillDataFromBuffer(pdfBuffer) {
   const headerMeta = (() => {
     try {
@@ -912,26 +1110,24 @@ async function buildPdfRefillDataFromBuffer(pdfBuffer) {
   }
 
   const rslProducts = await logisticsDb.tlkp_rslProduct.findMany({
-    select: { shortName: true, SKU: true },
+    select: { shortName: true, displayName: true, SKU: true },
   });
-
-  const bySku = new Map();
-  for (const p of rslProducts || []) {
-    const rawSku = cleanStr(p?.SKU).toUpperCase().replace(/\s+/g, "");
-    const skuKey = normalizeSkuForMatch(rawSku);
-    if (!skuKey) continue;
-    if (!bySku.has(skuKey)) bySku.set(skuKey, []);
-    bySku.get(skuKey).push({ shortName: p.shortName, rawSku });
-  }
+  const { bySku } = buildSkuLookup(rslProducts);
+  const byTitle = buildTitleLookup(rslProducts);
 
   const lineItems = [];
   const matchedProductQtyById = new Map();
   for (const item of extractedProducts || []) {
-    const sku = cleanStr(item?.sku);
-    const inputRawSku = sku.toUpperCase().replace(/\s+/g, "");
-    const skuKey = normalizeSkuForMatch(inputRawSku);
-    const candidates = skuKey ? bySku.get(skuKey) || [] : [];
-    const matched = candidates.find((c) => c.rawSku === inputRawSku) || candidates[0] || null;
+    const skuMatch = findSkuMatch(item?.sku, bySku);
+    let matched = skuMatch.matched;
+    let titleMatched = false;
+    if (!matched) {
+      const titleMatch = findTitleMatch(item?.title, byTitle);
+      if (titleMatch?.matched) {
+        matched = titleMatch.matched;
+        titleMatched = true;
+      }
+    }
     const matchedId = cleanStrOrNull(matched?.shortName);
 
     const qtyRaw = Number(item?.quantity);
@@ -948,6 +1144,7 @@ async function buildPdfRefillDataFromBuffer(pdfBuffer) {
       sku: cleanStrOrNull(item?.sku),
       quantity,
       rslProductID: matchedId,
+      matchReason: titleMatched ? "title" : (skuMatch.skuKey ? "sku" : null),
     });
   }
 
@@ -1005,7 +1202,11 @@ function toUiNote(n) {
   };
 }
 
-function toUiPO(po, company, deliveryAddress = null) {
+function poProductKey(purchaseOrderGID, rslProductID) {
+  return `${String(purchaseOrderGID || "").trim()}::${String(rslProductID || "").trim()}`;
+}
+
+function toUiPO(po, company, deliveryAddress = null, committedByPoProduct = null, productLookup = null) {
   const rawNotes = Array.isArray(po.tbl_purchaseOrderNotes) ? po.tbl_purchaseOrderNotes : [];
   const snapshotNote = rawNotes.find((n) => cleanStr(n?.eventType) === PO_LINE_ITEMS_SNAPSHOT_EVENT) || null;
   const snapshotLineItems = parsePoLineItemsSnapshot(snapshotNote?.content);
@@ -1025,20 +1226,48 @@ function toUiPO(po, company, deliveryAddress = null) {
         displayName: l?.tlkp_rslProduct?.displayName || l?.rslProductID || null,
         sku: l?.tlkp_rslProduct?.SKU || null,
         initialQuantity: Number.isFinite(Number(l?.initialQuantity)) ? Math.max(0, Math.trunc(Number(l.initialQuantity))) : 0,
-        committedQuantity: Number.isFinite(Number(l?.committedQuantity))
-          ? Math.max(0, Math.trunc(Number(l.committedQuantity)))
-          : 0,
+        committedQuantity: Number.isFinite(
+          Number(committedByPoProduct?.get(poProductKey(po?.purchaseOrderGID, l?.rslProductID)))
+        )
+          ? Math.max(
+            0,
+            Math.trunc(Number(committedByPoProduct?.get(poProductKey(po?.purchaseOrderGID, l?.rslProductID))) || 0)
+          )
+          : Number.isFinite(Number(l?.committedQuantity))
+            ? Math.max(0, Math.trunc(Number(l.committedQuantity)))
+            : 0,
       },
     ])
   );
 
   const products = snapshotLineItems.length
     ? snapshotLineItems.map((row, idx) => {
-      const mappedId = cleanStrOrNull(row?.rslProductID);
+      const snapshotMappedId = cleanStrOrNull(row?.rslProductID);
+      let mappedId = snapshotMappedId;
+      let fallbackMatchedProduct = null;
+      const byShortName = productLookup?.byShortName instanceof Set ? productLookup.byShortName : null;
+      const snapshotMappedIdLooksUsable = Boolean(
+        mappedId && (joinMetaById.has(mappedId) || (byShortName ? byShortName.has(mappedId) : false))
+      );
+      if (!snapshotMappedIdLooksUsable) {
+        mappedId = null;
+      }
+      if (!mappedId && productLookup) {
+        const skuMatch = findSkuMatch(row?.sku, productLookup.bySku);
+        fallbackMatchedProduct = skuMatch.matched;
+        if (!fallbackMatchedProduct) {
+          fallbackMatchedProduct = findTitleMatch(row?.title, productLookup.byTitle)?.matched || null;
+        }
+        mappedId = cleanStrOrNull(fallbackMatchedProduct?.shortName);
+      }
+
       const joinMeta = mappedId ? joinMetaById.get(mappedId) : null;
       const canonicalTitle = sanitizeProductTitleText(joinMeta?.displayName);
       const fallbackTitle = sanitizeProductTitleText(row?.title) || `Line ${idx + 1}`;
-      const title = canonicalTitle || (mappedId ? mappedId : fallbackTitle);
+      const title =
+        canonicalTitle ||
+        sanitizeProductTitleText(fallbackMatchedProduct?.displayName) ||
+        (mappedId ? mappedId : fallbackTitle);
       const qtyRaw = Number(row?.quantity);
       const quantity = Number.isFinite(qtyRaw) ? Math.max(0, Math.trunc(qtyRaw)) : 0;
       const committedQuantity = Number.isFinite(Number(joinMeta?.committedQuantity))
@@ -1050,7 +1279,7 @@ function toUiPO(po, company, deliveryAddress = null) {
         shortName: mappedId || "",
         displayName: title,
         title,
-        SKU: cleanStrOrNull(row?.sku) || joinMeta?.sku || null,
+        SKU: cleanStrOrNull(row?.sku) || joinMeta?.sku || cleanStrOrNull(fallbackMatchedProduct?.SKU) || null,
         initialQuantity: quantity,
         committedQuantity,
         // keep legacy quantity for existing UI consumers
@@ -1065,7 +1294,14 @@ function toUiPO(po, company, deliveryAddress = null) {
       title: sanitizeProductTitleText(l.tlkp_rslProduct?.displayName) || l.rslProductID,
       SKU: l.tlkp_rslProduct?.SKU || null,
       initialQuantity: typeof l.initialQuantity === "number" ? l.initialQuantity : 0,
-      committedQuantity: typeof l.committedQuantity === "number" ? l.committedQuantity : 0,
+      committedQuantity: Number.isFinite(
+        Number(committedByPoProduct?.get(poProductKey(po?.purchaseOrderGID, l?.rslProductID)))
+      )
+        ? Math.max(
+          0,
+          Math.trunc(Number(committedByPoProduct?.get(poProductKey(po?.purchaseOrderGID, l?.rslProductID))) || 0)
+        )
+        : (typeof l.committedQuantity === "number" ? l.committedQuantity : 0),
       // keep legacy quantity for existing UI consumers
       quantity: typeof l.initialQuantity === "number" ? l.initialQuantity : 0,
     }));
@@ -1268,6 +1504,18 @@ export async function loader({ request }) {
 
   // default to list
   if (!intent || intent === "list") {
+    const allocationRows = await logisticsDb.tbljn_container_purchaseOrder_rslProduct.findMany({
+      select: { purchaseOrderGID: true, rslProductID: true, quantity: true },
+    });
+    const committedByPoProduct = new Map();
+    for (const row of allocationRows || []) {
+      const key = poProductKey(row?.purchaseOrderGID, row?.rslProductID);
+      if (!key || key === "::") continue;
+      const qty = Number(row?.quantity) || 0;
+      if (qty <= 0) continue;
+      committedByPoProduct.set(key, (committedByPoProduct.get(key) || 0) + qty);
+    }
+
     const rows = await logisticsDb.tbl_purchaseOrder.findMany({
       where:
         isSupplier
@@ -1318,10 +1566,23 @@ export async function loader({ request }) {
       },
     });
 
+    const rslProductsForFallback = await logisticsDb.tlkp_rslProduct.findMany({
+      select: { shortName: true, displayName: true, SKU: true },
+    });
+    const productLookup = {
+      bySku: buildSkuLookup(rslProductsForFallback).bySku,
+      byTitle: buildTitleLookup(rslProductsForFallback),
+      byShortName: new Set(
+        (rslProductsForFallback || [])
+          .map((row) => cleanStr(row?.shortName))
+          .filter(Boolean)
+      ),
+    };
+
     const purchaseOrders = rows.map((po) => {
       const company = po.tbljn_purchaseOrder_company?.[0]?.tlkp_company || null;
       const deliveryAddress = po.tlkp_deliveryAddress || null;
-      return toUiPO(po, company, deliveryAddress);
+      return toUiPO(po, company, deliveryAddress, committedByPoProduct, productLookup);
     });
 
     return json({ ok: true, purchaseOrders });
@@ -1640,34 +1901,40 @@ export async function action({ request }) {
         const rslProducts = await logisticsDb.tlkp_rslProduct.findMany({
           select: { shortName: true, displayName: true, SKU: true },
         });
-
-        const bySku = new Map();
-        const skuCounts = new Map();
-        for (const p of rslProducts || []) {
-          const rawSku = cleanStr(p?.SKU).toUpperCase().replace(/\s+/g, "");
-          const skuKey = normalizeSkuForMatch(rawSku);
-          if (!skuKey) continue;
-          skuCounts.set(skuKey, (skuCounts.get(skuKey) || 0) + 1);
-          if (!bySku.has(skuKey)) bySku.set(skuKey, []);
-          bySku.get(skuKey).push({ product: p, rawSku });
-        }
+        const { bySku, skuCounts } = buildSkuLookup(rslProducts);
+        const byTitle = buildTitleLookup(rslProducts);
 
         const analyzedProducts = extractedProducts.map((item) => {
           const sku = cleanStr(item?.sku);
-          const normalizedInputSku = sku.toUpperCase().replace(/\s+/g, "");
-          const skuKey = normalizeSkuForMatch(normalizedInputSku);
-          const skuMatches = skuKey ? bySku.get(skuKey) || [] : [];
-          const matchedEntry = skuMatches.find((m) => m.rawSku === normalizedInputSku) || skuMatches[0] || null;
-          const matched = matchedEntry?.product || null;
+          const skuMatch = findSkuMatch(sku, bySku);
+          const skuKey = skuMatch.skuKey;
+          const normalizedInputSku = skuMatch.normalizedInputSku;
+          const matchedEntry = skuMatch.matchedEntry;
+          let matched = skuMatch.matched;
+          let matchedByTitle = false;
+          let matchedByTitleDuplicate = false;
+          if (!matched) {
+            const titleMatch = findTitleMatch(item?.title, byTitle);
+            if (titleMatch?.matched) {
+              matched = titleMatch.matched;
+              matchedByTitle = true;
+              matchedByTitleDuplicate = Boolean(titleMatch.duplicate);
+            }
+          }
           let matchReasonCode = null;
           let matchReason = null;
-          if (!matched) {
+          if (matchedByTitle) {
+            matchReasonCode = matchedByTitleDuplicate ? "matched-title-duplicate" : "matched-title";
+            matchReason = matchedByTitleDuplicate
+              ? `Matched by title "${cleanStr(item?.title)}" (multiple title matches; first match was used).`
+              : `Matched by title "${cleanStr(item?.title)}".`;
+          } else if (!matched) {
             if (!skuKey) {
               matchReasonCode = "no-sku-skip";
-              matchReason = "No SKU was found on this PO line; matching was skipped.";
+              matchReason = `No SKU was found and title "${cleanStr(item?.title)}" did not match tlkp_rslProduct.`;
             } else {
               matchReasonCode = "sku-not-found";
-              matchReason = `SKU "${sku}" was not found in tlkp_rslProduct.`;
+              matchReason = `SKU "${sku}" was not found in tlkp_rslProduct and title "${cleanStr(item?.title)}" did not match.`;
             }
           } else if (matchedEntry?.rawSku !== normalizedInputSku) {
             matchReasonCode = "matched-ignore-7th";
@@ -1778,6 +2045,10 @@ export async function action({ request }) {
       const unresolvedSkuRows = extractUnresolvedProductsForSkuFallback(purchaseOrder);
       if (unresolvedSkuRows.length) {
         await addSkuFallbackMatchesIntoSelection(selectedProductQtyById, unresolvedSkuRows);
+      }
+      const unresolvedTitleRows = extractUnresolvedProductsForTitleFallback(purchaseOrder);
+      if (unresolvedTitleRows.length) {
+        await addTitleFallbackMatchesIntoSelection(selectedProductQtyById, unresolvedTitleRows);
       }
       const selectedProductIDs = uniqStrings([
         ...extractSelectedProductIDs(purchaseOrder),
@@ -2448,7 +2719,8 @@ export async function action({ request }) {
       }
 
       await logisticsDb.$transaction(async (tx) => {
-        await tx.tbljn_shipment_purchaseOrder.deleteMany({ where: { purchaseOrderGID } });
+        await tx.tbljn_container_purchaseOrder.deleteMany({ where: { purchaseOrderGID } });
+        await tx.tbljn_container_purchaseOrder_rslProduct.deleteMany({ where: { purchaseOrderGID } });
         await tx.tbljn_purchaseOrder_company.deleteMany({ where: { purchaseOrderGID } });
         await tx.tbljn_purchaseOrder_rslProduct.deleteMany({ where: { purchaseOrderGID } });
         await tx.tbl_purchaseOrderNotes.deleteMany({ where: { purchaseOrderGID } });

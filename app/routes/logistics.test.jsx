@@ -4,7 +4,7 @@ import { useLoaderData } from "@remix-run/react";
 import { logisticsDb } from "~/logistics-db.server";
 
 export async function loader() {
-  const shipments = await logisticsDb.tbl_shipment.findMany({
+  const shipments = await logisticsDb.tbl_container.findMany({
     take: 5,
     orderBy: { id: "desc" },
   });

@@ -7,6 +7,8 @@
     "start": "remix-serve ./build/server/index.js",
     "start:prod": "cross-env NODE_ENV=production REMIX_DEV_ORIGIN= REMIX_DEV_SERVER_WS_PORT= remix-serve ./build/server/index.js",
     "docker-start": "remix-serve ./build/server/index.js",
+    "db:reconcile-po-committed": "node scripts/reconcile-po-committed-quantity.mjs",
+    "db:reconcile-po-committed:apply": "node scripts/reconcile-po-committed-quantity.mjs --apply",
     "setup": "prisma generate && prisma migrate deploy",
     "postinstall": "npx --yes prisma generate --schema=prisma/schema.prisma"
   },
